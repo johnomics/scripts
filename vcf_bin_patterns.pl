@@ -28,7 +28,7 @@ my %calls = (
 sub process {
     my ( $scf_vcf_ref, $sample_names_ref, $data_ref, $parent_string ) = @_;
 
-    my $bin_size = 10000;
+    my $bin_size = 5000;
     my $bin_max  = $bin_size;
     my %bin;
     my $scaffold;
