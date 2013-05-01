@@ -5,30 +5,6 @@ using GZip
 import Base.start, Base.done, Base.next
 
 
-type VCFReader
-    v::IO
-    VCFReader(filename::String)=new(gzopen(filename))
-end
-
-function start(vcf::VCFReader)
-    readline(vcf.v)
-    return 0
-end
-
-next(vcf::VCFReader, snps)=readline(vcf.v),snps
-
-done(vcf::VCFReader,snps) = eof(vcf.v)
-
-type Scaffold
-    name::String
-    snps::Vector{String}
-    Scaffold(scf::String)=new(scf,String[])
-    Scaffold()=Scaffold("")
-end
-
-function processScaffold(scf::Scaffold)
-    return length(scf.snps)
-end
 
 function main(args)
     s=ArgParseSettings("Scaffold genome sequence from genetic marker information\n")
@@ -38,45 +14,49 @@ function main(args)
             arg_type = Int
             default = 1
             help = "Number of processors"
+        "--maxsnps", "-m"
+            arg_type = Int
+            default = 0
+            help = "Maximum SNPs to process"
         "filename"
             arg_type = String
             required = true
             help = "VCF file containing marker SNPs"
-
     end
     
     parsed_args = parse_args(args, s)
     filename = parsed_args["filename"]
-    nprocs = parsed_args["procs"]
-
-    addprocs(nprocs-1)
-    vcf = VCFReader(filename)
-    snps = 0
-    scf = Scaffold()
-    scfrefs = Dict{String,Int}()
-
-    for (snp) in vcf
-        if (ismatch(r"^#", snp)) continue end
-        snps += 1
-        snpscf = split(snp,"\t")[1]
-        if (snpscf != scf.name )
-            if (scf.name != "")
-                scfrefs[scf.name] = processScaffold(scf)
-            end
-            scf=Scaffold(snpscf)
-        end
-        push!(scf.snps,snp)
-        if (snps %  10000 == 0)
-            print(".")
-        end
-        if (snps % 100000 == 0)
-            println(snps)
-        end
-    end
+    np = parsed_args["procs"]
+    maxsnps = parsed_args["maxsnps"]
     
-    for (scf) in sort(keys(scfrefs))
-        println("$scf\t$(scfrefs[scf])")
-    end
+    addprocs(np-1)
+    
+    # Require has to be run after all processors are added
+    require("/whale-data/jd626/scripts/vcf.jl")
+    
+    snps = 0
+    
+    # Process header
+    g = Genome(filename,np)
+    outputScaffolds(g)
+    println(length(g))
 end
+
+#    curproc = 1
+#    for snp in eachline(vcf)
+#        if ismatch(r"^#", snp)
+#            continue
+#        end
+#        r[curproc] = @spawnat curproc push!(lines,snp)
+#        curproc+=1
+#        if curproc > np curproc = 1 end
+#        snps +=1
+#        if maxsnps > 0 && maxsnps <= snps
+#            break
+#        end
+#        if snps % 1000 == 0 print('.') end
+#        if snps % 10000 == 0 print("$snps\n") end
+#    end
+#end
 
 main(ARGS)
