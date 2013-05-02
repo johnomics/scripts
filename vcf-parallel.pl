@@ -1,9 +1,7 @@
 #!/usr/bin/env perl
 
 # vcf-parallel.pl
-#
-# Author: John Davey john.davey@ed.ac.uk
-# Begun 01/02/13 based on convert_vcf_to_joinmap.pl
+# John Davey johnomics@gmail.com
 
 use strict;
 use warnings;
@@ -15,185 +13,282 @@ use Data::Dumper;
 
 use Parallel::ForkManager;
 
-# Autoflush output so reporting on progress works
-$| = 1;
+$OUTPUT_AUTOFLUSH = 1;
 
-my $vcf_filename     = "";
-my $vcf_subs         = "";
-my $threads          = 1;
-my $max_scf          = 0;
-my $output_prefix    = "vcf-parallel-output";
-my $parent_string    = "";
-my $lengths_filename = "";
-my $by_scaffold      = 0;
+my %args;
+
+$args{vcf_filename}     = "";
+$args{vcf_subs}         = "";
+$args{threads}          = 1;
+$args{output_prefix}    = "vcf-parallel-output";
+$args{parents}          = "";
+$args{lengths_filename} = "";
+$args{byscf}            = 0;
+$args{max_scf}          = 0;
 
 my $options_okay = GetOptions(
-    'vcf=s'      => \$vcf_filename,
-    'script=s'   => \$vcf_subs,
-    'threads=i'  => \$threads,
-    'max_scf=i'  => \$max_scf,
-    'output=s'   => \$output_prefix,
-    'parents=s'  => \$parent_string,
-    'lengths=s'  => \$lengths_filename,
-    'byscaffold' => \$by_scaffold,
+    'vcf=s'      => \$args{vcf_filename},
+    'script=s'   => \$args{vcf_subs},
+    'threads=i'  => \$args{threads},
+    'output=s'   => \$args{output_prefix},
+    'parents=s'  => \$args{parents},
+    'lengths=s'  => \$args{lengths_filename},
+    'byscaffold' => \$args{by_scaffold},
+    'max_scf=i'  => \$args{max_scf},
 );
-croak "No VCF file! Please specify -v $OS_ERROR\n" if ( $vcf_filename eq "" );
-croak
-"No processing script! Please specify -s with process, merge and output subroutines $OS_ERROR\n"
-  if ( $vcf_subs eq "" );
+croak "No VCF file! Please specify -v $OS_ERROR\n"
+  if ( $args{vcf_filename} eq "" );
 
-require $vcf_subs;
-
-my %scflen;
-my @scf;
-my $genome_length = 0;
-
-open my $vcf_file, '<', $vcf_filename
-  or croak "Can't open $vcf_filename $OS_ERROR!\n";
-
-# Parse VCF header
-my $vcf_line = <$vcf_file>;
-while ( $vcf_line !~ /^#CHROM/ ) {
-    if ( $vcf_line =~ /^##contig=<ID=(.+),length=(\d+)>$/ ) {
-        push @scf, $1;
-        $scflen{$1} = $2;
-        $genome_length += $2;
+if ( $args{vcf_subs} eq "" ) {
+    print STDERR "No script file given with -s, so will count lines in file\n";
+    sub process {
+        my ( $line, $samples, $data, $parents ) = @_;
+        $data->{lines}++;
     }
-    $vcf_line = <$vcf_file>;
+
+    sub merge {
+        my ( $part, $all ) = @_;
+        return if !defined $part;
+
+        $all->{lines} += $part->{lines};
+    }
+
+    sub output {
+        my ( $data, $genome, $outfix ) = @_;
+
+        print "$data->{lines} lines in VCF file\n";
+    }
+}
+else {
+    require( $args{vcf_subs} );
 }
 
-if ( $genome_length == 0 ) {
 
-    if ( $lengths_filename ne "" ) {
-        open my $lengths_file, "<", $lengths_filename
-          or croak
-"No scaffold lengths in VCF header and can't open scaffold lengths file $lengths_filename! $OS_ERROR\n";
-        while ( my $scflen = <$lengths_file> ) {
-            chomp $scflen;
-            my ( $scf, $len ) = split /\t/, $scflen;
-            push @scf, $scf;
-            $scflen{$scf} = $len;
-            $genome_length += $len;
+my $genome = load_genome( \%args );
+
+my @sample_names = get_sample_names( $args{vcf_filename} );
+
+$genome->{scfp} = get_partitions( $genome, $args{threads} );
+
+print_partitions( $genome->{scfp}, $genome->{scfl} );
+
+output( parse_vcf( $genome, \@sample_names, \%args ),
+    $genome, $args{output_prefix} );
+
+
+sub parse_vcf {
+    my ( $genome, $sampleref, $argref ) = @_;
+    my %data;
+
+    my $part_pm = new Parallel::ForkManager( $argref->{threads} );
+    $part_pm->set_max_procs( $argref->{threads} );
+
+    $part_pm->run_on_finish(
+        sub {
+            merge( pop, \%data );
         }
-        close $lengths_file;
-        if ( $genome_length == 0 ) {
-            croak
-"No scaffold length information! Add scaffold lengths to VCF header or provide a scaffold lengths file with -l\n";
-        }
+    );
+
+    foreach my $part ( 1 .. $argref->{threads} ) {
+        $part_pm->start($part) and next;
+
+        my ( $partdata, $scfi ) =
+          run_part( $part, $genome, $sampleref, $argref );
+
+        print STDERR "$part:Done, processed $scfi scaffolds of " .
+          keys( %{ $genome->{scfp}{$part} } ) . "\n";
+        $part_pm->finish( 0, $partdata );
     }
-    else {
-        croak
-"No scaffold lengths in VCF header and no scaffold lengths file given. Please specify -l\n";
-    }
+    $part_pm->wait_all_children;
+
+    \%data;
 }
 
-# Last header line is the field names, including sample names
-chomp $vcf_line;
-my @sample_names = split /\t/, $vcf_line;
-for my $i ( 0 .. 8 ) { shift @sample_names; }
+sub run_part {
+    my ( $part, $genome, $sampleref, $argref ) = @_;
 
-close $vcf_file;
+    open my $vcf_file, '<', $argref->{vcf_filename}
+      or croak "Can't open $argref->{vcf_filename} $OS_ERROR!\n";
 
-my %scf_partition;
-my $partition      = 1;
-my $threshold      = $genome_length / $threads;
-my $partition_size = 0;
-map {
-    $scf_partition{$partition}{$_}++;
-    $partition_size += $scflen{$_};
-    if ( $partition_size > $threshold ) {
-        $partition_size = 0;
-        $partition++;
+    # Skip header
+    while (<$vcf_file>) {
+        last if (/^#CHROM/);
     }
-} @scf;
 
-my $genome_scf   = 0;
-my $gen_part_len = 0;
-foreach my $partition ( sort { $a <=> $b } keys %scf_partition ) {
-    my $partlen = 0;
-    my $numscf  = keys %{ $scf_partition{$partition} };
-    foreach my $scf ( keys %{ $scf_partition{$partition} } ) {
-        $partlen += $scflen{$scf};
-    }
-    print STDERR "$partition\t$numscf\t$partlen\n";
-    $genome_scf   += $numscf;
-    $gen_part_len += $partlen;
-}
-
-print STDERR "Genome\t$genome_scf\t$gen_part_len\n";
-
-my %final_data;
-
-my $partition_pm = new Parallel::ForkManager($threads);
-$partition_pm->set_max_procs($threads);
-
-$partition_pm->run_on_finish(
-    sub {
-        my ( $pid, $exit_code, $ident, $exit_signal, $core_dump, $data_ref ) =
-          @_;
-        merge( $data_ref, \%final_data );
-    }
-);
-
-foreach my $partition ( 1 .. $threads ) {
-    $partition_pm->start($partition) and next;
-
-    open my $vcf_file, '<', $vcf_filename
-      or croak "Can't open $vcf_filename $OS_ERROR!\n";
-
-    my $cur_scf    = "";
-    my $scf_count  = 0;
-    my $part_start = 0;
+    my $curscf    = "";
+    my $scfi      = 0;
+    my $foundpart = 0;
 
     my %data;
     my @scf_vcf;
 
     while ( my $vcf_line = <$vcf_file> ) {
-        next if ( $vcf_line =~ /^#/ );
-        last if ( ( $max_scf > 0 ) && ( $scf_count >= $max_scf ) );
-        my $scf = "";
-        if ( $vcf_line =~ /^(.+?)\t/ ) {
-            $scf = $1;
-        }
-        if ( defined $scf_partition{$partition}{$scf} ) {
-            $part_start = 1;
-            if ( $cur_scf ne $scf ) {
-                $cur_scf = $scf;
-                $scf_count++;
-                if ( $scf_count % 10 == 0 ) {
-                    my $scfs_remaining =
-                      keys( %{ $scf_partition{$partition} } ) - $scf_count;
-                    printf STDERR
-                      "%3d:%4d scaffolds processed, %4d remaining\n",
-                      $partition, $scf_count, $scfs_remaining;
-                }
-                if (($by_scaffold) && (@scf_vcf > 0)) {
-                    process( \@scf_vcf, \@sample_names, \%data,
-                        $parent_string );
-                        @scf_vcf = ();
+        last if ( $argref->{max_scf} && $scfi >= $argref->{max_scf} );
+        my $scf = $vcf_line =~ /^(.+?)\t/ ? $1 : "";
+
+        if ( defined $genome->{scfp}{$part}{$scf} ) {
+            $foundpart = 1;
+
+            if ( $curscf ne $scf ) {
+                $curscf = $scf;
+                $scfi++;
+
+                print_part_progress( $scfi, $part, $genome->{scfp} )
+                  if ( $scfi % 10 == 0 );
+
+                if ( $argref->{byscf} && @scf_vcf ) {
+                    process( \@scf_vcf, $sampleref, \%data,
+                        $argref->{parents} );
+                    @scf_vcf = ();
                 }
             }
-            if ( $by_scaffold ) {
-                push @scf_vcf, $vcf_line;
-            }
-            else {
-                process( $vcf_line, \@sample_names, \%data, $parent_string );
-            }
+            $argref->{byscf}
+              ? push @scf_vcf, $vcf_line
+              : process( $vcf_line, $sampleref, \%data, $argref->{parents} );
         }
         else {
-            last if ($part_start);
+            last if ($foundpart);
         }
     }
-    if ($by_scaffold) {
-        process (\@scf_vcf, \@sample_names, \%data, $parent_string);
-    }
+    process( \@scf_vcf, $sampleref, \%data, $argref->{parents} )
+      if $argref->{byscf};
     close $vcf_file;
-    print STDERR "$partition:Done, processed $scf_count scaffolds of " .
-      keys( %{ $scf_partition{$partition} } ) . "\n";
-    $partition_pm->finish( 0, \%data );
+    return ( \%data, $scfi );
 }
 
-$partition_pm->wait_all_children;
+sub print_part_progress {
+    my ( $scfi, $part, $scfpref ) = @_;
 
-output( \%final_data, \%scflen, \@sample_names,
-    $genome_length, $output_prefix );
+    printf STDERR "%3d:%4d scaffolds processed, %4d remaining\n",
+      $part, $scfi, keys( %{ $scfpref->{$part} } ) - $scfi;
+
+}
+
+sub print_partitions {
+    my ( $scfpref, $scflref ) = @_;
+
+    my $genscf   = 0;
+    my $genpartl = 0;
+    print STDERR "Part\tScaffolds\tLength\n";
+    foreach my $part ( sort { $a <=> $b } keys %{$scfpref} ) {
+        my $partl  = 0;
+        my $numscf = keys %{ $scfpref->{$part} };
+        foreach my $scf ( keys %{ $scfpref->{$part} } ) {
+            $partl += $scflref->{$scf};
+        }
+        print STDERR "$part\t$numscf\t$partl\n";
+        $genscf   += $numscf;
+        $genpartl += $partl;
+    }
+
+    print STDERR "Genome\t$genscf\t$genpartl\n";
+    return;
+}
+
+sub get_partitions {
+    my ( $genome, $threads ) = @_;
+
+    my %scfp;
+    my $part      = 1;
+    my $threshold = $genome->{length} / $threads;
+    my $part_size = 0;
+    for my $scf ( @{ $genome->{scf} } ) {
+        $scfp{$part}{$scf}++;
+        $part_size += $genome->{scfl}{$scf};
+        if ( $part_size > $threshold ) {
+            $part_size = 0;
+            $part++;
+        }
+    }
+    return \%scfp;
+}
+
+sub get_sample_names {
+    my $vcf_filename = shift;
+
+    open my $vcf_file, '<', $vcf_filename
+      or croak "Can't open VCF file $vcf_filename! $OS_ERROR\n";
+
+    my @samples;
+
+    my $vcf_line;
+    while ( $vcf_line = <$vcf_file> ) {
+        if ( $vcf_line =~ /^#CHROM/ ) {
+            last;
+        }
+    }
+    close $vcf_file;
+
+    chomp $vcf_line;
+    my @sample_names = split /\t/, $vcf_line;
+    for my $i ( 0 .. 8 ) { shift @sample_names }
+
+    return @sample_names;
+
+}
+
+sub load_genome {
+    my $argref = shift;
+
+    my @scflines =
+         parse_vcf_header( $argref->{vcf_filename} )
+      or load_lengths( $argref->{lengths_filename} )
+      or croak
+      "No scaffold lengths in VCF header or scaffold lengths file (-l)\n";
+    return load_scflen(@scflines);
+}
+
+sub load_scflen {
+    my @scflines = @_;
+
+    my %scfl;
+    my @scf;
+    my $genl = 0;
+    foreach my $scfline (@scflines) {
+        my ( $scf, $len ) = split /\t/, $scfline;
+        $scfl{$scf} = $len;
+        push @scf, $scf;
+        $genl += $len;
+    }
+    { scfl => \%scfl, scf => \@scf, length => $genl };
+}
+
+sub parse_vcf_header {
+    my $vcf_filename = shift;
+    open my $vcf_file, '<', $vcf_filename
+      or croak "Can't open VCF file $vcf_filename! $OS_ERROR\n";
+
+    my @scflines;
+    my $vcf_line = <$vcf_file>;
+    while ( $vcf_line !~ /^#CHROM/ ) {
+        if ( $vcf_line =~ /^##contig=<ID=(.+),length=(\d+)>$/ ) {
+            push @scflines, "$1\t$2";
+        }
+        $vcf_line = <$vcf_file>;
+    }
+    close $vcf_file;
+
+    @scflines;
+}
+
+sub load_lengths {
+    my $lengths_filename = shift;
+
+    my @scflines;
+
+    return @scflines if ( $lengths_filename eq "" );
+
+    open my $lengths_file, "<", $lengths_filename
+      or croak
+      "Can't open scaffold lengths file $lengths_filename! $OS_ERROR\n";
+
+    while ( my $scf_line = <$lengths_file> ) {
+        if ( $scf_line =~ /^(.+)\t(.+)$/ ) {
+            push @scflines, "$1\t$2";
+        }
+    }
+    close $lengths_file;
+
+    @scflines;
+}
+
