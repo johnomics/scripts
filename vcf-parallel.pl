@@ -21,28 +21,33 @@ $args{vcf_filename}     = "";
 $args{vcf_subs}         = "";
 $args{threads}          = 1;
 $args{output_prefix}    = "vcf-parallel-output";
-$args{parents}          = "";
+$args{genetics}         = "";
 $args{lengths_filename} = "";
 $args{byscf}            = 0;
-$args{max_scf}          = 0;
+$args{maxscf}           = 0;
 
 my $options_okay = GetOptions(
     'vcf=s'      => \$args{vcf_filename},
     'script=s'   => \$args{vcf_subs},
     'threads=i'  => \$args{threads},
     'output=s'   => \$args{output_prefix},
-    'parents=s'  => \$args{parents},
+    'genetics=s' => \$args{genetics},
     'lengths=s'  => \$args{lengths_filename},
-    'byscaffold' => \$args{by_scaffold},
-    'max_scf=i'  => \$args{max_scf},
+    'byscaffold' => \$args{byscf},
+    'maxscf=i'   => \$args{maxscf},
 );
 croak "No VCF file! Please specify -v $OS_ERROR\n"
   if ( $args{vcf_filename} eq "" );
 
+croak
+"No genetics file! Please specify -g to define parents, poor quality individuals and marker types\n"
+  if ( $args{genetics} eq "" );
+
 if ( $args{vcf_subs} eq "" ) {
     print STDERR "No script file given with -s, so will count lines in file\n";
+
     sub process {
-        my ( $line, $samples, $data, $parents ) = @_;
+        my ( $line, $samples, $data, $genetics ) = @_;
         $data->{lines}++;
     }
 
@@ -63,21 +68,56 @@ else {
     require( $args{vcf_subs} );
 }
 
+my $genetics = load_genetics( $args{genetics} );
 
 my $genome = load_genome( \%args );
 
-my @sample_names = get_sample_names( $args{vcf_filename} );
+my $samples = get_samples( $args{vcf_filename}, $genetics->{parents} );
 
 $genome->{scfp} = get_partitions( $genome, $args{threads} );
 
 print_partitions( $genome->{scfp}, $genome->{scfl} );
 
-output( parse_vcf( $genome, \@sample_names, \%args ),
+output( parse_vcf( $genome, $samples, $genetics, \%args ),
     $genome, $args{output_prefix} );
 
+sub load_genetics {
+    my $geneticsfilename = shift;
+
+    my %genetics;
+
+    open my $geneticsfile, "<", $geneticsfilename
+      or croak "Can't open marker type file $geneticsfilename: $OS_ERROR\n";
+
+    my $infoline;
+    while ( $infoline = <$geneticsfile> ) {
+        chomp $infoline;
+        last if ( $infoline =~ /^Type/ );
+        my ( $ignore, $ind ) = split /\t/, $infoline;
+        $genetics{ignore}{$ind} = 0;
+    }
+    my ( $t, $rhom, $het, $ahom, @parents ) = split /\t/, $infoline;
+
+    $genetics{parents} = \@parents;
+
+    while ( my $marker_type = <$geneticsfile> ) {
+        chomp $marker_type;
+        my ( $type, $refhom, $het, $althom, @parentcalls ) = split /\t/,
+          $marker_type;
+        my $parentcall = join " ", @parentcalls;
+        $genetics{types}{$parentcall}{type}  = $type;
+        $genetics{types}{$parentcall}{"0/0"} = $refhom;
+        $genetics{types}{$parentcall}{"0/1"} = $het;
+        $genetics{types}{$parentcall}{"1/1"} = $althom;
+    }
+
+    close $geneticsfile;
+
+    \%genetics;
+}
 
 sub parse_vcf {
-    my ( $genome, $sampleref, $argref ) = @_;
+    my ( $genome, $samples, $genetics, $argref ) = @_;
     my %data;
 
     my $part_pm = new Parallel::ForkManager( $argref->{threads} );
@@ -93,7 +133,7 @@ sub parse_vcf {
         $part_pm->start($part) and next;
 
         my ( $partdata, $scfi ) =
-          run_part( $part, $genome, $sampleref, $argref );
+          run_part( $part, $genome, $samples, $genetics, $argref );
 
         print STDERR "$part:Done, processed $scfi scaffolds of " .
           keys( %{ $genome->{scfp}{$part} } ) . "\n";
@@ -105,7 +145,7 @@ sub parse_vcf {
 }
 
 sub run_part {
-    my ( $part, $genome, $sampleref, $argref ) = @_;
+    my ( $part, $genome, $samples, $genetics, $argref ) = @_;
 
     open my $vcf_file, '<', $argref->{vcf_filename}
       or croak "Can't open $argref->{vcf_filename} $OS_ERROR!\n";
@@ -123,7 +163,7 @@ sub run_part {
     my @scf_vcf;
 
     while ( my $vcf_line = <$vcf_file> ) {
-        last if ( $argref->{max_scf} && $scfi >= $argref->{max_scf} );
+        last if ( $argref->{maxscf} && $scfi >= $argref->{maxscf} );
         my $scf = $vcf_line =~ /^(.+?)\t/ ? $1 : "";
 
         if ( defined $genome->{scfp}{$part}{$scf} ) {
@@ -137,20 +177,19 @@ sub run_part {
                   if ( $scfi % 10 == 0 );
 
                 if ( $argref->{byscf} && @scf_vcf ) {
-                    process( \@scf_vcf, $sampleref, \%data,
-                        $argref->{parents} );
+                    process( \@scf_vcf, $samples, \%data, $genetics );
                     @scf_vcf = ();
                 }
             }
             $argref->{byscf}
               ? push @scf_vcf, $vcf_line
-              : process( $vcf_line, $sampleref, \%data, $argref->{parents} );
+              : process( $vcf_line, $samples, \%data, $genetics );
         }
         else {
             last if ($foundpart);
         }
     }
-    process( \@scf_vcf, $sampleref, \%data, $argref->{parents} )
+    process( \@scf_vcf, $samples, \%data, $genetics )
       if $argref->{byscf};
     close $vcf_file;
     return ( \%data, $scfi );
@@ -203,13 +242,17 @@ sub get_partitions {
     return \%scfp;
 }
 
-sub get_sample_names {
+sub get_samples {
     my $vcf_filename = shift;
+    my $parentref    = shift;
+
+    my %parents;
+    map { $parents{$_} = 0 } @{$parentref};
 
     open my $vcf_file, '<', $vcf_filename
       or croak "Can't open VCF file $vcf_filename! $OS_ERROR\n";
 
-    my @samples;
+    my %samples;
 
     my $vcf_line;
     while ( $vcf_line = <$vcf_file> ) {
@@ -221,10 +264,17 @@ sub get_sample_names {
 
     chomp $vcf_line;
     my @sample_names = split /\t/, $vcf_line;
-    for my $i ( 0 .. 8 ) { shift @sample_names }
+    map {
+        if (defined $parents{$sample_names[$_]}) {
+            $samples{parents}{$sample_names[$_]} = $_
+        }
+        else {
+            $samples{offspring}{lookup}{$sample_names[$_]} = $_;
+            push @{$samples{offspring}{order}}, $sample_names[$_];
+        }
+    } 9 .. $#sample_names;
 
-    return @sample_names;
-
+    \%samples;
 }
 
 sub load_genome {
