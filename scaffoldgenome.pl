@@ -168,10 +168,10 @@ sub get_sample_blocks {
 
         $marker->{ $called[$i] }{marker}{$sample}{edge} = int sum map {
 
-            #            $marker->{ $maskcallpos[$_] }{$sample}{gt} * $mask[$_]
-            ( $marker->{ $maskcallpos[$_] }{marker}{$sample}{gt} *
-                  $marker->{ $maskcallpos[$_] }{marker}{$sample}{gq} ) / 100 *
-              $mask[$_]
+                        $marker->{ $maskcallpos[$_] }{marker}{$sample}{gt} * $mask[$_]
+#            ( $marker->{ $maskcallpos[$_] }{marker}{$sample}{gt} *
+#                  $marker->{ $maskcallpos[$_] }{marker}{$sample}{gq} ) / 100 *
+#              $mask[$_]
         } 0 .. $#mask;
 
 #        print "$sample\t$marker->{$called[$i]}{$sample}{edge} --------------------------------------------------------\n";
