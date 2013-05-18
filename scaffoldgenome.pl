@@ -15,6 +15,7 @@ sub process {
     $data->{$scf} = get_markers( $scfref, $samples, $genetics );
     find_edges( $data->{$scf}, $samples );
     collapse( $data->{$scf}, $samples );
+    output_scf_to_file($scf, $data->{$scf});
 }
 
 sub collapse {
@@ -220,21 +221,22 @@ sub calculate_consensus {
 sub merge {
     my ( $part, $all ) = @_;
     foreach my $scf ( keys %{$part} ) {
-        foreach my $type ( keys %{ $part->{$scf} } ) {
-            foreach my $pos ( keys %{ $part->{$scf}{$type} } ) {
-                $all->{scf}{$scf}{$type}{$pos}{parent} =
-                  $part->{$scf}{$type}{$pos}{parent};
-                $all->{scf}{$scf}{$type}{$pos}{marker}{gt} =
-                  $part->{$scf}{$type}{$pos}{marker}{gt};
-                $all->{scf}{$scf}{$type}{$pos}{marker}{edge} =
-                  $part->{$scf}{$type}{$pos}{marker}{edge};
-                $all->{scf}{$scf}{$type}{$pos}{marker}{cons} =
-                  $part->{$scf}{$type}{$pos}{marker}{cons};
-                foreach my $gq ( @{ $part->{$scf}{$type}{$pos}{marker}{gq} } ) {
-                    push @{ $all->{scf}{$scf}{$type}{$pos}{marker}{gq} }, $gq;
-                }
-            }
-        }
+        $all->{scf}{$scf}++;
+#        foreach my $type ( keys %{ $part->{$scf} } ) {
+#            foreach my $pos ( keys %{ $part->{$scf}{$type} } ) {
+#                $all->{scf}{$scf}{$type}{$pos}{parent} =
+#                  $part->{$scf}{$type}{$pos}{parent};
+#                $all->{scf}{$scf}{$type}{$pos}{marker}{gt} =
+#                  $part->{$scf}{$type}{$pos}{marker}{gt};
+#                $all->{scf}{$scf}{$type}{$pos}{marker}{edge} =
+#                  $part->{$scf}{$type}{$pos}{marker}{edge};
+#                $all->{scf}{$scf}{$type}{$pos}{marker}{cons} =
+#                  $part->{$scf}{$type}{$pos}{marker}{cons};
+#                foreach my $gq ( @{ $part->{$scf}{$type}{$pos}{marker}{gq} } ) {
+#                    push @{ $all->{scf}{$scf}{$type}{$pos}{marker}{gq} }, $gq;
+#                }
+#            }
+#        }
     }
 }
 
@@ -242,49 +244,59 @@ sub output {
     my ( $data, $samples, $genome, $outfix ) = @_;
     print STDERR "Outputting...\n";
 
+    open my $allout, '>', "$outfix.out" or croak "Can't open $outfix.out: $OS_ERROR\n";
     foreach my $scf ( sort keys %{ $data->{scf} } ) {
-        foreach my $type ( sort keys %{ $data->{scf}{$scf} } ) {
-            foreach
-              my $pos ( sort { $a <=> $b } keys %{ $data->{scf}{$scf}{$type} } )
-            {
-
-                print "$scf\t$pos\t$type\t";
-                my @gt = split //, $data->{scf}{$scf}{$type}{$pos}{marker}{gt};
-                foreach my $i ( 0 .. $#gt ) {
-                    my $col =
-                      ceil( 255 -
-                          $data->{scf}{$scf}{$type}{$pos}{marker}{gq}[$i] /
-                          4.2 );
-                    print fg $col, $gt[$i];
-                }
-                print "\t";
-
-                my @edge = split //,
-                  $data->{scf}{$scf}{$type}{$pos}{marker}{edge};
-                my @cons = split //,
-                  $data->{scf}{$scf}{$type}{$pos}{marker}{cons};
-                my $cons = "";
-                foreach my $e ( 0 .. $#edge ) {
-                    my $col = $edge[$e] > $masklen ? 'red1' : 'black';
-                    print fg $col, $edge[$e];
-                    $cons .= fg $col, $cons[$e];
-                }
-                print "\t$cons\n";
-            }
-            print '-' x 253, "\n";
+        open my $scffile, '<', "$scf.tmp.out" or croak "Can't open scf output for $scf: $OS_ERROR\n";
+        while (my $scfline = <$scffile>) {
+            print $allout $scfline;
         }
-        print '-' x 253, "\n";
+        close $scffile;
+        system("rm $scf.tmp.out");
     }
+    close $allout;
 }
 
-sub print_pattern {
-    my ( $pos, $field, $samples ) = @_;
-    foreach my $sample ( @{$samples} ) {
-        print $pos->{$sample}{$field} == 1 ? 'A'
-          : $pos->{$sample}{$field} == -1  ? 'B'
-          :                                  '-';
+sub output_scf_to_file {
+    my ($scf, $data) = @_;
+    open my $scfhandle, '>', "$scf.tmp.out" or croak "Can't open output file for $scf: $OS_ERROR\n";
+    output_scf ($scf, $data, $scfhandle);
+    close $scfhandle;
+}
+
+sub output_scf {
+    my ($scf, $data, $handle) = @_;
+    foreach my $type ( sort keys %{ $data } ) {
+        foreach
+          my $pos ( sort { $a <=> $b } keys %{ $data->{$type} } )
+        {
+
+            print $handle "$scf\t$pos\t$type\t";
+            my @gt = split //, $data->{$type}{$pos}{marker}{gt};
+            foreach my $i ( 0 .. $#gt ) {
+                my $col =
+                  ceil( 255 -
+                      $data->{$type}{$pos}{marker}{gq}[$i] /
+                      4.2 );
+                print $handle fg $col, $gt[$i];
+            }
+            print $handle "\t";
+
+            my @edge = split //,
+              $data->{$type}{$pos}{marker}{edge};
+            my @cons = split //,
+              $data->{$type}{$pos}{marker}{cons};
+            my $cons = "";
+            foreach my $e ( 0 .. $#edge ) {
+                my $col = $edge[$e] > $masklen ? 'red1' : 'black';
+                print $handle fg $col, $edge[$e];
+                $cons .= fg $col, $cons[$e];
+            }
+            print $handle "\t$cons\n";
+        }
+        print $handle '-' x 253, "\n";
     }
-    return;
+    print $handle '-' x 253, "\n";
+    
 }
 
 1;
