@@ -104,7 +104,7 @@ sub parse_snp {
     my @f          = split /\t/, $snp;
     my $callf      = $f[8];
     my $parentcall = join ' ',
-      map { get_cp( 'GT', $f[ $samples->{parents}{$_} ], $callf ) }
+      map { get_cp( 'GT', $f[ $samples->{parents}{lookup}{$_} ], $callf ) }
       @{ $genetics->{parents} };
 
     return ( 0, 0, 0 ) if !defined $genetics->{types}{$parentcall};
@@ -112,6 +112,7 @@ sub parse_snp {
     foreach my $sample ( @{ $samples->{offspring}{order} } ) {
         my $opos = $samples->{offspring}{lookup}{$sample};
         my $gt = get_cp( 'GT', $f[$opos], $callf );
+        $marker{$sample}{call} = $gt;
         $marker{$sample}{gt} = $genetics->{types}{$parentcall}{$gt} // 0;
         return ( 0, 0, 0 )
           if $marker{$sample}{gt} ==
@@ -167,15 +168,12 @@ sub get_sample_blocks {
         my $edgesum = 0;
 
         $marker->{ $called[$i] }{marker}{$sample}{edge} = int sum map {
+            $marker->{ $maskcallpos[$_] }{marker}{$sample}{gt} * $mask[$_]
 
-                        $marker->{ $maskcallpos[$_] }{marker}{$sample}{gt} * $mask[$_]
-#            ( $marker->{ $maskcallpos[$_] }{marker}{$sample}{gt} *
-#                  $marker->{ $maskcallpos[$_] }{marker}{$sample}{gq} ) / 100 *
-#              $mask[$_]
+ #            ( $marker->{ $maskcallpos[$_] }{marker}{$sample}{gt} *
+ #                  $marker->{ $maskcallpos[$_] }{marker}{$sample}{gq} ) / 100 *
+ #              $mask[$_]
         } 0 .. $#mask;
-
-#        print "$sample\t$marker->{$called[$i]}{$sample}{edge} --------------------------------------------------------\n";
-
     }
 }
 
@@ -183,14 +181,22 @@ sub get_block_consensus {
     my ( $marker, $sample, $pos, $masklen ) = @_;
     my @blockpos;
     foreach my $p ( @{$pos} ) {
-        push @blockpos, $p;
-        if (   @blockpos > 1
+        if (   @blockpos >= 1
             && defined $marker->{$p}{marker}{$sample}{edge}
             && abs( $marker->{$p}{marker}{$sample}{edge} ) > $masklen )
         {
+            # Don't include the edge position in the block to date;
+            # calculate the consensus for the edge block on its own,
+            # then move on to the following positions
+            calculate_consensus( \@blockpos, $marker, $sample );
+            @blockpos = ($p);
             calculate_consensus( \@blockpos, $marker, $sample );
             @blockpos = ();
         }
+        else {
+            push @blockpos, $p;
+        }
+
     }
     calculate_consensus( \@blockpos, $marker, $sample );
 }
@@ -200,9 +206,12 @@ sub calculate_consensus {
     my %blockgt;
 
     map {
-        $blockgt{ $marker->{$_}{marker}{$sample}{gt} } +=
-          $marker->{$_}{marker}{$sample}{gq}
+        $blockgt{ $marker->{$_}{marker}{$sample}{gt} }++;
+
+        #        $blockgt{ $marker->{$_}{marker}{$sample}{gt} } +=
+        #          $marker->{$_}{marker}{$sample}{gq}
     } @{$blockpos};
+
     my $maxgt = ( sort { $blockgt{$b} <=> $blockgt{$a} } keys %blockgt )[0];
     map { $marker->{$_}{marker}{$sample}{cons} = $maxgt } @{$blockpos};
     return;
@@ -233,7 +242,7 @@ sub output {
     my ( $data, $samples, $genome, $outfix ) = @_;
     print STDERR "Outputting...\n";
 
-    foreach my $scf ( sort keys %{$data->{scf}} ) {
+    foreach my $scf ( sort keys %{ $data->{scf} } ) {
         foreach my $type ( sort keys %{ $data->{scf}{$scf} } ) {
             foreach
               my $pos ( sort { $a <=> $b } keys %{ $data->{scf}{$scf}{$type} } )
@@ -242,16 +251,20 @@ sub output {
                 print "$scf\t$pos\t$type\t";
                 my @gt = split //, $data->{scf}{$scf}{$type}{$pos}{marker}{gt};
                 foreach my $i ( 0 .. $#gt ) {
-                    my $col = ceil( 255 -
-                          $data->{scf}{$scf}{$type}{$pos}{marker}{gq}[$i] / 4.2 );
+                    my $col =
+                      ceil( 255 -
+                          $data->{scf}{$scf}{$type}{$pos}{marker}{gq}[$i] /
+                          4.2 );
                     print fg $col, $gt[$i];
                 }
                 print "\t";
 
-                my @edge = split //, $data->{scf}{$scf}{$type}{$pos}{marker}{edge};
-                my @cons = split //, $data->{scf}{$scf}{$type}{$pos}{marker}{cons};
+                my @edge = split //,
+                  $data->{scf}{$scf}{$type}{$pos}{marker}{edge};
+                my @cons = split //,
+                  $data->{scf}{$scf}{$type}{$pos}{marker}{cons};
                 my $cons = "";
-                foreach my $e (0..$#edge) {
+                foreach my $e ( 0 .. $#edge ) {
                     my $col = $edge[$e] > $masklen ? 'red1' : 'black';
                     print fg $col, $edge[$e];
                     $cons .= fg $col, $cons[$e];
