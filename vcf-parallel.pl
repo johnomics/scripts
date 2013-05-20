@@ -47,14 +47,13 @@ if ( $args{vcf_subs} eq "" ) {
     print STDERR "No script file given with -s, so will count lines in file\n";
 
     sub process {
-        my ( $line, $samples, $data, $genetics ) = @_;
+        my ( $scf, $line, $samples, $data, $genetics ) = @_;
         $data->{lines}++;
     }
 
     sub merge {
         my ( $part, $all ) = @_;
         return if !defined $part;
-
         $all->{lines} += $part->{lines};
     }
 
@@ -72,14 +71,14 @@ my $genetics = load_genetics( $args{genetics} );
 
 my $genome = load_genome( \%args );
 
-my $samples = get_samples( $args{vcf_filename}, $genetics->{parents} );
+my $samples = get_samples( $args{vcf_filename}, $genetics );
 
 $genome->{scfp} = get_partitions( $genome, $args{threads} );
 
 print_partitions( $genome->{scfp}, $genome->{scfl} );
 
 output( parse_vcf( $genome, $samples, $genetics, \%args ),
-    $genome, $args{output_prefix} );
+    $samples, $genome, $args{output_prefix} );
 
 sub load_genetics {
     my $geneticsfilename = shift;
@@ -112,7 +111,6 @@ sub load_genetics {
     }
 
     close $geneticsfile;
-
     \%genetics;
 }
 
@@ -125,7 +123,12 @@ sub parse_vcf {
 
     $part_pm->run_on_finish(
         sub {
-            merge( pop, \%data );
+            my $pid = shift;
+            my $exit = shift;
+            my $part = shift;
+            my $childdata = pop;
+            merge( $childdata, \%data );
+            print STDERR "$part:Merged\n";
         }
     );
 
@@ -156,40 +159,41 @@ sub run_part {
     }
 
     my $curscf    = "";
-    my $scfi      = 0;
+    my $scfi      = 1;
     my $foundpart = 0;
 
     my %data;
     my @scf_vcf;
-
+    my $scf;
     while ( my $vcf_line = <$vcf_file> ) {
         last if ( $argref->{maxscf} && $scfi >= $argref->{maxscf} );
-        my $scf = $vcf_line =~ /^(.+?)\t/ ? $1 : "";
+        $scf = $vcf_line =~ /^(.+?)\t/ ? $1 : "";
+
+        $curscf = $scf if $curscf eq "";    # Fill curscf at the start
 
         if ( defined $genome->{scfp}{$part}{$scf} ) {
             $foundpart = 1;
 
             if ( $curscf ne $scf ) {
-                $curscf = $scf;
-                $scfi++;
-
                 print_part_progress( $scfi, $part, $genome->{scfp} )
                   if ( $scfi % 10 == 0 );
 
                 if ( $argref->{byscf} && @scf_vcf ) {
-                    process( \@scf_vcf, $samples, \%data, $genetics );
+                    process( $curscf, \@scf_vcf, $samples, \%data, $genetics );
                     @scf_vcf = ();
                 }
+                $curscf = $scf;
+                $scfi++;
             }
             $argref->{byscf}
               ? push @scf_vcf, $vcf_line
-              : process( $vcf_line, $samples, \%data, $genetics );
+              : process( $scf, $vcf_line, $samples, \%data, $genetics );
         }
         else {
             last if ($foundpart);
         }
     }
-    process( \@scf_vcf, $samples, \%data, $genetics )
+    process( $scf, \@scf_vcf, $samples, \%data, $genetics )
       if $argref->{byscf};
     close $vcf_file;
     return ( \%data, $scfi );
@@ -244,10 +248,10 @@ sub get_partitions {
 
 sub get_samples {
     my $vcf_filename = shift;
-    my $parentref    = shift;
+    my $genetics     = shift;
 
     my %parents;
-    map { $parents{$_} = 0 } @{$parentref};
+    map { $parents{$_} = 0 } @{ $genetics->{parents} };
 
     open my $vcf_file, '<', $vcf_filename
       or croak "Can't open VCF file $vcf_filename! $OS_ERROR\n";
@@ -265,12 +269,15 @@ sub get_samples {
     chomp $vcf_line;
     my @sample_names = split /\t/, $vcf_line;
     map {
-        if (defined $parents{$sample_names[$_]}) {
-            $samples{parents}{$sample_names[$_]} = $_
+        if ( defined $parents{ $sample_names[$_] } ) {
+            $samples{parents}{lookup}{ $sample_names[$_] } = $_;
+            push @{$samples{parents}{order}}, $sample_names[$_];
         }
         else {
-            $samples{offspring}{lookup}{$sample_names[$_]} = $_;
-            push @{$samples{offspring}{order}}, $sample_names[$_];
+            if ( !defined $genetics->{ignore}{ $sample_names[$_] } ) {
+                $samples{offspring}{lookup}{ $sample_names[$_] } = $_;
+                push @{ $samples{offspring}{order} }, $sample_names[$_];
+            }
         }
     } 9 .. $#sample_names;
 

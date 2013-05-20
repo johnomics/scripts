@@ -1,6 +1,12 @@
-use List::Util qw/sum max/;
+use List::Util qw/sum min max/;
 use POSIX qw/ceil/;
 use Term::ExtendedColor qw/:all/;
+
+use strict;
+use warnings;
+
+use constant MASKLEN    => 4;
+use constant ERRORBLOCK => 1000;
 
 my %callorder;
 
@@ -8,37 +14,41 @@ my %nullcall = ( 'GT' => './.', 'GQ' => 0 );
 
 my @mask;
 
-my $masklen = 4;
-
 sub process {
     my ( $scf, $scfref, $samples, $data, $genetics ) = @_;
     $data->{$scf} = get_markers( $scfref, $samples, $genetics );
     find_edges( $data->{$scf}, $samples );
     collapse( $data->{$scf}, $samples );
-    output_scf_to_file($scf, $data->{$scf});
+    output_scf_to_file( $scf, $data->{$scf} );
 }
 
 sub collapse {
     my ( $scfref, $samples ) = @_;
     foreach my $type ( keys %{$scfref} ) {
         foreach my $pos ( keys %{ $scfref->{$type} } ) {
-            my $gt   = "";
-            my $edge = "";
-            my $cons = "";
+            my $gt        = "";
+            my $edge      = "";
+            my $cons      = "";
+            my $corrected = "";
             my @gq;
             foreach my $sample ( @{ $samples->{offspring}{order} } ) {
                 my $ref = $scfref->{$type}{$pos}{marker}{$sample};
-                $edge .= $ref->{edge} != 0 ? abs( $ref->{edge} ) : '.';
+                $edge .= defined $ref->{edge} && $ref->{edge} != 0 ? abs( $ref->{edge} ) : '.';
                 $gt .= $ref->{gt} == 1 ? 'A' : $ref->{gt} == -1 ? 'B' : '-';
                 $cons .=
                   $ref->{cons} == 1 ? 'A' : $ref->{cons} == -1 ? 'B' : '-';
+                $corrected .=
+                    $ref->{corrected} == 1  ? 'A'
+                  : $ref->{corrected} == -1 ? 'B'
+                  :                           '-';
                 push @gq, $ref->{gq};
             }
             delete $scfref->{$type}{$pos}{marker};
-            $scfref->{$type}{$pos}{marker}{edge} = $edge;
-            $scfref->{$type}{$pos}{marker}{cons} = $cons;
-            $scfref->{$type}{$pos}{marker}{gt}   = $gt;
-            $scfref->{$type}{$pos}{marker}{gq}   = \@gq;
+            $scfref->{$type}{$pos}{marker}{edge}      = $edge;
+            $scfref->{$type}{$pos}{marker}{cons}      = $cons;
+            $scfref->{$type}{$pos}{marker}{corrected} = $corrected;
+            $scfref->{$type}{$pos}{marker}{gt}        = $gt;
+            $scfref->{$type}{$pos}{marker}{gq}        = \@gq;
         }
     }
 }
@@ -146,8 +156,48 @@ sub find_edges {
     foreach my $type ( keys %{$markers} ) {
         my @pos = sort { $a <=> $b } keys %{ $markers->{$type} };
         foreach my $sample ( @{ $samples->{offspring}{order} } ) {
-            get_sample_blocks( $markers->{$type}, $sample, \@pos, $masklen );
-            get_block_consensus( $markers->{$type}, $sample, \@pos, $masklen );
+            get_sample_blocks( $markers->{$type}, $sample, \@pos, MASKLEN );
+            get_block_consensus( $markers->{$type}, $sample, \@pos, MASKLEN );
+            clean_blocks( $markers->{$type}, $sample, \@pos );
+        }
+    }
+}
+
+sub clean_blocks {
+    my ( $marker, $sample, $pos ) = @_;
+
+    my $blocknum = 0;
+    my @blocks;
+    my $prev_cons;
+    for my $p ( @{$pos} ) {
+        $blocknum++
+          if ( defined $prev_cons
+            && $prev_cons ne $marker->{$p}{marker}{$sample}{cons} );
+        push @{ $blocks[$blocknum]{pos} }, $p;
+        $blocks[$blocknum]{cons} = $marker->{$p}{marker}{$sample}{cons};
+        $prev_cons = $marker->{$p}{marker}{$sample}{cons};
+    }
+
+    for my $b ( 0 .. $#blocks ) {
+        if (   @blocks >= 3
+            && $b >= 1
+            && $b <= $#blocks - 1
+            && $blocks[ $b - 1 ]{cons} eq $blocks[ $b + 1 ]{cons}
+            && $blocks[ $b - 1 ]{cons} ne $blocks[$b]{cons}
+            && (( max(@{ $blocks[$b]{pos} }) - min(@{ $blocks[$b]{pos} })) <
+            ERRORBLOCK ) || (@{$blocks[$b]{pos}} <= 5))
+        {
+            for my $p ( @{ $blocks[$b]{pos} } ) {
+                $marker->{$p}{marker}{$sample}{corrected} =
+                  $blocks[ $b - 1 ]{cons};
+            }
+            $blocks[$b]{cons} = $blocks[$b-1]{cons};
+        }
+        else {
+            for my $p ( @{ $blocks[$b]{pos} } ) {
+                $marker->{$p}{marker}{$sample}{corrected} =
+                  $marker->{$p}{marker}{$sample}{cons};
+            }
         }
     }
 }
@@ -181,15 +231,16 @@ sub get_sample_blocks {
 sub get_block_consensus {
     my ( $marker, $sample, $pos, $masklen ) = @_;
     my @blockpos;
+    my @blocks;
     foreach my $p ( @{$pos} ) {
-        if (   @blockpos >= 1
-            && defined $marker->{$p}{marker}{$sample}{edge}
+        if ( defined $marker->{$p}{marker}{$sample}{edge}
             && abs( $marker->{$p}{marker}{$sample}{edge} ) > $masklen )
         {
             # Don't include the edge position in the block to date;
             # calculate the consensus for the edge block on its own,
             # then move on to the following positions
-            calculate_consensus( \@blockpos, $marker, $sample );
+            calculate_consensus( \@blockpos, $marker, $sample )
+              if @blockpos >= 1;
             @blockpos = ($p);
             calculate_consensus( \@blockpos, $marker, $sample );
             @blockpos = ();
@@ -215,13 +266,13 @@ sub calculate_consensus {
 
     my $maxgt = ( sort { $blockgt{$b} <=> $blockgt{$a} } keys %blockgt )[0];
     map { $marker->{$_}{marker}{$sample}{cons} = $maxgt } @{$blockpos};
-    return;
 }
 
 sub merge {
     my ( $part, $all ) = @_;
     foreach my $scf ( keys %{$part} ) {
         $all->{scf}{$scf}++;
+
 #        foreach my $type ( keys %{ $part->{$scf} } ) {
 #            foreach my $pos ( keys %{ $part->{$scf}{$type} } ) {
 #                $all->{scf}{$scf}{$type}{$pos}{parent} =
@@ -244,10 +295,12 @@ sub output {
     my ( $data, $samples, $genome, $outfix ) = @_;
     print STDERR "Outputting...\n";
 
-    open my $allout, '>', "$outfix.out" or croak "Can't open $outfix.out: $OS_ERROR\n";
+    open my $allout, '>', "$outfix.out"
+      or croak "Can't open $outfix.out: $OS_ERROR\n";
     foreach my $scf ( sort keys %{ $data->{scf} } ) {
-        open my $scffile, '<', "$scf.tmp.out" or croak "Can't open scf output for $scf: $OS_ERROR\n";
-        while (my $scfline = <$scffile>) {
+        open my $scffile, '<', "$scf.tmp.out"
+          or croak "Can't open scf output for $scf: $OS_ERROR\n";
+        while ( my $scfline = <$scffile> ) {
             print $allout $scfline;
         }
         close $scffile;
@@ -257,46 +310,44 @@ sub output {
 }
 
 sub output_scf_to_file {
-    my ($scf, $data) = @_;
-    open my $scfhandle, '>', "$scf.tmp.out" or croak "Can't open output file for $scf: $OS_ERROR\n";
-    output_scf ($scf, $data, $scfhandle);
+    my ( $scf, $data ) = @_;
+    open my $scfhandle, '>', "$scf.tmp.out"
+      or croak "Can't open output file for $scf: $OS_ERROR\n";
+    output_scf( $scf, $data, $scfhandle );
     close $scfhandle;
 }
 
 sub output_scf {
-    my ($scf, $data, $handle) = @_;
-    foreach my $type ( sort keys %{ $data } ) {
-        foreach
-          my $pos ( sort { $a <=> $b } keys %{ $data->{$type} } )
-        {
+    my ( $scf, $data, $handle ) = @_;
+    foreach my $type ( sort keys %{$data} ) {
+        foreach my $pos ( sort { $a <=> $b } keys %{ $data->{$type} } ) {
 
             print $handle "$scf\t$pos\t$type\t";
             my @gt = split //, $data->{$type}{$pos}{marker}{gt};
             foreach my $i ( 0 .. $#gt ) {
                 my $col =
-                  ceil( 255 -
-                      $data->{$type}{$pos}{marker}{gq}[$i] /
-                      4.2 );
+                  ceil( 255 - $data->{$type}{$pos}{marker}{gq}[$i] / 4.2 );
                 print $handle fg $col, $gt[$i];
             }
             print $handle "\t";
 
-            my @edge = split //,
-              $data->{$type}{$pos}{marker}{edge};
-            my @cons = split //,
-              $data->{$type}{$pos}{marker}{cons};
+            my @edge = split //, $data->{$type}{$pos}{marker}{edge};
+            my @cons = split //, $data->{$type}{$pos}{marker}{cons};
+            my @corrected = split //, $data->{$type}{$pos}{marker}{corrected};
             my $cons = "";
+            my $corrected = "";
             foreach my $e ( 0 .. $#edge ) {
-                my $col = $edge[$e] > $masklen ? 'red1' : 'black';
+                my $col = $edge[$e] ne '.' && $edge[$e] > MASKLEN ? 'red1' : 'black';
                 print $handle fg $col, $edge[$e];
                 $cons .= fg $col, $cons[$e];
+                $corrected .= fg $col, $corrected[$e];
             }
-            print $handle "\t$cons\n";
+            print $handle "\t$cons\t$corrected\n";
         }
         print $handle '-' x 253, "\n";
     }
     print $handle '-' x 253, "\n";
-    
+
 }
 
 1;
