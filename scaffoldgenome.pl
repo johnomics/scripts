@@ -5,8 +5,11 @@ use Term::ExtendedColor qw/:all/;
 use strict;
 use warnings;
 
-use constant MASKLEN    => 4;
-use constant ERRORBLOCK => 1000;
+use constant MASKLEN      => 4;
+use constant ERRORBLOCK   => 2000;
+use constant ERRORSNPS    => 5;
+use constant FS_THRESHOLD => 35;
+use constant MQ_THRESHOLD => 57;
 
 my %callorder;
 
@@ -27,13 +30,14 @@ sub collapse {
     foreach my $type ( keys %{$scfref} ) {
         foreach my $pos ( keys %{ $scfref->{$type} } ) {
             my $gt        = "";
-            my $edge      = "";
+            my @edge;
             my $cons      = "";
             my $corrected = "";
             my @gq;
             foreach my $sample ( @{ $samples->{offspring}{order} } ) {
                 my $ref = $scfref->{$type}{$pos}{marker}{$sample};
-                $edge .= defined $ref->{edge} && $ref->{edge} != 0 ? abs( $ref->{edge} ) : '.';
+                push @edge, defined $ref->{edge}
+                  && $ref->{edge} != 0 ? abs( $ref->{edge} ) : '.';
                 $gt .= $ref->{gt} == 1 ? 'A' : $ref->{gt} == -1 ? 'B' : '-';
                 $cons .=
                   $ref->{cons} == 1 ? 'A' : $ref->{cons} == -1 ? 'B' : '-';
@@ -44,7 +48,7 @@ sub collapse {
                 push @gq, $ref->{gq};
             }
             delete $scfref->{$type}{$pos}{marker};
-            $scfref->{$type}{$pos}{marker}{edge}      = $edge;
+            $scfref->{$type}{$pos}{marker}{edge}      = \@edge;
             $scfref->{$type}{$pos}{marker}{cons}      = $cons;
             $scfref->{$type}{$pos}{marker}{corrected} = $corrected;
             $scfref->{$type}{$pos}{marker}{gt}        = $gt;
@@ -60,14 +64,18 @@ sub get_markers {
     my %prevpos;
     foreach my $snp ( @{$scfref} ) {
         chomp $snp;
-        my ( $marker, $type, $parentcall, $pos ) =
+        my ( $marker, $type, $parentcall, $pos, $info ) =
           parse_snp( $snp, $samples, $genetics );
         next if !$marker;
         next if !chisq_bc_ok($marker);
+        next if $info->{'FS'} > FS_THRESHOLD;
+        next if $info->{'MQ'} < MQ_THRESHOLD;
         check_phase( $marker, $markers{$type}{ $prevpos{$type} }{marker} )
           if ( $prevpos{$type} );
         $markers{$type}{$pos}{marker} = $marker;
         $markers{$type}{$pos}{parent} = $parentcall;
+        $markers{$type}{$pos}{mq}     = $info->{'MQ'};
+        $markers{$type}{$pos}{fs}     = $info->{'FS'};
         $prevpos{$type}               = $pos;
     }
     \%markers;
@@ -111,6 +119,7 @@ sub parse_snp {
     my ( $snp, $samples, $genetics ) = @_;
 
     my %marker;
+    my %info;
 
     my @f          = split /\t/, $snp;
     my $callf      = $f[8];
@@ -119,6 +128,9 @@ sub parse_snp {
       @{ $genetics->{parents} };
 
     return ( 0, 0, 0 ) if !defined $genetics->{types}{$parentcall};
+
+    my @info = split /;/, $f[7];
+    map { $info{$1} = $2 if (/^(.+)=(.+)$/); } @info;
 
     foreach my $sample ( @{ $samples->{offspring}{order} } ) {
         my $opos = $samples->{offspring}{lookup}{$sample};
@@ -131,8 +143,8 @@ sub parse_snp {
         $marker{$sample}{gq} = get_cp( 'GQ', $f[$opos], $callf );
     }
 
-    return ( \%marker, $genetics->{types}{$parentcall}{type}, $parentcall,
-        $f[1] );
+    return ( \%marker, $genetics->{types}{$parentcall}{type},
+        $parentcall, $f[1], \%info );
 }
 
 sub get_cp {
@@ -179,19 +191,22 @@ sub clean_blocks {
     }
 
     for my $b ( 0 .. $#blocks ) {
-        if (   @blocks >= 3
+        if (
+               @blocks >= 3
             && $b >= 1
             && $b <= $#blocks - 1
             && $blocks[ $b - 1 ]{cons} eq $blocks[ $b + 1 ]{cons}
             && $blocks[ $b - 1 ]{cons} ne $blocks[$b]{cons}
-            && (( max(@{ $blocks[$b]{pos} }) - min(@{ $blocks[$b]{pos} })) <
-            ERRORBLOCK ) || (@{$blocks[$b]{pos}} <= 5))
+            && ( ( max( @{ $blocks[$b]{pos} } ) - min( @{ $blocks[$b]{pos} } ) )
+                < ERRORBLOCK )
+            || ( @{ $blocks[$b]{pos} } <= ERRORSNPS )
+          )
         {
             for my $p ( @{ $blocks[$b]{pos} } ) {
                 $marker->{$p}{marker}{$sample}{corrected} =
                   $blocks[ $b - 1 ]{cons};
             }
-            $blocks[$b]{cons} = $blocks[$b-1]{cons};
+            $blocks[$b]{cons} = $blocks[ $b - 1 ]{cons};
         }
         else {
             for my $p ( @{ $blocks[$b]{pos} } ) {
@@ -322,7 +337,8 @@ sub output_scf {
     foreach my $type ( sort keys %{$data} ) {
         foreach my $pos ( sort { $a <=> $b } keys %{ $data->{$type} } ) {
 
-            print $handle "$scf\t$pos\t$type\t";
+            print $handle
+"$scf\t$pos\t$type\t$data->{$type}{$pos}{mq}\t$data->{$type}{$pos}{fs}\t";
             my @gt = split //, $data->{$type}{$pos}{marker}{gt};
             foreach my $i ( 0 .. $#gt ) {
                 my $col =
@@ -331,15 +347,16 @@ sub output_scf {
             }
             print $handle "\t";
 
-            my @edge = split //, $data->{$type}{$pos}{marker}{edge};
-            my @cons = split //, $data->{$type}{$pos}{marker}{cons};
+            my @edge      = @{$data->{$type}{$pos}{marker}{edge}};
+            my @cons      = split //, $data->{$type}{$pos}{marker}{cons};
             my @corrected = split //, $data->{$type}{$pos}{marker}{corrected};
-            my $cons = "";
+            my $cons      = "";
             my $corrected = "";
             foreach my $e ( 0 .. $#edge ) {
-                my $col = $edge[$e] ne '.' && $edge[$e] > MASKLEN ? 'red1' : 'black';
+                my $col =
+                  $edge[$e] ne '.' && $edge[$e] > MASKLEN ? 'red1' : 'black';
                 print $handle fg $col, $edge[$e];
-                $cons .= fg $col, $cons[$e];
+                $cons      .= fg $col, $cons[$e];
                 $corrected .= fg $col, $corrected[$e];
             }
             print $handle "\t$cons\t$corrected\n";
