@@ -91,23 +91,30 @@ sub load_genetics {
     my $infoline;
     while ( $infoline = <$geneticsfile> ) {
         chomp $infoline;
-        last if ( $infoline =~ /^Type/ );
-        my ( $ignore, $ind ) = split /\t/, $infoline;
-        $genetics{ignore}{$ind} = 0;
+        last if ( $infoline =~ /Type/ );
+
+        if ( $infoline =~ /^Ignore/ ) {
+            my ( $ignore, $ind ) = split /\t/, $infoline;
+            $genetics{ignore}{$ind} = 0;
+        }
+        elsif ($infoline =~ /^Parents/) {
+            my ($header, $parents) = split /\t/, $infoline;
+            my @parents = split /,/, $parents;
+            $genetics{parents} = \@parents;
+        }
+        elsif ($infoline =~ /^Female/ or $infoline =~ /^Male/) {
+            my ($sex, $samples) = split /\t/, $infoline;
+            my @samples = split /,/, $samples;
+            $genetics{sex}{$sex} = \@samples;
+        }
     }
-    my ( $t, $rhom, $het, $ahom, @parents ) = split /\t/, $infoline;
-
-    $genetics{parents} = \@parents;
-
+    # Now $infoline contains type table header; ignore
+    
     while ( my $marker_type = <$geneticsfile> ) {
         chomp $marker_type;
-        my ( $type, $refhom, $het, $althom, @parentcalls ) = split /\t/,
-          $marker_type;
-        my $parentcall = join " ", @parentcalls;
-        $genetics{types}{$parentcall}{type}  = $type;
-        $genetics{types}{$parentcall}{"0/0"} = $refhom;
-        $genetics{types}{$parentcall}{"0/1"} = $het;
-        $genetics{types}{$parentcall}{"1/1"} = $althom;
+        my ( $parents, $males, $females, $type ) = split /\t/, $marker_type;
+        $genetics{types}{$parents}{$type}{males} = $males;
+        $genetics{types}{$parents}{$type}{females} = $females;
     }
 
     close $geneticsfile;
@@ -123,9 +130,9 @@ sub parse_vcf {
 
     $part_pm->run_on_finish(
         sub {
-            my $pid = shift;
-            my $exit = shift;
-            my $part = shift;
+            my $pid       = shift;
+            my $exit      = shift;
+            my $part      = shift;
             my $childdata = pop;
             merge( $childdata, \%data );
             print STDERR "$part:Merged\n";
@@ -271,7 +278,7 @@ sub get_samples {
     map {
         if ( defined $parents{ $sample_names[$_] } ) {
             $samples{parents}{lookup}{ $sample_names[$_] } = $_;
-            push @{$samples{parents}{order}}, $sample_names[$_];
+            push @{ $samples{parents}{order} }, $sample_names[$_];
         }
         else {
             if ( !defined $genetics->{ignore}{ $sample_names[$_] } ) {

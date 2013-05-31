@@ -28,9 +28,10 @@ sub get_markers {
     my %markers;
     foreach my $snp ( @{$scfref} ) {
         chomp $snp;
-        my ( $origparentcall, $inferparentcall ) =
+
+        my ( $origparentcall, $inferparentcall, $type, $pos ) =
           parse_snp( $snp, $samples, $genetics );
-        $markers{$inferparentcall}{$origparentcall}++;
+        $markers{$inferparentcall}{$origparentcall}{$type}++;
     }
 
     \%markers;
@@ -49,8 +50,76 @@ sub parse_snp {
       @{ $genetics->{parents} };
 
     my ( $parentcall, $vgt ) = get_parent_call( \@parentcalls );
+    return ( "@parentcalls", $parentcall, "Reject", $pos )
+      if $parentcall eq "XXX";
 
-    return ( "@parentcalls", $parentcall, $pos );
+    my $type = get_marker_type( $parentcall, $vgt, \@f, $samples, $genetics );
+
+    return ( "@parentcalls", $parentcall, $type, $pos );
+}
+
+sub get_marker_type {
+    my ( $parentcall, $vgt, $fref, $samples, $genetics ) = @_;
+
+    my $type = "";
+
+    my @femalecalls = get_f2_calls( \@{ $genetics->{sex}{"Female"} },
+        $parentcall, $vgt, $fref, $samples );
+    my @malecalls = get_f2_calls( \@{ $genetics->{sex}{"Male"} },
+        $parentcall, $vgt, $fref, $samples );
+
+    return "Reject" if ( !defined $genetics->{types}{$parentcall} );
+
+    my %types;
+    for my $type (keys %{$genetics->{types}{$parentcall}}) {
+        my $malechisq = get_chisq(\@malecalls, $genetics->{types}{$parentcall}{$type}{males});
+        my $femalechisq = get_chisq(\@femalecalls, $genetics->{types}{$parentcall}{$type}{females});
+        $types{$type}++ if ($malechisq && $femalechisq);
+    }
+    return (keys %types == 1) ? (keys %types)[0] : "Reject";
+}
+
+sub get_f2_calls {
+    my ( $offspring, $parentcall, $vgt, $fref, $samples ) = @_;
+    my @calls;
+
+    for my $sample ( @{$offspring} ) {
+        my $opos = $samples->{offspring}{lookup}{$sample};
+        my $gt = get_cp( 'GT', $fref->[$opos], $fref->[8] );
+        push @calls, $vgt->{$gt} // 'X';
+    }
+    return @calls;
+}
+
+sub get_chisq {
+    my ($calls, $valid) = @_;
+    
+    my $n = @{$calls};
+    my %obs;
+    map {$obs{$_}++} @{$calls};
+    
+    my @exp = split /,/, $valid;
+    my %exp;
+    my $shares = 0;
+    for my $e (@exp) {
+        if ($e =~ /(\d)?([ABH.])/) {
+            my $share = $1 // 1;
+            $exp{$2} = $share;
+            $shares += $share;
+        }
+    }
+    
+    my $chisq;
+    
+    for my $e (keys %exp) {
+        my $expv = $exp{$e} / $shares * $n;
+        my $obsv = $obs{$e} // 0;
+        $chisq += (($obsv-$expv) ** 2) / $expv;
+    }
+    my $df = (keys %exp) - 1;
+    
+    my $crit = $df == 1 ? 3.84 : $df == 2 ? 5.99 : $df == 3 ? 7.82 : $df == 4 ? 9.49 : 100;
+    return $chisq < $crit;
 }
 
 sub get_parent_call {
@@ -95,22 +164,25 @@ sub get_parent_call {
               if ( !defined $vallele{$allele} );
         }
     }
-    return ("XXX", 0) if keys %vallele > 2;
+    return ( "XXX", 0 ) if keys %vallele > 2;
+
+    my @vas = sort { $a <=> $b } keys %vallele;
+    my %vgt;
+    if ( defined $vas[0] ) {
+        $vgt{"$vas[0]/$vas[0]"} = "$vallele{$vas[0]}";
+        if ( defined $vas[1] ) {
+            $vgt{"$vas[1]/$vas[1]"} = "$vallele{$vas[1]}";
+            $vgt{"$vas[0]/$vas[1]"} = 'H';
+        }
+    }
+    $vgt{"./."}   = '.';
     $vallele{"."} = ".";
 
     # Assign A, B and H (for heterozygote) to parental calls
-    my %vgt;
     my $parentcall;
     for my $pc ( @{$parents} ) {
         my ( $i, $j ) = $pc =~ /(.)\/(.)/;
-        if ( $i eq $j ) {
-            $vgt{$pc} = $vallele{$i};
-            $parentcall .= $vallele{$i};
-        }
-        else {
-            $vgt{$pc} = "H";
-            $parentcall .= "H";
-        }
+        $parentcall .= ( $i eq $j ) ? $vallele{$i} : 'H';
     }
 
     return ( $parentcall, \%vgt );
@@ -133,9 +205,12 @@ sub get_cp {
 sub merge {
     my ( $part, $all ) = @_;
     foreach my $scf ( keys %{$part} ) {
-        foreach my $inferpattern (keys %{$part->{$scf}}) {
-            foreach my $origpattern (keys %{$part->{$scf}{$inferpattern}}) {
-                $all->{patterns}{$inferpattern}{$origpattern} += $part->{$scf}{$inferpattern}{$origpattern};
+        foreach my $inferpattern ( keys %{ $part->{$scf} } ) {
+            foreach my $origpattern ( keys %{ $part->{$scf}{$inferpattern} } ) {
+                foreach my $type (keys %{$part->{$scf}{$inferpattern}{$origpattern}}) {
+                $all->{patterns}{$inferpattern}{$origpattern}{$type} +=
+                  $part->{$scf}{$inferpattern}{$origpattern}{$type};
+              }
             }
         }
     }
@@ -147,25 +222,31 @@ sub output {
 
     open my $allout, '>', "$outfix.out"
       or croak "Can't open $outfix.out: $OS_ERROR\n";
-#    foreach my $scf ( sort keys %{ $data->{scf} } ) {
-#        open my $scffile, '<', "$scf.tmp.out"
-#          or croak "Can't open scf output for $scf: $OS_ERROR\n";
-#        while ( my $scfline = <$scffile> ) {
-#            print $allout $scfline;
-#        }
-#        close $scffile;
-#        system("rm $scf.tmp.out");
-#    }
+
+    #    foreach my $scf ( sort keys %{ $data->{scf} } ) {
+    #        open my $scffile, '<', "$scf.tmp.out"
+    #          or croak "Can't open scf output for $scf: $OS_ERROR\n";
+    #        while ( my $scfline = <$scffile> ) {
+    #            print $allout $scfline;
+    #        }
+    #        close $scffile;
+    #        system("rm $scf.tmp.out");
+    #    }
 
     my %summarypattern;
-    foreach my $inferpattern (sort keys %{$data->{patterns}}) {
-        foreach my $origpattern (sort keys %{$data->{patterns}{$inferpattern}}) {
-            print $allout "$inferpattern\t$origpattern\t$data->{patterns}{$inferpattern}{$origpattern}\n";
-            $summarypattern{$inferpattern} += $data->{patterns}{$inferpattern}{$origpattern};
+    foreach my $inferpattern ( sort keys %{ $data->{patterns} } ) {
+        foreach
+          my $origpattern ( sort keys %{ $data->{patterns}{$inferpattern} } )
+        {
+            foreach my $type (sort keys %{$data->{patterns}{$inferpattern}{$origpattern}}) {
+                print $allout "$inferpattern\t$origpattern\t$type\t$data->{patterns}{$inferpattern}{$origpattern}{$type}\n";
+                $summarypattern{$inferpattern} +=
+                  $data->{patterns}{$inferpattern}{$origpattern}{$type};
+            }
         }
     }
 
-    foreach my $pattern (sort keys %summarypattern) {
+    foreach my $pattern ( sort keys %summarypattern ) {
         print $allout "$pattern\t$summarypattern{$pattern}\n";
     }
     close $allout;
