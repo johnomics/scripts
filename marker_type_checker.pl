@@ -13,6 +13,17 @@ use constant MQ_THRESHOLD => 57;
 
 my %callorder;
 
+my %chisqcrit = (
+    1 => 3.84,
+    2 => 5.99,
+    3 => 7.82,
+    4 => 9.49,
+    5 => 11.07,
+    6 => 12.59,
+    7 => 14.07,
+    8 => 15.51,
+);
+
 my %nullcall = ( 'GT' => './.', 'GQ' => 0 );
 
 my @mask;
@@ -54,7 +65,7 @@ sub parse_snp {
       if $parentcall eq "XXX";
 
     my $type = get_marker_type( $parentcall, $vgt, \@f, $samples, $genetics );
-
+#    print "Type returned: $type\n";
     return ( "@parentcalls", $parentcall, $type, $pos );
 }
 
@@ -62,19 +73,20 @@ sub get_marker_type {
     my ( $parentcall, $vgt, $fref, $samples, $genetics ) = @_;
 
     my $type = "";
-
+    
     my @femalecalls = get_f2_calls( \@{ $genetics->{sex}{"Female"} },
         $parentcall, $vgt, $fref, $samples );
     my @malecalls = get_f2_calls( \@{ $genetics->{sex}{"Male"} },
         $parentcall, $vgt, $fref, $samples );
 
+#    print "$parentcall\nFemales:@femalecalls\nMales:@malecalls\n";
     return "Reject" if ( !defined $genetics->{types}{$parentcall} );
 
     my %types;
+#    print "Types to test:", keys %{$genetics->{types}{$parentcall}}, "\n";
     for my $type (keys %{$genetics->{types}{$parentcall}}) {
-        my $malechisq = get_chisq(\@malecalls, $genetics->{types}{$parentcall}{$type}{males});
-        my $femalechisq = get_chisq(\@femalecalls, $genetics->{types}{$parentcall}{$type}{females});
-        $types{$type}++ if ($malechisq && $femalechisq);
+#        print "Testing $parentcall for $type\n";
+        $types{$type}++ if (get_chisq(\@malecalls, \@femalecalls, $genetics->{types}{$parentcall}{$type}{males}, $genetics->{types}{$parentcall}{$type}{females}));
     }
     return (keys %types == 1) ? (keys %types)[0] : "Reject";
 }
@@ -92,34 +104,45 @@ sub get_f2_calls {
 }
 
 sub get_chisq {
-    my ($calls, $valid) = @_;
+    my ($malecalls, $femalecalls, $validmale, $validfemale) = @_;
     
-    my $n = @{$calls};
+    my $n = @{$malecalls} + @{$femalecalls};
     my %obs;
-    map {$obs{$_}++} @{$calls};
+    map {$obs{"M$_"}++} @{$malecalls};
+    map {$obs{"F$_"}++} @{$femalecalls};
     
-    my @exp = split /,/, $valid;
     my %exp;
-    my $shares = 0;
-    for my $e (@exp) {
-        if ($e =~ /(\d)?([ABH.])/) {
-            my $share = $1 // 1;
-            $exp{$2} = $share;
-            $shares += $share;
-        }
-    }
-    
+    get_expected_classes(\%exp, 'M', $malecalls, $validmale);
+    get_expected_classes(\%exp, 'F', $femalecalls, $validfemale);
+#    print "\n";
     my $chisq;
     
     for my $e (keys %exp) {
-        my $expv = $exp{$e} / $shares * $n;
         my $obsv = $obs{$e} // 0;
-        $chisq += (($obsv-$expv) ** 2) / $expv;
+        $chisq += (($obsv-$exp{$e}) ** 2) / $exp{$e};
     }
     my $df = (keys %exp) - 1;
     
-    my $crit = $df == 1 ? 3.84 : $df == 2 ? 5.99 : $df == 3 ? 7.82 : $df == 4 ? 9.49 : 100;
-    return $chisq < $crit;
+#    print "Chisq=$chisq, df=$df, crit=$chisqcrit{$df}\n";
+    return $chisq < $chisqcrit{$df};
+}
+
+sub get_expected_classes {
+    my ($exp_ref, $sex, $calls, $valid) = @_;
+    my @exp = split /,/, $valid;
+    my $shares = 0;
+    for my $e (@exp) {
+        if ($e =~ /^(\d)?([ABH.])$/) {
+            my $share = $1 // 1;
+            $exp_ref->{"$sex$2"} = $share;
+            $shares += $share;
+#            print "$sex$2 x $share : "
+        }
+    }
+    for my $e (@exp) {
+        $e = $2 if ($e =~ /^(\d)([ABH.])$/);
+        $exp_ref->{"$sex$e"} = $exp_ref->{"$sex$e"}/$shares * @{$calls};
+    }
 }
 
 sub get_parent_call {
@@ -234,6 +257,7 @@ sub output {
     #    }
 
     my %summarypattern;
+    my %summarytype;
     foreach my $inferpattern ( sort keys %{ $data->{patterns} } ) {
         foreach
           my $origpattern ( sort keys %{ $data->{patterns}{$inferpattern} } )
@@ -242,10 +266,16 @@ sub output {
                 print $allout "$inferpattern\t$origpattern\t$type\t$data->{patterns}{$inferpattern}{$origpattern}{$type}\n";
                 $summarypattern{$inferpattern} +=
                   $data->{patterns}{$inferpattern}{$origpattern}{$type};
+                $summarytype{$inferpattern}{$type} += $data->{patterns}{$inferpattern}{$origpattern}{$type};
             }
         }
     }
 
+    foreach my $pattern (sort keys %summarytype) {
+        foreach my $type (sort keys %{$summarytype{$pattern}}) {
+            print $allout "$pattern\t$type\t$summarytype{$pattern}{$type}\n";
+        }
+    }
     foreach my $pattern ( sort keys %summarypattern ) {
         print $allout "$pattern\t$summarypattern{$pattern}\n";
     }
