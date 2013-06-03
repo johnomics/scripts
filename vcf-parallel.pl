@@ -106,6 +106,7 @@ sub load_genetics {
             my ($sex, $samples) = split /\t/, $infoline;
             my @samples = split /,/, $samples;
             $genetics{sex}{$sex} = \@samples;
+            map {$genetics{samplesex}{$_}=$sex} @samples;
         }
     }
     # Now $infoline contains type table header; ignore

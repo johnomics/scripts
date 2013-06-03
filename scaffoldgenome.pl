@@ -11,6 +11,24 @@ use constant ERRORSNPS    => 5;
 use constant FS_THRESHOLD => 35;
 use constant MQ_THRESHOLD => 57;
 
+my %chisqcrit = (
+    1 => 3.84,
+    2 => 5.99,
+    3 => 7.82,
+    4 => 9.49,
+    5 => 11.07,
+    6 => 12.59,
+    7 => 14.07,
+    8 => 15.51,
+);
+
+my %maskcall = (
+    A => -1,
+    H => 1,
+    B => 0,
+    '.' => 0,
+);
+
 my %callorder;
 
 my %nullcall = ( 'GT' => './.', 'GQ' => 0 );
@@ -29,7 +47,7 @@ sub collapse {
     my ( $scfref, $samples ) = @_;
     foreach my $type ( keys %{$scfref} ) {
         foreach my $pos ( keys %{ $scfref->{$type} } ) {
-            my $gt        = "";
+            my $gt = "";
             my @edge;
             my $cons      = "";
             my $corrected = "";
@@ -67,7 +85,6 @@ sub get_markers {
         my ( $marker, $type, $parentcall, $pos, $info ) =
           parse_snp( $snp, $samples, $genetics );
         next if !$marker;
-        next if !chisq_bc_ok($marker);
         next if $info->{'FS'} > FS_THRESHOLD;
         next if $info->{'MQ'} < MQ_THRESHOLD;
         check_phase( $marker, $markers{$type}{ $prevpos{$type} }{marker} )
@@ -97,54 +114,165 @@ sub check_phase {
     return;
 }
 
-sub chisq_bc_ok {
-    my ($marker) = @_;
-    my %allele;
-    foreach my $sample ( keys %{$marker} ) {
-        $allele{ $marker->{$sample}{gt} }++;
-    }
-    delete $allele{0};
-    my @type = keys %allele;
-    return 0 if @type != 2;
-
-    my $a = $allele{ $type[0] };
-    my $b = $allele{ $type[1] };
-    return 0 if $a == 0 or $b == 0;
-    my $chisq = ( $a - $b )**2 / ( $a + $b );
-
-    return $chisq < 3.8    # df=1, p <0.05
-}
-
 sub parse_snp {
     my ( $snp, $samples, $genetics ) = @_;
 
-    my %marker;
-    my %info;
-
-    my @f          = split /\t/, $snp;
-    my $callf      = $f[8];
-    my $parentcall = join ' ',
+    my @f     = split /\t/, $snp;
+    my $callf = $f[8];
+    my $pos   = $f[1];
+    my @parentcalls =
       map { get_cp( 'GT', $f[ $samples->{parents}{lookup}{$_} ], $callf ) }
       @{ $genetics->{parents} };
 
-    return ( 0, 0, 0 ) if !defined $genetics->{types}{$parentcall};
+    my ( $parentcall, $vgt ) = get_parent_call( \@parentcalls );
+    return ( 0, 0, 0 )
+      if ( !defined $genetics->{types}{$parentcall} );
 
-    my @info = split /;/, $f[7];
-    map { $info{$1} = $2 if (/^(.+)=(.+)$/); } @info;
-
+    my %gtsbysex;
+    my %marker;
     foreach my $sample ( @{ $samples->{offspring}{order} } ) {
         my $opos = $samples->{offspring}{lookup}{$sample};
-        my $gt = get_cp( 'GT', $f[$opos], $callf );
-        $marker{$sample}{call} = $gt;
-        $marker{$sample}{gt} = $genetics->{types}{$parentcall}{$gt} // 0;
-        return ( 0, 0, 0 )
-          if $marker{$sample}{gt} ==
-          0.5;    # Reject SNP if invalid homozygote call is found
-        $marker{$sample}{gq} = get_cp( 'GQ', $f[$opos], $callf );
+        my $call   = get_cp( 'GT', $f[$opos], $callf );
+        my $gt = $vgt->{$call} // "X";
+        return ( 0, 0, 0 ) if $gt eq "X";
+
+        push @{ $gtsbysex{ $genetics->{samplesex}{$sample} } }, $gt;
+        $marker{$sample}{call} = $call;
+        $marker{$sample}{gt}   = $maskcall{$gt};
+        $marker{$sample}{gq}   = get_cp( 'GQ', $f[$opos], $callf );
     }
 
-    return ( \%marker, $genetics->{types}{$parentcall}{type},
-        $parentcall, $f[1], \%info );
+    my %types;
+    for my $type ( keys %{ $genetics->{types}{$parentcall} } ) {
+        $types{$type}++
+          if (
+            get_chisq(
+                \@{ $gtsbysex{"Male"} },
+                \@{ $gtsbysex{"Female"} },
+                $genetics->{types}{$parentcall}{$type}{males},
+                $genetics->{types}{$parentcall}{$type}{females}
+            )
+          );
+    }
+    return ( 0, 0, 0 ) if keys %types != 1;
+    my $type = ( keys %types )[0];
+    return ( 0, 0, 0 ) if $type eq "Reject";
+
+    my @info = split /;/, $f[7];
+    my %info;
+    map { $info{$1} = $2 if (/^(.+)=(.+)$/); } @info;
+
+    return ( \%marker, $type, $parentcall, $pos, \%info );
+}
+
+sub get_chisq {
+    my ( $malecalls, $femalecalls, $validmale, $validfemale ) = @_;
+
+    my $n = @{$malecalls} + @{$femalecalls};
+    my %obs;
+    map { $obs{"M$_"}++ } @{$malecalls};
+    map { $obs{"F$_"}++ } @{$femalecalls};
+
+    my %exp;
+    get_expected_classes( \%exp, 'M', $malecalls,   $validmale );
+    get_expected_classes( \%exp, 'F', $femalecalls, $validfemale );
+
+    #    print "\n";
+    my $chisq;
+
+    for my $e ( keys %exp ) {
+        my $obsv = $obs{$e} // 0;
+        $chisq += ( ( $obsv - $exp{$e} )**2 ) / $exp{$e};
+    }
+    my $df = ( keys %exp ) - 1;
+
+    #    print "Chisq=$chisq, df=$df, crit=$chisqcrit{$df}\n";
+    return $chisq < $chisqcrit{$df};
+}
+
+sub get_expected_classes {
+    my ( $exp_ref, $sex, $calls, $valid ) = @_;
+    my @exp = split /,/, $valid;
+    my $shares = 0;
+    for my $e (@exp) {
+        if ( $e =~ /^(\d)?([ABH.])$/ ) {
+            my $share = $1 // 1;
+            $exp_ref->{"$sex$2"} = $share;
+            $shares += $share;
+
+            #            print "$sex$2 x $share : "
+        }
+    }
+    for my $e (@exp) {
+        $e = $2 if ( $e =~ /^(\d)([ABH.])$/ );
+        $exp_ref->{"$sex$e"} = $exp_ref->{"$sex$e"} / $shares * @{$calls};
+    }
+}
+
+sub get_parent_call {
+    my ($parents) = @_;
+
+    my @hom;
+    my %hom;
+    my %het;
+
+    # Get unique homozygote alleles and heterozygote calls
+    for my $pc ( @{$parents} ) {
+        my ( $i, $j ) = $pc =~ /(.)\/(.)/;
+        if ( $i eq $j ) {
+            push @hom, $i if !defined $hom{$i};
+            $hom{$i}++;
+        }
+        else {
+            $het{$pc}++;
+        }
+    }
+
+    return ( "XXX", 0 )
+      if ( defined $hom{'.'} && keys %hom > 3
+        or !defined $hom{'.'} && keys %hom > 2
+        or keys %het > 1 );
+
+    # At this point, we have up to two homozygous calls in @hom
+    # and at most one heterozygous call in keys %het
+
+    my @valleles = ( "A", "B" );
+
+    # Assign 0,1,2 etc alleles to A and B symbols
+    my %vallele;
+    for my $hom (@hom) {
+        next if ( $hom eq '.' );
+        $vallele{$hom} = shift @valleles;
+    }
+
+    if ( @valleles && keys %het ) {
+        for my $allele ( ( keys %het )[0] =~ /(.)\/(.)/ ) {
+            $vallele{$allele} = shift @valleles
+              if ( !defined $vallele{$allele} );
+        }
+    }
+    return ( "XXX", 0 ) if keys %vallele > 2;
+
+    my @vas = sort { $a <=> $b } keys %vallele;
+    my %vgt;
+    if ( defined $vas[0] ) {
+        $vgt{"$vas[0]/$vas[0]"} = "$vallele{$vas[0]}";
+        if ( defined $vas[1] ) {
+            $vgt{"$vas[1]/$vas[1]"} = "$vallele{$vas[1]}";
+            $vgt{"$vas[0]/$vas[1]"} = 'H';
+        }
+    }
+    $vgt{"./."}   = '.';
+    $vallele{"."} = ".";
+
+    # Assign A, B and H (for heterozygote) to parental calls
+    my $parentcall;
+    for my $pc ( @{$parents} ) {
+        my ( $i, $j ) = $pc =~ /(.)\/(.)/;
+        $parentcall .= ( $i eq $j ) ? $vallele{$i} : 'H';
+    }
+
+    return ( $parentcall, \%vgt );
 }
 
 sub get_cp {
@@ -347,9 +475,14 @@ sub output_scf {
             }
             print $handle "\t";
 
-            my @edge      = @{$data->{$type}{$pos}{marker}{edge}};
+            my @edge      = @{ $data->{$type}{$pos}{marker}{edge} };
             my @cons      = split //, $data->{$type}{$pos}{marker}{cons};
             my @corrected = split //, $data->{$type}{$pos}{marker}{corrected};
+            
+            if (@cons == 0 or @corrected == 0) {
+                print $handle "\n";
+                next;
+            }
             my $cons      = "";
             my $corrected = "";
             foreach my $e ( 0 .. $#edge ) {
