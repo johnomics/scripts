@@ -136,10 +136,10 @@ while ( my $marker = <$markerfile> ) {
     next
       if ( $marker =~ /^(-+)$/ );
     chomp $marker;
-    my ( $scf, $pos, $type, $mq, $fs, $orig, $edge, $cons, $corrected ) =
+    my ( $scf, $pos, $type, $parents, $mq, $fs, $orig, $edge, $cons, $corrected ) =
       split /\t/,
       uncolor($marker);
-    next if ( $type ne "maternal" );
+    next if ( $type !~ "Maternal" );
     $marker_count++;
     $prev_scf = $scf if !defined $prev_scf;
 
@@ -191,73 +191,90 @@ foreach my $scf ( keys %scf ) {
     $scfmarkers{$all}{$assigned}{$unassigned}{$unique}{length} += $scflen{$scf};
 }
 
-
 my %unassigned;
-my $unassigned_ends;
-my $unassigned_middles;
-my %scf_w_unassigned_ends;
-my %scf_w_unassigned_middles;
-foreach my $scf (keys %marker) {
-    my $min = min keys %{$marker{$scf}};
-    my $max = max keys %{$marker{$scf}};
+foreach my $scf ( keys %marker ) {
+    my $min = min keys %{ $marker{$scf} };
+    my $max = max keys %{ $marker{$scf} };
 
-    foreach my $start (keys %{$marker{$scf}}) {
-        if ($marker{$scf}{$start}{chr} eq "0") {
-            my $length_bin = int($marker{$scf}{$start}{length} / 100)*100;
-            $unassigned{$length_bin}++;
-            
-            if ($start == $min or $start == $max) {
-                $unassigned_ends++;
-                $scf_w_unassigned_ends{$scf}++;
+    foreach my $start ( keys %{ $marker{$scf} } ) {
+        if ( $marker{$scf}{$start}{chr} eq "0" ) {
+            my $length_bin =
+              $marker{$scf}{$start}{length} < 10 ? $marker{$scf}{$start}{length}
+              : $marker{$scf}{$start}{length} < 100
+              ? int( $marker{$scf}{$start}{length} / 10 ) * 10
+              : int( $marker{$scf}{$start}{length} / 100 ) * 100;
+            if ( $start == $min or $start == $max ) {
+                $unassigned{$length_bin}{end}++;
             }
             else {
-                $unassigned_middles++;
-                $scf_w_unassigned_middles{$scf}++;
+                $unassigned{$length_bin}{middle}++;
             }
         }
     }
 }
 
-print scalar keys %scf_w_unassigned_middles, " scaffolds with unassigned regions in middle\n";
-print scalar keys %scf_w_unassigned_ends, " scaffolds with unassigned regions at end\n";
-
-print "Unassigned regions: $unassigned_middles middle, $unassigned_ends ends\n";
-
-print "\n\nLength (bp)\tUnassigned regions\n";
-foreach my $length_bin (sort {$a<=>$b} keys %unassigned) {
-    print "$length_bin\t$unassigned{$length_bin}\n";
+print "\n\nLen\tEnds\tMiddles\n";
+my %unassigned_regions;
+foreach my $length_bin ( sort { $a <=> $b } keys %unassigned ) {
+    print "$length_bin";
+    foreach my $type ( sort keys %{ $unassigned{$length_bin} } ) {
+        $unassigned_regions{$type} += $unassigned{$length_bin}{$type};
+        print "\t$unassigned{$length_bin}{$type}";
+    }
+    print "\n";
 }
 
+print
+"Unassigned regions: $unassigned_regions{middle} middle, $unassigned_regions{end} ends\n";
+
 print "\n\nAll\tChr\tNo chr\tUnique chr\tCount\tLength\n";
-my $total_scf = 0;
-my $total_length = 0;
-my $unique_scf = 0;
-my $unique_length = 0;
-my $unassigned_scf = 0;
+my $total_scf         = 0;
+my $total_length      = 0;
+my $unique_scf        = 0;
+my $unique_length     = 0;
+my $unassigned_scf    = 0;
 my $unassigned_length = 0;
 foreach my $markercount ( sort { $a <=> $b } keys %scfmarkers ) {
-    foreach
-      my $assigned ( sort { $a <=> $b } keys %{ $scfmarkers{$markercount} } )
+    foreach my $assigned (
+        sort { $a <=> $b }
+        keys %{ $scfmarkers{$markercount} }
+      )
     {
-        foreach my $unassigned ( sort { $a <=> $b }
-            keys %{ $scfmarkers{$markercount}{$assigned} } )
+        foreach my $unassigned (
+            sort { $a <=> $b }
+            keys %{ $scfmarkers{$markercount}{$assigned} }
+          )
         {
-            foreach my $unique ( sort { $a <=> $b }
-                keys %{ $scfmarkers{$markercount}{$assigned}{$unassigned} } )
+            foreach my $unique (
+                sort { $a <=> $b }
+                keys %{ $scfmarkers{$markercount}{$assigned}{$unassigned} }
+              )
             {
                 print
 "$markercount\t$assigned\t$unassigned\t$unique\t$scfmarkers{$markercount}{$assigned}{$unassigned}{$unique}{count}\t$scfmarkers{$markercount}{$assigned}{$unassigned}{$unique}{length}\n";
-                $total_scf += $scfmarkers{$markercount}{$assigned}{$unassigned}{$unique}{count};
-                $total_length += $scfmarkers{$markercount}{$assigned}{$unassigned}{$unique}{length};
-                
-                if ($unique == 1) {
-                    $unique_scf += $scfmarkers{$markercount}{$assigned}{$unassigned}{$unique}{count};
-                    $unique_length += $scfmarkers{$markercount}{$assigned}{$unassigned}{$unique}{length};
+                $total_scf +=
+                  $scfmarkers{$markercount}{$assigned}{$unassigned}
+                  {$unique}{count};
+                $total_length +=
+                  $scfmarkers{$markercount}{$assigned}{$unassigned}
+                  {$unique}{length};
+
+                if ( $unique == 1 ) {
+                    $unique_scf +=
+                      $scfmarkers{$markercount}{$assigned}{$unassigned}
+                      {$unique}{count};
+                    $unique_length +=
+                      $scfmarkers{$markercount}{$assigned}{$unassigned}
+                      {$unique}{length};
                 }
-                
-                if ($unique == 0) {
-                    $unassigned_scf += $scfmarkers{$markercount}{$assigned}{$unassigned}{$unique}{count};
-                    $unassigned_length += $scfmarkers{$markercount}{$assigned}{$unassigned}{$unique}{length};
+
+                if ( $unique == 0 ) {
+                    $unassigned_scf +=
+                      $scfmarkers{$markercount}{$assigned}{$unassigned}
+                      {$unique}{count};
+                    $unassigned_length +=
+                      $scfmarkers{$markercount}{$assigned}{$unassigned}
+                      {$unique}{length};
                 }
             }
         }
@@ -265,9 +282,13 @@ foreach my $markercount ( sort { $a <=> $b } keys %scfmarkers ) {
 }
 
 print "\nType\tScaffolds\tLength\tMarker length\n";
-print "Total\t$total_scf\t" . format_picture( $total_length, "###,###,###") . "\t" . format_picture( $genfound, "###,###,###") . "\n";
-print "Unique\t$unique_scf\t" . format_picture( $unique_length, "###,###,###") . "\n";
-print "Unassigned\t$unassigned_scf\t" . format_picture( $unassigned_length, "###,###,###") . "\n";
+print "Total\t$total_scf\t"
+  . format_picture( $total_length, "###,###,###" ) . "\t"
+  . format_picture( $genfound,     "###,###,###" ) . "\n";
+print "Unique\t$unique_scf\t"
+  . format_picture( $unique_length, "###,###,###" ) . "\n";
+print "Unassigned\t$unassigned_scf\t"
+  . format_picture( $unassigned_length, "###,###,###" ) . "\n";
 print "\n$marker_count markers found\n";
 
 sub process_scf {
@@ -302,19 +323,18 @@ sub process_marker {
 
     my $closest_chr = $chr;
     my $min_hamming = length $pattern;
-    if ($chr eq "0") {
-        foreach my $chrprint (keys %chrommarker) {
-            my $hamming =
-              ( $pattern ^ $chrprint ) =~
-              tr/\001-\255//;
-            if ($hamming < $min_hamming) {
+    if ( $chr eq "0" ) {
+        foreach my $chrprint ( keys %chrommarker ) {
+            my $hamming = ( $pattern ^ $chrprint ) =~ tr/\001-\255//;
+            if ( $hamming < $min_hamming ) {
                 $min_hamming = $hamming;
                 $closest_chr = $chrommarker{$chrprint};
             }
         }
     }
     $marker{$scf}{$start}{pattern} = $pattern;
-    $marker{$scf}{$start}{chr} = $chr;
-    $marker{$scf}{$start}{length} = $length;
-    print "$scf\t$start\t$end\t$pattern\t$length\t$chr\t$closest_chr\t$min_hamming\n";
+    $marker{$scf}{$start}{chr}     = $chr;
+    $marker{$scf}{$start}{length}  = $length;
+    print
+"$scf\t$start\t$end\t$pattern\t$length\t$chr\t$closest_chr\t$min_hamming\n";
 }
