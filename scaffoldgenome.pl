@@ -1,6 +1,7 @@
 use List::Util qw/sum min max/;
 use POSIX qw/ceil/;
 use Term::ExtendedColor qw/:all/;
+use Memoize;
 
 use strict;
 use warnings;
@@ -23,9 +24,9 @@ my %chisqcrit = (
 );
 
 my %maskcall = (
-    A => -1,
-    H => 1,
-    B => 0,
+    A   => -1,
+    H   => 1,
+    B   => 0,
     '.' => 0,
 );
 
@@ -132,8 +133,8 @@ sub parse_snp {
     my %marker;
     foreach my $sample ( @{ $samples->{offspring}{order} } ) {
         my $opos = $samples->{offspring}{lookup}{$sample};
-        my $call   = get_cp( 'GT', $f[$opos], $callf );
-        my $gt = $vgt->{$call} // "X";
+        my $call = get_cp( 'GT', $f[$opos], $callf );
+        my $gt   = $vgt->{$call} // "X";
         return ( 0, 0, 0 ) if $gt eq "X";
 
         push @{ $gtsbysex{ $genetics->{samplesex}{$sample} } }, $gt;
@@ -142,19 +143,25 @@ sub parse_snp {
         $marker{$sample}{gq}   = get_cp( 'GQ', $f[$opos], $callf );
     }
 
+    print "$f[0]\t$f[1]\t$parentcall\n";
+    print "Males\t@{ $gtsbysex{'Male'} }\nFemales\t@{ $gtsbysex{'Female'}}\n";
     my %types;
     for my $type ( keys %{ $genetics->{types}{$parentcall} } ) {
-        $types{$type}++
-          if (
-            get_chisq(
-                \@{ $gtsbysex{"Male"} },
-                \@{ $gtsbysex{"Female"} },
-                $genetics->{types}{$parentcall}{$type}{males},
-                $genetics->{types}{$parentcall}{$type}{females}
-            )
-          );
+        print
+"Testing $type\tExpected:\tMales:$genetics->{types}{$parentcall}{$type}{males}\tFemales:$genetics->{types}{$parentcall}{$type}{females}\n";
+        $types{$type} ++ if (run_rms_test(
+            \@{ $gtsbysex{"Male"} },
+            \@{ $gtsbysex{"Female"} },
+            $genetics->{types}{$parentcall}{$type}{males},
+            $genetics->{types}{$parentcall}{$type}{females}
+        ));
+
     }
+    my @t = sort keys %types;
+    push @t, "Reject" if ( @t == 0 );
+    print "$parentcall\t@t\n";
     return ( 0, 0, 0 ) if keys %types != 1;
+
     my $type = ( keys %types )[0];
     return ( 0, 0, 0 ) if $type eq "Reject";
 
@@ -177,21 +184,81 @@ sub get_chisq {
     get_expected_classes( \%exp, 'M', $malecalls,   $validmale );
     get_expected_classes( \%exp, 'F', $femalecalls, $validfemale );
 
-    #    print "\n";
     my $chisq;
-
-    for my $e ( keys %exp ) {
-        my $obsv = $obs{$e} // 0;
-        $chisq += ( ( $obsv - $exp{$e} )**2 ) / $exp{$e};
+    for my $c ( 'MA', 'MB', 'MH', 'M.', 'FA', 'FB', 'FH', 'F.' ) {
+        my $obsv = $obs{$c} // 0;
+        my $expv = $exp{$c} // 0;
+        my $v = $expv > 0 ? ( ( $obsv - $expv )**2 ) / $expv : 0;
+        print "$c\t$obsv\t$expv\t$v\n";
+        if ( $expv > 0 ) {
+            $chisq += ( ( $obsv - $expv )**2 ) / $expv;
+        }
     }
     my $df = ( keys %exp ) - 1;
 
-    #    print "Chisq=$chisq, df=$df, crit=$chisqcrit{$df}\n";
+    print "\tChisq=$chisq, df=$df, crit=$chisqcrit{$df}\n";
     return $chisq < $chisqcrit{$df};
 }
 
+sub run_rms_test {
+    my ( $malecalls, $femalecalls, $validmale, $validfemale ) = @_;
+
+    my %exp;
+    my %male_p;
+    my %female_p;
+    get_expected_classes( \%exp, 'M', $malecalls,   $validmale,   \%male_p );
+    get_expected_classes( \%exp, 'F', $femalecalls, $validfemale, \%female_p );
+
+    my $n = @{$malecalls} + @{$femalecalls};
+    my %obs;
+    map { $obs{"M$_"}++ } @{$malecalls};
+    map { $obs{"F$_"}++ } @{$femalecalls};
+
+    my $rms_obs = get_rms( \%obs, \%exp );
+
+    my $trials  = 1000;
+    my $success = 0;
+    for my $i ( 1 .. $trials ) {
+        my %model;
+        map {
+            my $class = 'F' . get_random_class( \%female_p );
+            $model{$class}++
+        } ( 1 .. @{$femalecalls} );
+        map { my $class = 'M' . get_random_class( \%male_p ); $model{$class}++ }
+          ( 1 .. @{$malecalls} );
+
+        my $rms_model = get_rms( \%model, \%exp );
+        $success++ if ( $rms_model >= $rms_obs );
+    }
+    my $p = sprintf "%4.2f", $success / $trials;
+    print "RMS p = $p\n";
+    return $p > 0.05;
+}
+
+sub get_rms {
+    my ( $obs, $exp ) = @_;
+
+    my $rms;
+    for my $c ( 'MA', 'MB', 'MH', 'M.', 'FA', 'FB', 'FH', 'F.' ) {
+        my $obsv = $obs->{$c} // 0;
+        my $expv = $exp->{$c} // 0;
+        $rms += ( $obsv - $expv )**2;
+    }
+    $rms = sqrt( $rms / 8 );
+
+    return $rms;
+}
+
+sub get_random_class {
+    my ($p) = @_;
+    my $rand = rand();
+    for my $gt ( keys %{$p} ) {
+        return $gt if ( $p->{$gt}{min} < $rand && $rand <= $p->{$gt}{max} );
+    }
+}
+
 sub get_expected_classes {
-    my ( $exp_ref, $sex, $calls, $valid ) = @_;
+    my ( $exp_ref, $sex, $calls, $valid, $p ) = @_;
     my @exp = split /,/, $valid;
     my $shares = 0;
     for my $e (@exp) {
@@ -199,13 +266,16 @@ sub get_expected_classes {
             my $share = $1 // 1;
             $exp_ref->{"$sex$2"} = $share;
             $shares += $share;
-
-            #            print "$sex$2 x $share : "
         }
     }
+    my $cum_prob = 0;
     for my $e (@exp) {
         $e = $2 if ( $e =~ /^(\d)([ABH.])$/ );
-        $exp_ref->{"$sex$e"} = $exp_ref->{"$sex$e"} / $shares * @{$calls};
+        my $prob = $exp_ref->{"$sex$e"} / $shares;
+        $exp_ref->{"$sex$e"} = $prob * @{$calls};
+        $p->{"$e"}{min} = $cum_prob;
+        $cum_prob += $prob;
+        $p->{"$e"}{max} = $cum_prob;
     }
 }
 
@@ -466,7 +536,7 @@ sub output_scf {
         foreach my $pos ( sort { $a <=> $b } keys %{ $data->{$type} } ) {
 
             print $handle
-"$scf\t$pos\t$type\t$data->{$type}{$pos}{mq}\t$data->{$type}{$pos}{fs}\t";
+"$scf\t$pos\t$type\t$data->{$type}{$pos}{parent}\t$data->{$type}{$pos}{mq}\t$data->{$type}{$pos}{fs}\t";
             my @gt = split //, $data->{$type}{$pos}{marker}{gt};
             foreach my $i ( 0 .. $#gt ) {
                 my $col =
@@ -478,8 +548,8 @@ sub output_scf {
             my @edge      = @{ $data->{$type}{$pos}{marker}{edge} };
             my @cons      = split //, $data->{$type}{$pos}{marker}{cons};
             my @corrected = split //, $data->{$type}{$pos}{marker}{corrected};
-            
-            if (@cons == 0 or @corrected == 0) {
+
+            if ( @cons == 0 or @corrected == 0 ) {
                 print $handle "\n";
                 next;
             }
