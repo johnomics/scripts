@@ -26,8 +26,14 @@ my %chisqcrit = (
 my %maskcall = (
     A   => -1,
     H   => 1,
-    B   => 0,
+    B   => -1,
     '.' => 0,
+);
+
+my %swapphase = (
+    "Intercross" => { "A" => "B", "B" => "A" },
+    "Maternal"   => { "A" => "H", "H" => "A" },
+    "Paternal"   => { "A" => "H", "H" => "A" }
 );
 
 my %callorder;
@@ -57,13 +63,9 @@ sub collapse {
                 my $ref = $scfref->{$type}{$pos}{marker}{$sample};
                 push @edge, defined $ref->{edge}
                   && $ref->{edge} != 0 ? abs( $ref->{edge} ) : '.';
-                $gt .= $ref->{gt} == 1 ? 'A' : $ref->{gt} == -1 ? 'B' : '-';
-                $cons .=
-                  $ref->{cons} == 1 ? 'A' : $ref->{cons} == -1 ? 'B' : '-';
-                $corrected .=
-                    $ref->{corrected} == 1  ? 'A'
-                  : $ref->{corrected} == -1 ? 'B'
-                  :                           '-';
+                $gt        .= $ref->{gt}        // '-';
+                $cons      .= $ref->{cons}      // '-';
+                $corrected .= $ref->{corrected} // '-';
                 push @gq, $ref->{gq};
             }
             delete $scfref->{$type}{$pos}{marker};
@@ -88,7 +90,9 @@ sub get_markers {
         next if !$marker;
         next if $info->{'FS'} > FS_THRESHOLD;
         next if $info->{'MQ'} < MQ_THRESHOLD;
-        check_phase( $marker, $markers{$type}{ $prevpos{$type} }{marker} )
+
+        check_phase( $marker, $markers{$type}{ $prevpos{$type} }{marker},
+            $type )
           if ( $prevpos{$type} );
         $markers{$type}{$pos}{marker} = $marker;
         $markers{$type}{$pos}{parent} = $parentcall;
@@ -100,18 +104,40 @@ sub get_markers {
 }
 
 sub check_phase {
-    my ( $cur, $prev ) = @_;
+    my ( $cur, $prev, $type ) = @_;
     my $phasea = 0;
     my $phaseb = 0;
+    $type =~ s/\-([AS]+)//;
     foreach my $sample ( keys %{$cur} ) {
-        $phasea++ if ( $cur->{$sample}{gt} eq $prev->{$sample}{gt} );
-        $phaseb++ if ( ( $cur->{$sample}{gt} * -1 ) eq $prev->{$sample}{gt} );
-    }
-    if ( $phaseb > $phasea ) {
-        foreach my $sample ( keys %{$cur} ) {
-            $cur->{$sample}{gt} *= -1;
+        if ( defined $swapphase{$type}{ $cur->{$sample}{gt} } ) {
+            $phasea++ if ( $cur->{$sample}{gt} eq $prev->{$sample}{gt} );
+            $phaseb++
+              if $swapphase{$type}{ $cur->{$sample}{gt} } eq
+              $prev->{$sample}{gt};
         }
     }
+    print "$type\t$phasea\t$phaseb\n";
+    if ( $phaseb > $phasea ) {
+        foreach my $sample ( keys %{$cur} ) {
+            $cur->{$sample}{gt} = $swapphase{$type}{ $cur->{$sample}{gt} }
+              // $cur->{$sample}{gt};
+        }
+    }
+    return;
+}
+
+sub check_phase_sexspecific {
+    my ( $cur, $prev ) = @_;
+
+    return;
+}
+
+sub check_phase_intercross {
+    my ( $cur, $prev ) = @_;
+
+    my $phasea = 0;
+    my $phaseb = 0;
+
     return;
 }
 
@@ -139,31 +165,46 @@ sub parse_snp {
 
         push @{ $gtsbysex{ $genetics->{samplesex}{$sample} } }, $gt;
         $marker{$sample}{call} = $call;
-        $marker{$sample}{gt}   = $maskcall{$gt};
+        $marker{$sample}{gt}   = $gt;
         $marker{$sample}{gq}   = get_cp( 'GQ', $f[$opos], $callf );
     }
 
-    print "$f[0]\t$f[1]\t$parentcall\n";
-    print "Males\t@{ $gtsbysex{'Male'} }\nFemales\t@{ $gtsbysex{'Female'}}\n";
+#     print "$f[0]\t$f[1]\t$parentcall\n";
+#     print "Males\t@{ $gtsbysex{'Male'} }\nFemales\t@{ $gtsbysex{'Female'}}\n";
     my %types;
     for my $type ( keys %{ $genetics->{types}{$parentcall} } ) {
-        print
-"Testing $type\tExpected:\tMales:$genetics->{types}{$parentcall}{$type}{males}\tFemales:$genetics->{types}{$parentcall}{$type}{females}\n";
-        $types{$type} ++ if (run_rms_test(
-            \@{ $gtsbysex{"Male"} },
-            \@{ $gtsbysex{"Female"} },
-            $genetics->{types}{$parentcall}{$type}{males},
-            $genetics->{types}{$parentcall}{$type}{females}
-        ));
+
+#        print
+#"Testing $type\tExpected:\tMales:$genetics->{types}{$parentcall}{$type}{males}\tFemales:$genetics->{types}{$parentcall}{$type}{females}\n";
+        $types{$type}++
+          if (
+            run_rms_test(
+                \@{ $gtsbysex{"Male"} },
+                \@{ $gtsbysex{"Female"} },
+                $genetics->{types}{$parentcall}{$type}{males},
+                $genetics->{types}{$parentcall}{$type}{females},
+                $genetics->{rms}
+            )
+          );
 
     }
     my @t = sort keys %types;
     push @t, "Reject" if ( @t == 0 );
-    print "$parentcall\t@t\n";
+
+    #        print "$parentcall\t@t\n";
     return ( 0, 0, 0 ) if keys %types != 1;
 
     my $type = ( keys %types )[0];
     return ( 0, 0, 0 ) if $type eq "Reject";
+
+    # Correct eg B/- to H
+    if ( defined $genetics->{types}{$parentcall}{$type}{corrections} ) {
+        foreach my $sample ( @{ $samples->{offspring}{order} } ) {
+            $marker{$sample}{gt} =
+              $genetics->{types}{$parentcall}{$type}{corrections}
+              { $marker{$sample}{gt} } // $marker{$sample}{gt};
+        }
+    }
 
     my @info = split /;/, $f[7];
     my %info;
@@ -172,36 +213,8 @@ sub parse_snp {
     return ( \%marker, $type, $parentcall, $pos, \%info );
 }
 
-sub get_chisq {
-    my ( $malecalls, $femalecalls, $validmale, $validfemale ) = @_;
-
-    my $n = @{$malecalls} + @{$femalecalls};
-    my %obs;
-    map { $obs{"M$_"}++ } @{$malecalls};
-    map { $obs{"F$_"}++ } @{$femalecalls};
-
-    my %exp;
-    get_expected_classes( \%exp, 'M', $malecalls,   $validmale );
-    get_expected_classes( \%exp, 'F', $femalecalls, $validfemale );
-
-    my $chisq;
-    for my $c ( 'MA', 'MB', 'MH', 'M.', 'FA', 'FB', 'FH', 'F.' ) {
-        my $obsv = $obs{$c} // 0;
-        my $expv = $exp{$c} // 0;
-        my $v = $expv > 0 ? ( ( $obsv - $expv )**2 ) / $expv : 0;
-        print "$c\t$obsv\t$expv\t$v\n";
-        if ( $expv > 0 ) {
-            $chisq += ( ( $obsv - $expv )**2 ) / $expv;
-        }
-    }
-    my $df = ( keys %exp ) - 1;
-
-    print "\tChisq=$chisq, df=$df, crit=$chisqcrit{$df}\n";
-    return $chisq < $chisqcrit{$df};
-}
-
 sub run_rms_test {
-    my ( $malecalls, $femalecalls, $validmale, $validfemale ) = @_;
+    my ( $malecalls, $femalecalls, $validmale, $validfemale, $rms ) = @_;
 
     my %exp;
     my %male_p;
@@ -214,24 +227,15 @@ sub run_rms_test {
     map { $obs{"M$_"}++ } @{$malecalls};
     map { $obs{"F$_"}++ } @{$femalecalls};
 
-    my $rms_obs = get_rms( \%obs, \%exp );
-
-    my $trials  = 1000;
-    my $success = 0;
-    for my $i ( 1 .. $trials ) {
-        my %model;
-        map {
-            my $class = 'F' . get_random_class( \%female_p );
-            $model{$class}++
-        } ( 1 .. @{$femalecalls} );
-        map { my $class = 'M' . get_random_class( \%male_p ); $model{$class}++ }
-          ( 1 .. @{$malecalls} );
-
-        my $rms_model = get_rms( \%model, \%exp );
-        $success++ if ( $rms_model >= $rms_obs );
+    my $rms_obs     = get_rms( \%obs, \%exp );
+    my $rms_pattern = "$validmale:$validfemale";
+    my $p           = 0.99;
+    while ( $p > 0 && $rms_obs >= $rms->{$rms_pattern}{$p} ) {
+        $p -= 0.01;
+        $p = sprintf "%.2f", $p;
     }
-    my $p = sprintf "%4.2f", $success / $trials;
-    print "RMS p = $p\n";
+
+    #    print "RMS=$rms_obs p = $p\n";
     return $p > 0.05;
 }
 
@@ -247,14 +251,6 @@ sub get_rms {
     $rms = sqrt( $rms / 8 );
 
     return $rms;
-}
-
-sub get_random_class {
-    my ($p) = @_;
-    my $rand = rand();
-    for my $gt ( keys %{$p} ) {
-        return $gt if ( $p->{$gt}{min} < $rand && $rand <= $p->{$gt}{max} );
-    }
 }
 
 sub get_expected_classes {
@@ -421,10 +417,10 @@ sub get_sample_blocks {
     @mask = ( (-1) x $masklen, 0, (1) x $masklen ) if ( !@mask );
     my @called;
     foreach my $p ( @{$pos} ) {
-        push @called, $p if $marker->{$p}{marker}{$sample}{gt} != 0;
+        push @called, $p
+          if $maskcall{ $marker->{$p}{marker}{$sample}{gt} } != 0;
     }
 
-    #    print "@pos\n@called\n";
     foreach my $i ( $masklen .. $#called - $masklen ) {
         next if defined $marker->{ $called[$i] }{marker}{$sample}{edge};
         my @maskcallpos = @called[ $i - $masklen .. $i + $masklen ];
@@ -432,11 +428,8 @@ sub get_sample_blocks {
         my $edgesum = 0;
 
         $marker->{ $called[$i] }{marker}{$sample}{edge} = int sum map {
-            $marker->{ $maskcallpos[$_] }{marker}{$sample}{gt} * $mask[$_]
-
- #            ( $marker->{ $maskcallpos[$_] }{marker}{$sample}{gt} *
- #                  $marker->{ $maskcallpos[$_] }{marker}{$sample}{gq} ) / 100 *
- #              $mask[$_]
+            $maskcall{ $marker->{ $maskcallpos[$_] }{marker}{$sample}{gt} } *
+              $mask[$_]
         } 0 .. $#mask;
     }
 }
@@ -485,22 +478,6 @@ sub merge {
     my ( $part, $all ) = @_;
     foreach my $scf ( keys %{$part} ) {
         $all->{scf}{$scf}++;
-
-#        foreach my $type ( keys %{ $part->{$scf} } ) {
-#            foreach my $pos ( keys %{ $part->{$scf}{$type} } ) {
-#                $all->{scf}{$scf}{$type}{$pos}{parent} =
-#                  $part->{$scf}{$type}{$pos}{parent};
-#                $all->{scf}{$scf}{$type}{$pos}{marker}{gt} =
-#                  $part->{$scf}{$type}{$pos}{marker}{gt};
-#                $all->{scf}{$scf}{$type}{$pos}{marker}{edge} =
-#                  $part->{$scf}{$type}{$pos}{marker}{edge};
-#                $all->{scf}{$scf}{$type}{$pos}{marker}{cons} =
-#                  $part->{$scf}{$type}{$pos}{marker}{cons};
-#                foreach my $gq ( @{ $part->{$scf}{$type}{$pos}{marker}{gq} } ) {
-#                    push @{ $all->{scf}{$scf}{$type}{$pos}{marker}{gq} }, $gq;
-#                }
-#            }
-#        }
     }
 }
 

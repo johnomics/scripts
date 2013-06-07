@@ -97,28 +97,62 @@ sub load_genetics {
             my ( $ignore, $ind ) = split /\t/, $infoline;
             $genetics{ignore}{$ind} = 0;
         }
-        elsif ($infoline =~ /^Parents/) {
-            my ($header, $parents) = split /\t/, $infoline;
+        elsif ( $infoline =~ /^Parents/ ) {
+            my ( $header, $parents ) = split /\t/, $infoline;
             my @parents = split /,/, $parents;
             $genetics{parents} = \@parents;
         }
-        elsif ($infoline =~ /^Female/ or $infoline =~ /^Male/) {
-            my ($sex, $samples) = split /\t/, $infoline;
+        elsif ( $infoline =~ /^Female/ or $infoline =~ /^Male/ ) {
+            my ( $sex, $samples ) = split /\t/, $infoline;
             my @samples = split /,/, $samples;
             $genetics{sex}{$sex} = \@samples;
-            map {$genetics{samplesex}{$_}=$sex} @samples;
+            map { $genetics{samplesex}{$_} = $sex } @samples;
         }
     }
+
     # Now $infoline contains type table header; ignore
-    
+
+    my %f2patterns;
     while ( my $marker_type = <$geneticsfile> ) {
         chomp $marker_type;
-        my ( $parents, $males, $females, $type ) = split /\t/, $marker_type;
-        $genetics{types}{$parents}{$type}{males} = $males;
+        my ( $parents, $males, $females, $type, $corrections ) = split /\t/, $marker_type;
+        $genetics{types}{$parents}{$type}{males}   = $males;
         $genetics{types}{$parents}{$type}{females} = $females;
+        if ($corrections ne "") {
+            my ($orig, $fix) = split '->', $corrections;
+            $genetics{types}{$parents}{$type}{corrections}{$orig} = $fix;
+        }
+        $f2patterns{"$males:$females"}++;
     }
-
     close $geneticsfile;
+
+    if ( keys %f2patterns ) {
+        my $rmsfilename   = $geneticsfilename;
+        my $numf2patterns = keys %f2patterns;
+        $rmsfilename =~ s/txt$/rms_pval.txt/;
+        if ( !-e $rmsfilename ) {
+            system(
+"generate_rms_distributions.pl -g $geneticsfilename -t $numf2patterns -s 1000000"
+            );
+        }
+
+        open my $rmsfile, "<", $rmsfilename
+          or croak "Can't open $rmsfilename! $OS_ERROR\n";
+        my $header = <$rmsfile>;
+        chomp $header;
+        my @patterns = split /\t/, $header;
+        shift @patterns;    # Pvalue
+        while ( my $pval_line = <$rmsfile> ) {
+            chomp $pval_line;
+            my @vals = split /\t/, $pval_line;
+            my $pval = shift @vals;
+            for my $i ( 0 .. $#patterns ) {
+                $genetics{rms}{ $patterns[$i] }{$pval} = $vals[$i];
+            }
+        }
+
+        close $rmsfile;
+    }
     \%genetics;
 }
 

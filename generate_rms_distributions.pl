@@ -88,7 +88,7 @@ $part_pm->run_on_finish(
 sub merge {
     my ( $data, $all ) = @_;
     my $f2    = ( keys %{$data} )[0];
-    my @vals  = sort { $a <=> $b } keys %{ $data->{$f2} };
+    my @vals  = sort { $b <=> $a } keys %{ $data->{$f2} };
     my $inc   = $args{simulations} / 100;
     my $v     = 0;
     my $psims = 0;
@@ -150,8 +150,8 @@ sub get_rms_distribution {
     my %exp;
     my %male_p;
     my %female_p;
-    get_expected_classes( \%exp, 'M', $male_exp,   \%male_p );
-    get_expected_classes( \%exp, 'F', $female_exp, \%female_p );
+    get_expected_classes( \%exp, 'M', $males, $male_exp,   \%male_p );
+    get_expected_classes( \%exp, 'F', $females, $female_exp, \%female_p );
 
     my $trials = $args{simulations};
     my %rms;
@@ -196,7 +196,7 @@ sub get_random_class {
 }
 
 sub get_expected_classes {
-    my ( $exp_ref, $sex, $valid, $p ) = @_;
+    my ( $exp_ref, $sex, $samples, $valid, $p ) = @_;
     my @exp = split /,/, $valid;
     my $shares = 0;
     for my $e (@exp) {
@@ -210,6 +210,7 @@ sub get_expected_classes {
     for my $e (@exp) {
         $e = $2 if ( $e =~ /^(\d)([ABH.])$/ );
         my $prob = $exp_ref->{"$sex$e"} / $shares;
+        $exp_ref->{"$sex$e"} = $prob * $samples;
         $p->{"$e"}{min} = $cum_prob;
         $cum_prob += $prob;
         $p->{"$e"}{max} = $cum_prob;
