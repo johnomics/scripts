@@ -20,11 +20,13 @@ my %args;
 $args{genetics}    = "";
 $args{threads}     = 1;
 $args{simulations} = 100000;
+$args{outfile}     = "";
 
 my $options_okay = GetOptions(
     'genetics=s'    => \$args{genetics},
     'threads=i'     => \$args{threads},
     'simulations=i' => \$args{simulations},
+    'outfile=s'     => \$args{outfile},
 );
 
 croak
@@ -123,13 +125,21 @@ foreach my $i ( 1 .. @dists ) {
 
 $part_pm->wait_all_children;
 
-my $outfilename = $args{genetics};
-$outfilename = $1 if ($outfilename =~ /(.+)\.txt/);
-$outfilename .= ".rms_pval.txt";
-open my $outfile, ">", $outfilename or croak "Can't open $outfilename: $OS_ERROR\n";
+my $outfilename;
+if ($args{outfile} ne "") {
+    $outfilename = $args{outfile};
+}
+else {
+    $outfilename = $args{genetics};
+    $outfilename = $1 if ( $outfilename =~ /(.+)\.txt/ );
+    $outfilename .= ".rms_pval.txt";
+}
+
+open my $outfile, ">", $outfilename
+  or croak "Can't open $outfilename: $OS_ERROR\n";
 
 print $outfile "P value";
-map {print $outfile "\t$_"} sort keys %data;
+map { print $outfile "\t$_" } sort keys %data;
 print $outfile "\n";
 
 my $pval = 0.00;
@@ -150,8 +160,14 @@ sub get_rms_distribution {
     my %exp;
     my %male_p;
     my %female_p;
-    get_expected_classes( \%exp, 'M', $males, $male_exp,   \%male_p );
+    get_expected_classes( \%exp, 'M', $males,   $male_exp,   \%male_p );
     get_expected_classes( \%exp, 'F', $females, $female_exp, \%female_p );
+
+    # Add small probability of errors
+    my $error_classes = 8 - keys %exp;
+    for my $c ( 'MA', 'MB', 'MH', 'M.', 'FA', 'FB', 'FH', 'F.' ) {
+        $exp{$c} = defined $exp{$c} ? $exp{$c} * 0.9 : 0.1 / $error_classes;
+    }
 
     my $trials = $args{simulations};
     my %rms;
