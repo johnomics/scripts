@@ -108,12 +108,15 @@ sub get_markers {
         check_phase( $marker, $markers{$type}{ $prevpos{$type} }{marker},
             $type )
           if ( $type ne "Reject" && $prevpos{$type} );
-        $markers{$type}{$pos}{marker} = $marker;
-        $markers{$type}{$pos}{parent} = $parentcall;
-        $markers{$type}{$pos}{mq}     = $info->{'MQ'};
-        $markers{$type}{$pos}{fs}     = $info->{'FS'};
-        $markers{$type}{$pos}{error}  = $info->{error} // "";
-        $prevpos{$type}               = $pos;
+        $markers{$type}{$pos}{marker}     = $marker;
+        $markers{$type}{$pos}{parent}     = $parentcall;
+        $markers{$type}{$pos}{mq}         = $info->{'MQ'};
+        $markers{$type}{$pos}{fs}         = $info->{'FS'};
+        $markers{$type}{$pos}{error}      = $info->{error} // "";
+        $markers{$type}{$pos}{rmsobs}     = $info->{rmsobs};
+        $markers{$type}{$pos}{rmspattern} = $info->{rmspattern};
+        $markers{$type}{$pos}{p}          = $info->{p};
+        $prevpos{$type}                   = $pos;
     }
     \%markers;
 }
@@ -160,13 +163,14 @@ sub parse_snp {
     my %marker;
     if ( !defined $genetics->{types}{$parentcall} ) {
         $info{error} = "Not a valid parent call: @parentcalls";
-        foreach my $sample (@{$samples->{offspring}{order}}) {
+        foreach my $sample ( @{ $samples->{offspring}{order} } ) {
             my $opos = $samples->{offspring}{lookup}{$sample};
             my $call = get_cp( 'GT', $f[$opos], $callf );
-            my $a = substr $call, 0, 1;
-            my $b = substr $call, -1;
-            $marker{$sample}{gt}   = $a eq '.' && $b eq '.' ? '.' : $a eq $b ? $a : 'H';
-            $marker{$sample}{gq}   = get_cp( 'GQ', $f[$opos], $callf );
+            my $a    = substr $call, 0, 1;
+            my $b    = substr $call, -1;
+            $marker{$sample}{gt} =
+              $a eq '.' && $b eq '.' ? '.' : $a eq $b ? $a : 'H';
+            $marker{$sample}{gq} = get_cp( 'GQ', $f[$opos], $callf );
         }
         return ( \%marker, "Reject", $parentcall, $pos, \%info );
     }
@@ -180,8 +184,8 @@ sub parse_snp {
         my $gt   = $vgt->{$call} // "X";
         $invalid_samples{$sample} = $call if $gt eq "X";
         push @{ $gtsbysex{ $genetics->{samplesex}{$sample} } }, $gt;
-        $marker{$sample}{gt}   = $gt;
-        $marker{$sample}{gq}   = get_cp( 'GQ', $f[$opos], $callf );
+        $marker{$sample}{gt} = $gt;
+        $marker{$sample}{gq} = get_cp( 'GQ', $f[$opos], $callf );
     }
 
     if ( keys %invalid_samples ) {
@@ -191,25 +195,25 @@ sub parse_snp {
         return ( \%marker, "Reject", $parentcall, $pos, \%info );
     }
 
-    my %types;
+    my (%types, %rms_obs, %rms_pattern);
     my @valid_types;
     for my $type ( keys %{ $genetics->{types}{$parentcall} } ) {
 
-        $types{$type} = run_rms_test(
+        ( $types{$type}, $rms_obs{$type}, $rms_pattern{$type} ) = run_rms_test(
             \@{ $gtsbysex{"Male"} },
             \@{ $gtsbysex{"Female"} },
             $genetics->{types}{$parentcall}{$type}{males},
             $genetics->{types}{$parentcall}{$type}{females},
             $genetics->{rms}
         );
-        push @valid_types, $type if $types{$type} < 0.05;
+        push @valid_types, $type if $types{$type} > 0.05;
     }
 
     if ( @valid_types ne 1 ) {
         my $typestring;
         map {
             $typestring .= "$_:$types{$_}";
-            $typestring .= "*" if $types{$_} < 0.05;
+            $typestring .= "*" if $types{$_} > 0.05;
             $typestring .= " "
         } sort { $types{$a} <=> $types{$b} } keys %types;
         chop $typestring;
@@ -226,6 +230,10 @@ sub parse_snp {
         $info{error} = "No valid type found";
         return ( \%marker, "Reject", $parentcall, $pos, \%info );
     }
+
+    $info{rmsobs}     = $rms_obs{$type};
+    $info{rmspattern} = $rms_pattern{$type};
+    $info{p}          = $types{$type};
 
     # Correct eg B/- to H
     if ( defined $genetics->{types}{$parentcall}{$type}{corrections} ) {
@@ -261,8 +269,7 @@ sub run_rms_test {
         $p = sprintf "%.2f", $p;
     }
 
-    #    print "RMS=$rms_obs p = $p\n";
-    return $p;
+    return ( $p, $rms_obs, $rms->{$rms_pattern}{$p} );
 }
 
 sub get_rms {
@@ -541,6 +548,10 @@ sub output_scf {
 
             print $handle
 "$scf\t$pos\t$type\t$data->{$type}{$pos}{parent}\t$data->{$type}{$pos}{mq}\t$data->{$type}{$pos}{fs}\t";
+
+            if ($type ne "Reject") {
+                printf $handle "%.2f\t%.2f\t%.2f\t", $data->{$type}{$pos}{p}, $data->{$type}{$pos}{rmsobs}, $data->{$type}{$pos}{rmspattern};
+            }
 
             my @gt = split //, $data->{$type}{$pos}{marker}{gt};
             foreach my $i ( 0 .. $#gt ) {
