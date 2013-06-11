@@ -55,25 +55,34 @@ sub collapse {
     foreach my $type ( keys %{$scfref} ) {
         foreach my $pos ( keys %{ $scfref->{$type} } ) {
             my $gt = "";
+            my @gq;
+
             my @edge;
             my $cons      = "";
             my $corrected = "";
-            my @gq;
+
             foreach my $sample ( @{ $samples->{offspring}{order} } ) {
                 my $ref = $scfref->{$type}{$pos}{marker}{$sample};
-                push @edge, defined $ref->{edge}
-                  && $ref->{edge} != 0 ? abs( $ref->{edge} ) : '.';
-                $gt        .= $ref->{gt}        // '-';
-                $cons      .= $ref->{cons}      // '-';
-                $corrected .= $ref->{corrected} // '-';
+
+                $gt .= $ref->{gt} // '-';
                 push @gq, $ref->{gq};
+
+                if ( $type ne "Reject" ) {
+                    push @edge, defined $ref->{edge}
+                      && $ref->{edge} != 0 ? abs( $ref->{edge} ) : '.';
+                    $cons      .= $ref->{cons}      // '-';
+                    $corrected .= $ref->{corrected} // '-';
+                }
             }
             delete $scfref->{$type}{$pos}{marker};
-            $scfref->{$type}{$pos}{marker}{edge}      = \@edge;
-            $scfref->{$type}{$pos}{marker}{cons}      = $cons;
-            $scfref->{$type}{$pos}{marker}{corrected} = $corrected;
-            $scfref->{$type}{$pos}{marker}{gt}        = $gt;
-            $scfref->{$type}{$pos}{marker}{gq}        = \@gq;
+            $scfref->{$type}{$pos}{marker}{gt} = $gt;
+            $scfref->{$type}{$pos}{marker}{gq} = \@gq;
+
+            if ( $type ne "Reject" ) {
+                $scfref->{$type}{$pos}{marker}{edge}      = \@edge;
+                $scfref->{$type}{$pos}{marker}{cons}      = $cons;
+                $scfref->{$type}{$pos}{marker}{corrected} = $corrected;
+            }
         }
     }
 }
@@ -87,17 +96,23 @@ sub get_markers {
         chomp $snp;
         my ( $marker, $type, $parentcall, $pos, $info ) =
           parse_snp( $snp, $samples, $genetics );
-        next if !$marker;
-        next if $info->{'FS'} > FS_THRESHOLD;
-        next if $info->{'MQ'} < MQ_THRESHOLD;
+        if ( $type ne "Reject" && $info->{'FS'} > FS_THRESHOLD ) {
+            $info->{error} = "Fails FS threshold: Type $type";
+            $type = "Reject";
+        }
+        if ( $type ne "Reject" && $info->{'MQ'} < MQ_THRESHOLD ) {
+            $info->{error} = "Fails MQ threshold: Type $type";
+            $type = "Reject";
+        }
 
         check_phase( $marker, $markers{$type}{ $prevpos{$type} }{marker},
             $type )
-          if ( $prevpos{$type} );
+          if ( $type ne "Reject" && $prevpos{$type} );
         $markers{$type}{$pos}{marker} = $marker;
         $markers{$type}{$pos}{parent} = $parentcall;
         $markers{$type}{$pos}{mq}     = $info->{'MQ'};
         $markers{$type}{$pos}{fs}     = $info->{'FS'};
+        $markers{$type}{$pos}{error}  = $info->{error} // "";
         $prevpos{$type}               = $pos;
     }
     \%markers;
@@ -116,28 +131,13 @@ sub check_phase {
               $prev->{$sample}{gt};
         }
     }
-    print "$type\t$phasea\t$phaseb\n";
+
     if ( $phaseb > $phasea ) {
         foreach my $sample ( keys %{$cur} ) {
             $cur->{$sample}{gt} = $swapphase{$type}{ $cur->{$sample}{gt} }
               // $cur->{$sample}{gt};
         }
     }
-    return;
-}
-
-sub check_phase_sexspecific {
-    my ( $cur, $prev ) = @_;
-
-    return;
-}
-
-sub check_phase_intercross {
-    my ( $cur, $prev ) = @_;
-
-    my $phasea = 0;
-    my $phaseb = 0;
-
     return;
 }
 
@@ -152,50 +152,80 @@ sub parse_snp {
       @{ $genetics->{parents} };
 
     my ( $parentcall, $vgt ) = get_parent_call( \@parentcalls );
-    return ( 0, 0, 0 )
-      if ( !defined $genetics->{types}{$parentcall} );
+
+    my @info = split /;/, $f[7];
+    my %info;
+    map { $info{$1} = $2 if (/^(.+)=(.+)$/); } @info;
+
+    my %marker;
+    if ( !defined $genetics->{types}{$parentcall} ) {
+        $info{error} = "Not a valid parent call: @parentcalls";
+        foreach my $sample (@{$samples->{offspring}{order}}) {
+            my $opos = $samples->{offspring}{lookup}{$sample};
+            my $call = get_cp( 'GT', $f[$opos], $callf );
+            my $a = substr $call, 0, 1;
+            my $b = substr $call, -1;
+            $marker{$sample}{gt}   = $a eq '.' && $b eq '.' ? '.' : $a eq $b ? $a : 'H';
+            $marker{$sample}{gq}   = get_cp( 'GQ', $f[$opos], $callf );
+        }
+        return ( \%marker, "Reject", $parentcall, $pos, \%info );
+    }
 
     my %gtsbysex;
-    my %marker;
+    my %invalid_samples;
+
     foreach my $sample ( @{ $samples->{offspring}{order} } ) {
         my $opos = $samples->{offspring}{lookup}{$sample};
         my $call = get_cp( 'GT', $f[$opos], $callf );
         my $gt   = $vgt->{$call} // "X";
-        return ( 0, 0, 0 ) if $gt eq "X";
-
+        $invalid_samples{$sample} = $call if $gt eq "X";
         push @{ $gtsbysex{ $genetics->{samplesex}{$sample} } }, $gt;
-        $marker{$sample}{call} = $call;
         $marker{$sample}{gt}   = $gt;
         $marker{$sample}{gq}   = get_cp( 'GQ', $f[$opos], $callf );
     }
 
-#     print "$f[0]\t$f[1]\t$parentcall\n";
-#     print "Males\t@{ $gtsbysex{'Male'} }\nFemales\t@{ $gtsbysex{'Female'}}\n";
+    if ( keys %invalid_samples ) {
+        $info{error} = "Invalid calls: ";
+        map { $info{error} .= "$_:$invalid_samples{$_} " }
+          sort keys %invalid_samples;
+        return ( \%marker, "Reject", $parentcall, $pos, \%info );
+    }
+
     my %types;
+    my @valid_types;
     for my $type ( keys %{ $genetics->{types}{$parentcall} } ) {
 
-#        print
-#"Testing $type\tExpected:\tMales:$genetics->{types}{$parentcall}{$type}{males}\tFemales:$genetics->{types}{$parentcall}{$type}{females}\n";
-        $types{$type}++
-          if (
-            run_rms_test(
-                \@{ $gtsbysex{"Male"} },
-                \@{ $gtsbysex{"Female"} },
-                $genetics->{types}{$parentcall}{$type}{males},
-                $genetics->{types}{$parentcall}{$type}{females},
-                $genetics->{rms}
-            )
-          );
-
+        $types{$type} = run_rms_test(
+            \@{ $gtsbysex{"Male"} },
+            \@{ $gtsbysex{"Female"} },
+            $genetics->{types}{$parentcall}{$type}{males},
+            $genetics->{types}{$parentcall}{$type}{females},
+            $genetics->{rms}
+        );
+        push @valid_types, $type if $types{$type} < 0.05;
     }
-    my @t = sort keys %types;
-    push @t, "Reject" if ( @t == 0 );
 
-    #        print "$parentcall\t@t\n";
-    return ( 0, 0, 0 ) if keys %types != 1;
+    if ( @valid_types ne 1 ) {
+        my $typestring;
+        map {
+            $typestring .= "$_:$types{$_}";
+            $typestring .= "*" if $types{$_} < 0.05;
+            $typestring .= " "
+        } sort { $types{$a} <=> $types{$b} } keys %types;
+        chop $typestring;
+        $info{error} =
+            @valid_types == 0 ? "No valid types: "
+          : @valid_types > 1  ? "Too many valid types: "
+          :                     "";
+        $info{error} .= $typestring;
+        return ( \%marker, "Reject", $parentcall, $pos, \%info );
+    }
 
-    my $type = ( keys %types )[0];
-    return ( 0, 0, 0 ) if $type eq "Reject";
+    my $type = (@valid_types)[0];
+    if ( $type eq "Reject" ) {
+        $info{error} = "No valid type found";
+        return ( \%marker, "Reject", $parentcall, $pos, \%info );
+    }
 
     # Correct eg B/- to H
     if ( defined $genetics->{types}{$parentcall}{$type}{corrections} ) {
@@ -205,10 +235,6 @@ sub parse_snp {
               { $marker{$sample}{gt} } // $marker{$sample}{gt};
         }
     }
-
-    my @info = split /;/, $f[7];
-    my %info;
-    map { $info{$1} = $2 if (/^(.+)=(.+)$/); } @info;
 
     return ( \%marker, $type, $parentcall, $pos, \%info );
 }
@@ -236,7 +262,7 @@ sub run_rms_test {
     }
 
     #    print "RMS=$rms_obs p = $p\n";
-    return $p > 0.05;
+    return $p;
 }
 
 sub get_rms {
@@ -360,6 +386,7 @@ sub find_edges {
     my $samples = shift;
 
     foreach my $type ( keys %{$markers} ) {
+        next if ( $type eq "Reject" );
         my @pos = sort { $a <=> $b } keys %{ $markers->{$type} };
         foreach my $sample ( @{ $samples->{offspring}{order} } ) {
             get_sample_blocks( $markers->{$type}, $sample, \@pos, MASKLEN );
@@ -442,8 +469,8 @@ sub get_block_consensus {
         if ( defined $marker->{$p}{marker}{$sample}{edge}
             && abs( $marker->{$p}{marker}{$sample}{edge} ) > $masklen )
         {
-            # Don't include the edge position in the block to date;
-            # calculate the consensus for the edge block on its own,
+            # Don't include the edge position in the current block;
+            # calculate the consensus for the edge position on its own,
             # then move on to the following positions
             calculate_consensus( \@blockpos, $marker, $sample )
               if @blockpos >= 1;
@@ -514,6 +541,7 @@ sub output_scf {
 
             print $handle
 "$scf\t$pos\t$type\t$data->{$type}{$pos}{parent}\t$data->{$type}{$pos}{mq}\t$data->{$type}{$pos}{fs}\t";
+
             my @gt = split //, $data->{$type}{$pos}{marker}{gt};
             foreach my $i ( 0 .. $#gt ) {
                 my $col =
@@ -521,6 +549,11 @@ sub output_scf {
                 print $handle fg $col, $gt[$i];
             }
             print $handle "\t";
+
+            if ( $type eq "Reject" ) {
+                print $handle "$data->{$type}{$pos}{error}\n";
+                next;
+            }
 
             my @edge      = @{ $data->{$type}{$pos}{marker}{edge} };
             my @cons      = split //, $data->{$type}{$pos}{marker}{cons};

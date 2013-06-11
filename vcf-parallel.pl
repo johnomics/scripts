@@ -23,18 +23,22 @@ $args{threads}          = 1;
 $args{output_prefix}    = "vcf-parallel-output";
 $args{genetics}         = "";
 $args{lengths_filename} = "";
+$args{rms_filename}     = "";
 $args{byscf}            = 0;
 $args{maxscf}           = 0;
+$args{uniquescf}        = "";
 
 my $options_okay = GetOptions(
-    'vcf=s'      => \$args{vcf_filename},
-    'script=s'   => \$args{vcf_subs},
-    'threads=i'  => \$args{threads},
-    'output=s'   => \$args{output_prefix},
-    'genetics=s' => \$args{genetics},
-    'lengths=s'  => \$args{lengths_filename},
-    'byscaffold' => \$args{byscf},
-    'maxscf=i'   => \$args{maxscf},
+    'vcf=s'       => \$args{vcf_filename},
+    'script=s'    => \$args{vcf_subs},
+    'threads=i'   => \$args{threads},
+    'output=s'    => \$args{output_prefix},
+    'genetics=s'  => \$args{genetics},
+    'lengths=s'   => \$args{lengths_filename},
+    'rmsfile=s'   => \$args{rms_filename},
+    'byscaffold'  => \$args{byscf},
+    'maxscf=i'    => \$args{maxscf},
+    'uniquescf=s' => \$args{uniquescf},
 );
 croak "No VCF file! Please specify -v $OS_ERROR\n"
   if ( $args{vcf_filename} eq "" );
@@ -74,6 +78,9 @@ my $genome = load_genome( \%args );
 my $samples = get_samples( $args{vcf_filename}, $genetics );
 
 $genome->{scfp} = get_partitions( $genome, $args{threads} );
+$args{threads} = keys %{$genome->{scfp}}; # last thread may not be used;
+    # each part is always larger than minimum size, so scaffolds for final
+    # thread may be spread around the other threads
 
 print_partitions( $genome->{scfp}, $genome->{scfl} );
 
@@ -115,11 +122,12 @@ sub load_genetics {
     my %f2patterns;
     while ( my $marker_type = <$geneticsfile> ) {
         chomp $marker_type;
-        my ( $parents, $males, $females, $type, $corrections ) = split /\t/, $marker_type;
+        my ( $parents, $males, $females, $type, $corrections ) = split /\t/,
+          $marker_type;
         $genetics{types}{$parents}{$type}{males}   = $males;
         $genetics{types}{$parents}{$type}{females} = $females;
-        if ($corrections ne "") {
-            my ($orig, $fix) = split '->', $corrections;
+        if ( $corrections ne "" ) {
+            my ( $orig, $fix ) = split '->', $corrections;
             $genetics{types}{$parents}{$type}{corrections}{$orig} = $fix;
         }
         $f2patterns{"$males:$females"}++;
@@ -127,13 +135,26 @@ sub load_genetics {
     close $geneticsfile;
 
     if ( keys %f2patterns ) {
-        my $rmsfilename   = $geneticsfilename;
+        my $rmsfilename;
+        if ( $args{rms_filename} ne "" ) {
+            $rmsfilename = $args{rms_filename};
+        }
+        else {
+            $rmsfilename = $geneticsfilename;
+            $rmsfilename =~ s/txt$/rms_pval.txt/;
+        }
+
         my $numf2patterns = keys %f2patterns;
-        $rmsfilename =~ s/txt$/rms_pval.txt/;
+
         if ( !-e $rmsfilename ) {
-            system(
+            if ( !defined $args{rms_filename} ) {
+                system(
 "generate_rms_distributions.pl -g $geneticsfilename -t $numf2patterns -s 1000000"
-            );
+                );
+            }
+            else {
+                croak "RMS filename doesn't exist! $args{rms_filename}\n";
+            }
         }
 
         open my $rmsfile, "<", $rmsfilename
@@ -217,27 +238,38 @@ sub run_part {
             $foundpart = 1;
 
             if ( $curscf ne $scf ) {
-                print_part_progress( $scfi, $part, $genome->{scfp} )
-                  if ( $scfi % 10 == 0 );
-
                 if ( $argref->{byscf} && @scf_vcf ) {
-                    process( $curscf, \@scf_vcf, $samples, \%data, $genetics );
+                    process( $curscf, \@scf_vcf, $samples, \%data, $genetics )
+                      if $argref->{uniquescf} eq ""
+                      or $curscf eq $argref->{uniquescf};
                     @scf_vcf = ();
+                    print_part_progress( $scfi, $part, $genome->{scfp} )
+                      if ( $scfi % 10 == 0 );
+                    $scfi++;
                 }
                 $curscf = $scf;
-                $scfi++;
             }
             $argref->{byscf}
               ? push @scf_vcf, $vcf_line
-              : process( $scf, $vcf_line, $samples, \%data, $genetics );
+              : process( $curscf, $vcf_line, $samples, \%data, $genetics );
         }
         else {
-            last if ($foundpart);
+            if ($foundpart) {
+                process( $curscf, \@scf_vcf, $samples, \%data, $genetics )
+                  if $argref->{byscf}
+                  && ( $argref->{uniquescf} eq ""
+                    or $curscf eq $argref->{uniquescf} );
+                @scf_vcf = ();
+                last;
+            }
         }
     }
-    process( $scf, \@scf_vcf, $samples, \%data, $genetics )
-      if $argref->{byscf};
     close $vcf_file;
+    process( $curscf, \@scf_vcf, $samples, \%data, $genetics )
+      if $argref->{byscf} && @scf_vcf
+      && ( $argref->{uniquescf} eq ""
+        or $curscf eq $argref->{uniquescf} );
+    
     return ( \%data, $scfi );
 }
 
@@ -285,7 +317,8 @@ sub get_partitions {
             $part++;
         }
     }
-    return \%scfp;
+
+    \%scfp;
 }
 
 sub get_samples {
