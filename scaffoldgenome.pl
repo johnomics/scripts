@@ -45,7 +45,7 @@ my @mask;
 sub process {
     my ( $scf, $scfref, $samples, $data, $genetics ) = @_;
     $data->{$scf} = get_markers( $scfref, $samples, $genetics );
-    find_edges( $data->{$scf}, $samples );
+    find_edges( $data->{$scf}, $samples, $genetics );
     collapse( $data->{$scf}, $samples );
     output_scf_to_file( $scf, $data->{$scf} );
 }
@@ -389,8 +389,7 @@ sub get_cp {
 }
 
 sub find_edges {
-    my $markers = shift;
-    my $samples = shift;
+    my ($markers, $samples, $genetics) = @_;
 
     foreach my $type ( keys %{$markers} ) {
         next if ( $type eq "Reject" );
