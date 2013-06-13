@@ -12,24 +12,6 @@ use constant ERRORSNPS    => 5;
 use constant FS_THRESHOLD => 35;
 use constant MQ_THRESHOLD => 57;
 
-my %chisqcrit = (
-    1 => 3.84,
-    2 => 5.99,
-    3 => 7.82,
-    4 => 9.49,
-    5 => 11.07,
-    6 => 12.59,
-    7 => 14.07,
-    8 => 15.51,
-);
-
-my %maskcall = (
-    A   => -1,
-    H   => 1,
-    B   => -1,
-    '.' => 0,
-);
-
 my %swapphase = (
     "Intercross" => { "A" => "B", "B" => "A" },
     "Maternal"   => { "A" => "H", "H" => "A" },
@@ -125,7 +107,7 @@ sub check_phase {
     my ( $cur, $prev, $type ) = @_;
     my $phasea = 0;
     my $phaseb = 0;
-    $type =~ s/\-([AS]+)//;
+    $type =~ s/\-(.+)//;
     foreach my $sample ( keys %{$cur} ) {
         if ( defined $swapphase{$type}{ $cur->{$sample}{gt} } ) {
             $phasea++ if ( $cur->{$sample}{gt} eq $prev->{$sample}{gt} );
@@ -195,15 +177,14 @@ sub parse_snp {
         return ( \%marker, "Reject", $parentcall, $pos, \%info );
     }
 
-    my (%types, %rms_obs, %rms_pattern);
+    my ( %types, %rms_obs, %rms_pattern );
     my @valid_types;
     for my $type ( keys %{ $genetics->{types}{$parentcall} } ) {
-
         ( $types{$type}, $rms_obs{$type}, $rms_pattern{$type} ) = run_rms_test(
-            \@{ $gtsbysex{"Male"} },
-            \@{ $gtsbysex{"Female"} },
-            $genetics->{types}{$parentcall}{$type}{males},
-            $genetics->{types}{$parentcall}{$type}{females},
+            \@{ $gtsbysex{'Male'} },
+            \@{ $gtsbysex{'Female'} },
+            $genetics->{types}{$parentcall}{$type}{'Male'},
+            $genetics->{types}{$parentcall}{$type}{'Female'},
             $genetics->{rms}
         );
         push @valid_types, $type if $types{$type} > 0.05;
@@ -389,17 +370,110 @@ sub get_cp {
 }
 
 sub find_edges {
-    my ($markers, $samples, $genetics) = @_;
+    my ( $markers, $samples, $genetics ) = @_;
 
     foreach my $type ( keys %{$markers} ) {
         next if ( $type eq "Reject" );
         my @pos = sort { $a <=> $b } keys %{ $markers->{$type} };
         foreach my $sample ( @{ $samples->{offspring}{order} } ) {
-            get_sample_blocks( $markers->{$type}, $sample, \@pos, MASKLEN );
-            get_block_consensus( $markers->{$type}, $sample, \@pos, MASKLEN );
+            foreach my $maska (
+                keys %{
+                    $genetics->{masks}{$type}{ $genetics->{samplesex}{$sample} }
+                }
+              )
+            {
+                my %maskcall = ( 'A' => 0, 'B' => 0, 'H' => 0, '.' => 0 );
+                $maskcall{$maska} = 1;
+                map { $maskcall{$_} = -1 }
+                  keys %{ $genetics->{masks}{$type}
+                      { $genetics->{samplesex}{$sample} }{$maska} };
+
+                get_sample_blocks( $markers->{$type},
+                    $sample, \@pos, \%maskcall, MASKLEN );
+            }
+            call_blocks( $markers->{$type}, $sample, \@pos, MASKLEN, $type,
+                $genetics );
+
+   #            get_block_consensus( $markers->{$type}, $sample, \@pos, MASKLEN,
+   #                $type, $genetics );
             clean_blocks( $markers->{$type}, $sample, \@pos );
         }
     }
+}
+
+sub call_blocks {
+    my ( $marker, $sample, $pos, $masklen, $type, $genetics ) = @_;
+
+    my $blocknum = 0;
+    my @blocks;
+    my $validgts;
+    for my $p ( @{$pos} ) {
+        $validgts = $genetics->{types}{ $marker->{$p}{parent} }{$type}
+          { $genetics->{samplesex}{$sample} };
+        $blocknum++
+          if ( defined $marker->{$p}{marker}{$sample}{edge}
+            && abs( $marker->{$p}{marker}{$sample}{edge} ) > $masklen );
+        push @{ $blocks[$blocknum]{pos} }, $p;
+        $blocks[$blocknum]{gt}{ $marker->{$p}{marker}{$sample}{gt} }++
+          if $validgts =~ /$marker->{$p}{marker}{$sample}{gt}/;
+    }
+
+    my @blocksbysize =
+      sort { @{ $blocks[$b]{pos} } <=> @{ $blocks[$a]{pos} } } 0 .. $#blocks;
+
+    #      print Dumper \@blocks;
+    #      print Dumper \@blocksbysize;
+    for my $i (@blocksbysize) {
+
+        my %gts;
+        my $size;
+        # Double weight genotypes in end blocks
+        my $end = $i == 0 ? 2 : $i == $#{$blocks[$i]{pos}} ? 2 : 1;
+        map { $gts{$_} = $blocks[$i]{gt}{$_}*2; $size += $gts{$_} }
+          keys %{ $blocks[$i]{gt} };
+
+        # Add neighbouring genotypes if possible
+        if ( $i != $blocksbysize[0] )
+        {    # If not the first, largest block (where no neighbours are called)
+            get_neighbour_gts( $i, \@blocks, \%gts, $size, $genetics, $marker,
+                $type, $sample );
+        }
+
+        my @sortgt = sort { $gts{$b} <=> $gts{$a} } keys %gts;
+
+        my $maxgt =
+            @sortgt == 0                                 ? '~'
+          : @sortgt == 1                                 ? $sortgt[0]
+          : $gts{ $sortgt[0] } / $gts{ $sortgt[1] } >= 2 ? $sortgt[0]
+          :                                                '~';
+        map { $marker->{$_}{marker}{$sample}{cons} = $maxgt }
+          @{ $blocks[$i]{pos} };
+    }
+
+}
+
+sub get_neighbour_gts {
+    my ( $i, $blocks, $gts, $size, $genetics, $marker, $type, $sample ) = @_;
+
+    for my $dir ( 1, -1 ) {
+        my $nextblock = $i + 1 * $dir;
+        my $found     = 0;
+        while ( defined $blocks->[$nextblock] && $found < $size ) {
+            my $posi = $dir eq 1 ? 0 : $#{ $blocks->[$nextblock]{pos} };
+            my $lastpos = $dir eq 1 ? $#{ $blocks->[$nextblock]{pos} } : 0;
+            while ( $posi != $lastpos && $found < $size ) {
+                my $p = $blocks->[$nextblock]{pos}[$posi];
+                if ( defined $marker->{$p}{marker}{$sample}{cons} ) {
+                    $gts->{ $marker->{$p}{marker}{$sample}{cons} }++;
+                    $found++;
+                }
+                $posi += $dir * 1;
+
+            }
+            $nextblock += $dir * 1;
+        }
+    }
+
 }
 
 sub clean_blocks {
@@ -445,13 +519,13 @@ sub clean_blocks {
 }
 
 sub get_sample_blocks {
-    my ( $marker, $sample, $pos, $masklen, $mask ) = @_;
+    my ( $marker, $sample, $pos, $maskcall, $masklen ) = @_;
 
     @mask = ( (-1) x $masklen, 0, (1) x $masklen ) if ( !@mask );
     my @called;
     foreach my $p ( @{$pos} ) {
         push @called, $p
-          if $maskcall{ $marker->{$p}{marker}{$sample}{gt} } != 0;
+          if $maskcall->{ $marker->{$p}{marker}{$sample}{gt} } != 0;
     }
 
     foreach my $i ( $masklen .. $#called - $masklen ) {
@@ -460,28 +534,34 @@ sub get_sample_blocks {
 
         my $edgesum = 0;
 
-        $marker->{ $called[$i] }{marker}{$sample}{edge} = int sum map {
-            $maskcall{ $marker->{ $maskcallpos[$_] }{marker}{$sample}{gt} } *
+        my $edge = int sum map {
+            $maskcall->{ $marker->{ $maskcallpos[$_] }{marker}{$sample}{gt} } *
               $mask[$_]
         } 0 .. $#mask;
+
+        $marker->{ $called[$i] }{marker}{$sample}{edge} = $edge
+          if !defined $marker->{ $called[$i] }{marker}{$sample}{edge}
+          or $edge > $marker->{ $called[$i] }{marker}{$sample}{edge};
     }
 }
 
 sub get_block_consensus {
-    my ( $marker, $sample, $pos, $masklen ) = @_;
+    my ( $marker, $sample, $pos, $masklen, $type, $genetics ) = @_;
     my @blockpos;
-    my @blocks;
     foreach my $p ( @{$pos} ) {
+
         if ( defined $marker->{$p}{marker}{$sample}{edge}
             && abs( $marker->{$p}{marker}{$sample}{edge} ) > $masklen )
         {
             # Don't include the edge position in the current block;
             # calculate the consensus for the edge position on its own,
             # then move on to the following positions
-            calculate_consensus( \@blockpos, $marker, $sample )
+            calculate_consensus( \@blockpos, $marker, $sample, $type,
+                $genetics )
               if @blockpos >= 1;
             @blockpos = ($p);
-            calculate_consensus( \@blockpos, $marker, $sample );
+            calculate_consensus( \@blockpos, $marker, $sample, $type,
+                $genetics );
             @blockpos = ();
         }
         else {
@@ -489,21 +569,26 @@ sub get_block_consensus {
         }
 
     }
-    calculate_consensus( \@blockpos, $marker, $sample );
+    calculate_consensus( \@blockpos, $marker, $sample, $type, $genetics );
 }
 
 sub calculate_consensus {
-    my ( $blockpos, $marker, $sample ) = @_;
+    my ( $blockpos, $marker, $sample, $type, $genetics ) = @_;
     my %blockgt;
-
+    my $validgts;
     map {
-        $blockgt{ $marker->{$_}{marker}{$sample}{gt} }++;
-
-        #        $blockgt{ $marker->{$_}{marker}{$sample}{gt} } +=
-        #          $marker->{$_}{marker}{$sample}{gq}
+        $validgts = $genetics->{types}{ $marker->{$_}{parent} }{$type}
+          { $genetics->{samplesex}{$sample} };
+        $blockgt{ $marker->{$_}{marker}{$sample}{gt} }++
+          if $validgts =~ /$marker->{$_}{marker}{$sample}{gt}/;
     } @{$blockpos};
 
-    my $maxgt = ( sort { $blockgt{$b} <=> $blockgt{$a} } keys %blockgt )[0];
+    my @sortgt = sort { $blockgt{$b} <=> $blockgt{$a} } keys %blockgt;
+    my $maxgt =
+        @sortgt == 0                                         ? '~'
+      : @sortgt == 1                                         ? $sortgt[0]
+      : $blockgt{ $sortgt[0] } / $blockgt{ $sortgt[1] } >= 2 ? $sortgt[0]
+      :                                                        '~';
     map { $marker->{$_}{marker}{$sample}{cons} = $maxgt } @{$blockpos};
 }
 
@@ -548,8 +633,11 @@ sub output_scf {
             print $handle
 "$scf\t$pos\t$type\t$data->{$type}{$pos}{parent}\t$data->{$type}{$pos}{mq}\t$data->{$type}{$pos}{fs}\t";
 
-            if ($type ne "Reject") {
-                printf $handle "%.2f\t%.2f\t%.2f\t", $data->{$type}{$pos}{p}, $data->{$type}{$pos}{rmsobs}, $data->{$type}{$pos}{rmspattern};
+            if ( $type ne "Reject" ) {
+                printf $handle "%.2f\t%.2f\t%.2f\t",
+                  $data->{$type}{$pos}{p},
+                  $data->{$type}{$pos}{rmsobs},
+                  $data->{$type}{$pos}{rmspattern};
             }
 
             my @gt = split //, $data->{$type}{$pos}{marker}{gt};
@@ -576,8 +664,8 @@ sub output_scf {
             my $cons      = "";
             my $corrected = "";
             foreach my $e ( 0 .. $#edge ) {
-                my $col =
-                  $edge[$e] ne '.' && $edge[$e] > MASKLEN ? 'red1' : 'black';
+                my $col = $edge[$e] ne '.'
+                  && $edge[$e] > MASKLEN ? 'red1' : 'black';
                 print $handle fg $col, $edge[$e];
                 $cons      .= fg $col, $cons[$e];
                 $corrected .= fg $col, $corrected[$e];

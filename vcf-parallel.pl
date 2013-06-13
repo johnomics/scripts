@@ -78,9 +78,9 @@ my $genome = load_genome( \%args );
 my $samples = get_samples( $args{vcf_filename}, $genetics );
 
 $genome->{scfp} = get_partitions( $genome, $args{threads} );
-$args{threads} = keys %{$genome->{scfp}}; # last thread may not be used;
-    # each part is always larger than minimum size, so scaffolds for final
-    # thread may be spread around the other threads
+$args{threads} = keys %{ $genome->{scfp} };    # last thread may not be used;
+     # each part is always larger than minimum size, so scaffolds for final
+     # thread may be spread around the other threads
 
 print_partitions( $genome->{scfp}, $genome->{scfl} );
 
@@ -124,8 +124,14 @@ sub load_genetics {
         chomp $marker_type;
         my ( $parents, $males, $females, $type, $corrections ) = split /\t/,
           $marker_type;
-        $genetics{types}{$parents}{$type}{males}   = $males;
-        $genetics{types}{$parents}{$type}{females} = $females;
+        $genetics{types}{$parents}{$type}{'Male'}   = $males;
+        $genetics{types}{$parents}{$type}{'Female'} = $females;
+
+        $genetics{masks}{$type}{'Male'} = $genetics{masks}{$type}{'Male'}
+          // generate_masks( $genetics{types}{$parents}{$type}{'Male'} );
+        $genetics{masks}{$type}{'Female'} = $genetics{masks}{$type}{'Female'}
+          // generate_masks( $genetics{types}{$parents}{$type}{'Female'} );
+
         if ( $corrections ne "" ) {
             my ( $orig, $fix ) = split '->', $corrections;
             $genetics{types}{$parents}{$type}{corrections}{$orig} = $fix;
@@ -175,6 +181,26 @@ sub load_genetics {
         close $rmsfile;
     }
     \%genetics;
+}
+
+sub generate_masks {
+    my ($gtstr) = @_;
+    my @gts = split /,/, $gtstr;
+    map { $_ = substr $_, -1; } @gts;
+
+    my %mask;
+    if ( @gts == 2 ) {
+        $mask{ $gts[0] }{ $gts[1] }++;
+    }
+    else {
+        for my $i ( 0 .. $#gts ) {
+            for my $j ( 0 .. $#gts ) {
+                next if $i eq $j;
+                $mask{ $gts[$i] }{ $gts[$j] }++;
+            }
+        }
+    }
+    \%mask;
 }
 
 sub parse_vcf {
@@ -266,10 +292,11 @@ sub run_part {
     }
     close $vcf_file;
     process( $curscf, \@scf_vcf, $samples, \%data, $genetics )
-      if $argref->{byscf} && @scf_vcf
+      if $argref->{byscf}
+      && @scf_vcf
       && ( $argref->{uniquescf} eq ""
         or $curscf eq $argref->{uniquescf} );
-    
+
     return ( \%data, $scfi );
 }
 
