@@ -25,11 +25,12 @@ my %nullcall = ( 'GT' => './.', 'GQ' => 0 );
 my @mask;
 
 sub process {
-    my ( $scf, $scfref, $samples, $data, $genetics ) = @_;
+    my ( $scf, $scfref, $samples, $data, $genetics, $scfl ) = @_;
     $data->{$scf} = get_markers( $scfref, $samples, $genetics );
     find_edges( $data->{$scf}, $samples, $genetics );
     collapse( $data->{$scf}, $samples );
-    output_scf_to_file( $scf, $data->{$scf} );
+    output_markers_to_file( $scf, $data->{$scf} );
+    output_blocks_to_file( $scf, $data->{$scf}, $genetics, $samples, $scfl );
 }
 
 sub collapse {
@@ -427,9 +428,10 @@ sub call_blocks {
 
         my %gts;
         my $size;
+
         # Double weight genotypes in end blocks
-        my $end = $i == 0 ? 2 : $i == $#{$blocks[$i]{pos}} ? 2 : 1;
-        map { $gts{$_} = $blocks[$i]{gt}{$_}*2; $size += $gts{$_} }
+        my $end = $i == 0 ? 2 : $i == $#{ $blocks[$i]{pos} } ? 2 : 1;
+        map { $gts{$_} = $blocks[$i]{gt}{$_} * 2; $size += $gts{$_} }
           keys %{ $blocks[$i]{gt} };
 
         # Add neighbouring genotypes if possible
@@ -603,29 +605,37 @@ sub output {
     my ( $data, $samples, $genome, $outfix ) = @_;
     print STDERR "Outputting...\n";
 
-    open my $allout, '>', "$outfix.out"
-      or croak "Can't open $outfix.out: $OS_ERROR\n";
+    my %outfile;
+    open $outfile{'markers'}, '>', "$outfix.markers.out"
+      or croak "Can't open $outfix.markers.out: $OS_ERROR\n";
+    open $outfile{'blocks'}, '>', "$outfix.blocks.out"
+      or croak "Can't open $outfix.blocks.out: $OS_ERROR\n";
+
     foreach my $scf ( sort keys %{ $data->{scf} } ) {
-        open my $scffile, '<', "$scf.tmp.out"
-          or croak "Can't open scf output for $scf: $OS_ERROR\n";
-        while ( my $scfline = <$scffile> ) {
-            print $allout $scfline;
+        foreach my $filetype ( 'markers', 'blocks' ) {
+            open my $scffile, '<', "$scf.$filetype.tmp.out"
+              or croak
+              "Can't open scaffold $filetype output for $scf: $OS_ERROR\n";
+            while ( my $scfline = <$scffile> ) {
+                print { $outfile{$filetype} } $scfline;
+            }
+            close $scffile;
+            system("rm $scf.$filetype.tmp.out");
         }
-        close $scffile;
-        system("rm $scf.tmp.out");
     }
-    close $allout;
+    close $outfile{'markers'};
+    close $outfile{'blocks'};
 }
 
-sub output_scf_to_file {
+sub output_markers_to_file {
     my ( $scf, $data ) = @_;
-    open my $scfhandle, '>', "$scf.tmp.out"
-      or croak "Can't open output file for $scf: $OS_ERROR\n";
-    output_scf( $scf, $data, $scfhandle );
-    close $scfhandle;
+    open my $markerhandle, '>', "$scf.markers.tmp.out"
+      or croak "Can't open markers output file for $scf: $OS_ERROR\n";
+    output_scf_markers( $scf, $data, $markerhandle );
+    close $markerhandle;
 }
 
-sub output_scf {
+sub output_scf_markers {
     my ( $scf, $data, $handle ) = @_;
     foreach my $type ( sort keys %{$data} ) {
         foreach my $pos ( sort { $a <=> $b } keys %{ $data->{$type} } ) {
@@ -676,6 +686,80 @@ sub output_scf {
     }
     print $handle '-' x 253, "\n";
 
+}
+
+sub output_blocks_to_file {
+    my ( $scf, $data, $genetics, $samples, $scfl ) = @_;
+    open my $blockhandle, '>', "$scf.blocks.tmp.out"
+      or croak "Can't open blocks output file for $scf: $OS_ERROR\n";
+    output_scf_blocks( $scf, $data, $blockhandle, $genetics, $samples, $scfl );
+    close $blockhandle;
+}
+
+sub output_scf_blocks {
+    my ( $scf, $data, $blockhandle, $genetics, $samples, $scfl ) = @_;
+
+    my $samplenum = @{ $samples->{offspring}{order} };
+    printf $blockhandle "%8s\t%8s\t%8s\t%8s", 'Scaffold', 'Start', 'End',
+      'Length';
+
+    map { printf $blockhandle "\t%-${samplenum}s", $_; }
+      sort keys %{ $genetics->{masks} };
+    print $blockhandle "\n";
+
+    my %scfpos;
+    my %last;
+    foreach my $type ( keys %{$data} ) {
+        next if ( $type eq "Reject" );
+        foreach my $pos ( sort {$a<=>$b} keys %{ $data->{$type} } ) {
+            $scfpos{$pos}{type}    = $type;
+            $scfpos{$pos}{pattern} = $data->{$type}{$pos}{marker}{corrected};
+            $last{$type}           = $pos;
+        }
+    }
+
+    my $empty = ' ' x $samplenum;
+
+    my %curpat;
+    map { $curpat{$_} = $empty } keys %{ $genetics->{masks} };
+
+    for my $type ( keys %last ) {
+        my $next = $last{$type} + 1;
+        $scfpos{$next}{pattern} = $empty;
+        $scfpos{$next}{type}    = $type;
+    }
+
+    my $prevpos = 1;
+    for my $pos (sort {$a<=>$b} keys %scfpos) {
+        my $type = $scfpos{$pos}{type};
+        if ($curpat{$type} ne $scfpos{$pos}{pattern}) {
+            output_pos_patterns($scf, $type, $prevpos, $pos-1, $pos-$prevpos, $scfpos{$pos}{pattern}, $blockhandle, \%curpat);
+            $curpat{$type} = $scfpos{$pos}{pattern};
+            $prevpos = $pos;
+        }
+    }
+    output_pos_patterns($scf, "No type", $prevpos, $scfl->{$scf}, $scfl->{$scf}-$prevpos+1, $empty, $blockhandle, \%curpat);
+}
+
+sub output_pos_patterns {
+    my ( $scf, $type, $start, $end, $length, $new, $blockhandle, $curpat ) = @_;
+    printf $blockhandle "%8s\t%8d\t%8d\t%8d", $scf, $start, $end, $length;
+    for my $printtype ( sort keys %{$curpat} ) {
+        if ( $type eq $printtype ) {
+            print $blockhandle "\t";
+            my @cur = split //, $curpat->{$printtype};
+            my @new = split //, $new;
+            for my $i ( 0 .. $#cur ) {
+                my $col = $new[$i] eq ' '
+                  || $cur[$i] eq $new[$i] ? 'black' : 'red1';
+                print $blockhandle fg $col, $cur[$i];
+            }
+        }
+        else {
+            print $blockhandle "\t$curpat->{$printtype}";
+        }
+    }
+    print $blockhandle "\n";
 }
 
 1;

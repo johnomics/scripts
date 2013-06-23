@@ -134,8 +134,10 @@ sub load_genetics {
 
         if ( $corrections ne "" ) {
             my ( $orig, $fix ) = split '->', $corrections;
-            $genetics{types}{$parents}{$type}{corrections}{$orig} = $fix;
+            $genetics{types}{$parents}{$type}{corrections}{$orig} =
+              $fix;
         }
+
         $f2patterns{"$males:$females"}++;
     }
     close $geneticsfile;
@@ -265,7 +267,8 @@ sub run_part {
 
             if ( $curscf ne $scf ) {
                 if ( $argref->{byscf} && @scf_vcf ) {
-                    process( $curscf, \@scf_vcf, $samples, \%data, $genetics )
+                    process( $curscf, \@scf_vcf, $samples, \%data, $genetics,
+                        $genome->{scfl} )
                       if $argref->{uniquescf} eq ""
                       or $curscf eq $argref->{uniquescf};
                     @scf_vcf = ();
@@ -276,12 +279,15 @@ sub run_part {
                 $curscf = $scf;
             }
             $argref->{byscf}
-              ? push @scf_vcf, $vcf_line
-              : process( $curscf, $vcf_line, $samples, \%data, $genetics );
+              ? push @scf_vcf,
+              $vcf_line
+              : process( $curscf, $vcf_line, $samples, \%data, $genetics,
+                $genome->{scfl} );
         }
         else {
             if ($foundpart) {
-                process( $curscf, \@scf_vcf, $samples, \%data, $genetics )
+                process( $curscf, \@scf_vcf, $samples, \%data, $genetics,
+                    $genome->{scfl} )
                   if $argref->{byscf}
                   && ( $argref->{uniquescf} eq ""
                     or $curscf eq $argref->{uniquescf} );
@@ -291,7 +297,7 @@ sub run_part {
         }
     }
     close $vcf_file;
-    process( $curscf, \@scf_vcf, $samples, \%data, $genetics )
+    process( $curscf, \@scf_vcf, $samples, \%data, $genetics, $genome->{scfl} )
       if $argref->{byscf}
       && @scf_vcf
       && ( $argref->{uniquescf} eq ""
