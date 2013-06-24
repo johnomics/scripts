@@ -209,6 +209,19 @@ sub parse_vcf {
     my ( $genome, $samples, $genetics, $argref ) = @_;
     my %data;
 
+    # If only one thread specified, do not fork thread
+    # (This allows code to be profiled)
+    if ($argref->{threads} == 1) {
+        my ( $partdata, $scfi ) =
+          run_part( 1, $genome, $samples, $genetics, $argref );
+
+        print STDERR "1:Done, processed $scfi scaffolds of " .
+          keys( %{ $genome->{scfp}{1} } ) . "\n";
+        merge( $partdata, \%data);
+        print STDERR "1:Merged\n";
+        return \%data;
+    }
+
     my $part_pm = new Parallel::ForkManager( $argref->{threads} );
     $part_pm->set_max_procs( $argref->{threads} );
 
@@ -252,7 +265,6 @@ sub run_part {
     my $curscf    = "";
     my $scfi      = 1;
     my $foundpart = 0;
-
     my %data;
     my @scf_vcf;
     my $scf;
@@ -276,6 +288,7 @@ sub run_part {
                       if ( $scfi % 10 == 0 );
                     $scfi++;
                 }
+                last if $curscf eq $argref->{uniquescf};
                 $curscf = $scf;
             }
             $argref->{byscf}
