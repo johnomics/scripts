@@ -11,6 +11,7 @@ use constant ERRORBLOCK   => 2000;
 use constant ERRORSNPS    => 5;
 use constant FS_THRESHOLD => 35;
 use constant MQ_THRESHOLD => 57;
+use constant PGQ_MATCH    => "99:99:99";
 
 my %swapphase = (
     "Intercross" => { "A" => "B", "B" => "A" },
@@ -20,7 +21,7 @@ my %swapphase = (
 
 my %callorder;
 
-my %nullcall = ( 'GT' => './.', 'GQ' => 0 );
+my %nullcall = ( 'GT' => './.', 'GQ' => 0, 'DP' => 0 );
 
 my @mask;
 
@@ -99,6 +100,8 @@ sub get_markers {
         $markers{$type}{$pos}{rmsobs}     = $info->{rmsobs};
         $markers{$type}{$pos}{rmspattern} = $info->{rmspattern};
         $markers{$type}{$pos}{p}          = $info->{p};
+        $markers{$type}{$pos}{pgqs}       = $info->{pgqs};
+        $markers{$type}{$pos}{pdps}       = $info->{pdps};
         $prevpos{$type}                   = $pos;
     }
     \%markers;
@@ -143,9 +146,20 @@ sub parse_snp {
     my %info;
     map { $info{$1} = $2 if (/^(.+)=(.+)$/); } @info;
 
+    # Get parental GQs and DPs
+    $info{pgqs} = join ':', 
+      map { sprintf "%2d", get_cp( 'GQ', $f[ $samples->{parents}{lookup}{$_} ], $callf ) }
+      @{ $genetics->{parents} };
+
+    $info{pdps} = join ':', 
+      map { sprintf "%3d", get_cp( 'DP', $f[ $samples->{parents}{lookup}{$_} ], $callf ) }
+      @{ $genetics->{parents} };
+
     my %marker;
+    
     if ( !defined $genetics->{types}{$parentcall} ) {
         $info{error} = "Not a valid parent call: @parentcalls";
+        
         foreach my $sample ( @{ $samples->{offspring}{order} } ) {
             my $opos = $samples->{offspring}{lookup}{$sample};
             my $call = get_cp( 'GT', $f[$opos], $callf );
@@ -213,6 +227,11 @@ sub parse_snp {
         return ( \%marker, "Reject", $parentcall, $pos, \%info );
     }
 
+    if ($info{pgqs} ne PGQ_MATCH) {
+        $info{error} = "Parental genotypes are not all 99";
+        return (\%marker, "Reject", $parentcall, $pos, \%info );
+    }
+
     $info{rmsobs}     = $rms_obs{$type};
     $info{rmspattern} = $rms_pattern{$type};
     $info{p}          = $types{$type};
@@ -225,7 +244,7 @@ sub parse_snp {
               { $marker{$sample}{gt} } // $marker{$sample}{gt};
         }
     }
-
+    
     return ( \%marker, $type, $parentcall, $pos, \%info );
 }
 
@@ -429,25 +448,29 @@ sub call_blocks {
         my %gts;
         my $size;
 
-        # Double weight genotypes in end blocks
-        my $end = $i == 0 ? 2 : $i == $#{ $blocks[$i]{pos} } ? 2 : 1;
-        map { $gts{$_} = $blocks[$i]{gt}{$_} * 2; $size += $gts{$_} }
+       # Double weight genotypes in end blocks
+       #        my $end = $i == 0 ? 2 : $i == $#{ $blocks[$i]{pos} } ? 2 : 1;
+       #        map { $gts{$_} = $blocks[$i]{gt}{$_} * $end; $size += $gts{$_} }
+       #          keys %{ $blocks[$i]{gt} };
+
+# Add neighbouring genotypes if possible
+#        if ( $i != $blocksbysize[0] )
+#        {    # If not the first, largest block (where no neighbours are called)
+#            get_neighbour_gts( $i, \@blocks, \%gts, $size, $genetics, $marker,
+#                $type, $sample );
+#        }
+
+        #        my @sortgt = sort { $gts{$b} <=> $gts{$a} } keys %gts;
+
+        my @sortgt =
+          sort { $blocks[$i]{gt}{$b} <=> $blocks[$i]{gt}{$a} }
           keys %{ $blocks[$i]{gt} };
-
-        # Add neighbouring genotypes if possible
-        if ( $i != $blocksbysize[0] )
-        {    # If not the first, largest block (where no neighbours are called)
-            get_neighbour_gts( $i, \@blocks, \%gts, $size, $genetics, $marker,
-                $type, $sample );
-        }
-
-        my @sortgt = sort { $gts{$b} <=> $gts{$a} } keys %gts;
-
         my $maxgt =
-            @sortgt == 0                                 ? '~'
-          : @sortgt == 1                                 ? $sortgt[0]
-          : $gts{ $sortgt[0] } / $gts{ $sortgt[1] } >= 2 ? $sortgt[0]
-          :                                                '~';
+            @sortgt == 0 ? '~'
+          : @sortgt == 1 ? $sortgt[0]
+          : $blocks[$i]{gt}{ $sortgt[0] } / $blocks[$i]{gt}{ $sortgt[1] } >= 2
+          ? $sortgt[0]
+          : '~';
         map { $marker->{$_}{marker}{$sample}{cons} = $maxgt }
           @{ $blocks[$i]{pos} };
     }
@@ -641,7 +664,7 @@ sub output_scf_markers {
         foreach my $pos ( sort { $a <=> $b } keys %{ $data->{$type} } ) {
 
             print $handle
-"$scf\t$pos\t$type\t$data->{$type}{$pos}{parent}\t$data->{$type}{$pos}{mq}\t$data->{$type}{$pos}{fs}\t";
+"$scf\t$pos\t$type\t$data->{$type}{$pos}{parent}\t$data->{$type}{$pos}{pgqs}\t$data->{$type}{$pos}{pdps}\t$data->{$type}{$pos}{mq}\t$data->{$type}{$pos}{fs}\t";
 
             if ( $type ne "Reject" ) {
                 printf $handle "%.2f\t%.2f\t%.2f\t",
@@ -700,66 +723,70 @@ sub output_scf_blocks {
     my ( $scf, $data, $blockhandle, $genetics, $samples, $scfl ) = @_;
 
     my $samplenum = @{ $samples->{offspring}{order} };
+    my @types = sort keys %{$genetics->{masks}};
+    
     printf $blockhandle "%8s\t%8s\t%8s\t%8s", 'Scaffold', 'Start', 'End',
       'Length';
 
     map { printf $blockhandle "\t%-${samplenum}s", $_; }
-      sort keys %{ $genetics->{masks} };
+      @types;
     print $blockhandle "\n";
-
-    my %scfpos;
-    my %last;
-    foreach my $type ( keys %{$data} ) {
-        next if ( $type eq "Reject" );
-        foreach my $pos ( sort {$a<=>$b} keys %{ $data->{$type} } ) {
-            $scfpos{$pos}{type}    = $type;
-            $scfpos{$pos}{pattern} = $data->{$type}{$pos}{marker}{corrected};
-            $last{$type}           = $pos;
-        }
-    }
 
     my $empty = ' ' x $samplenum;
 
-    my %curpat;
-    map { $curpat{$_} = $empty } keys %{ $genetics->{masks} };
-
-    for my $type ( keys %last ) {
-        my $next = $last{$type} + 1;
-        $scfpos{$next}{pattern} = $empty;
-        $scfpos{$next}{type}    = $type;
-    }
-
-    my $prevpos = 1;
-    for my $pos (sort {$a<=>$b} keys %scfpos) {
-        my $type = $scfpos{$pos}{type};
-        if ($curpat{$type} ne $scfpos{$pos}{pattern}) {
-            output_pos_patterns($scf, $type, $prevpos, $pos-1, $pos-$prevpos, $scfpos{$pos}{pattern}, $blockhandle, \%curpat);
-            $curpat{$type} = $scfpos{$pos}{pattern};
+    my %scfpos;
+    foreach my $type ( keys %{$data} ) {
+        next if ( $type eq "Reject" );
+        my $prevpos = 0;
+        foreach my $pos ( sort { $a <=> $b } keys %{ $data->{$type} } ) {
+            $scfpos{$pos}{types}{$type} =
+              $data->{$type}{$pos}{marker}{corrected};
+            $scfpos{$pos}{end} = $pos;
+            
+            if ($prevpos eq 0 or $scfpos{$prevpos}{types}{$type} ne $scfpos{$pos}{types}{$type}) {
+                $scfpos{$prevpos+1}{types}{$type} = $empty;
+            }
             $prevpos = $pos;
         }
+        $scfpos{$prevpos+1}{types}{$type} = $empty;
     }
-    output_pos_patterns($scf, "No type", $prevpos, $scfl->{$scf}, $scfl->{$scf}-$prevpos+1, $empty, $blockhandle, \%curpat);
-}
 
-sub output_pos_patterns {
-    my ( $scf, $type, $start, $end, $length, $new, $blockhandle, $curpat ) = @_;
-    printf $blockhandle "%8s\t%8d\t%8d\t%8d", $scf, $start, $end, $length;
-    for my $printtype ( sort keys %{$curpat} ) {
-        if ( $type eq $printtype ) {
-            print $blockhandle "\t";
-            my @cur = split //, $curpat->{$printtype};
-            my @new = split //, $new;
-            for my $i ( 0 .. $#cur ) {
-                my $col = $new[$i] eq ' '
-                  || $cur[$i] eq $new[$i] ? 'black' : 'red1';
-                print $blockhandle fg $col, $cur[$i];
+    my %curpat;
+    map {$curpat{$_} = $empty} @types;
+    my $blockpos = 1;
+    my $lastpos;
+    for my $p (sort {$a<=>$b} keys %scfpos) {
+        for my $t (@types) {
+            if (defined $scfpos{$p}{types}{$t} and $scfpos{$p}{types}{$t} ne $curpat{$t}) {
+                output_block($scf, $blockpos, $p-1, $blockhandle, \@types, \%curpat, $empty);
+                $curpat{$t} = $scfpos{$p}{types}{$t};
+                $blockpos = $p;
             }
         }
-        else {
-            print $blockhandle "\t$curpat->{$printtype}";
-        }
+        $lastpos = $p;
+    }
+    output_block($scf, $blockpos, $scfl->{$scf}, $blockhandle, \@types, \%curpat, $empty);
+}
+
+sub output_block {
+    my ($scf, $start, $end, $blockhandle, $types, $curpat, $empty) = @_;
+    my $length = $end-$start+1;
+    printf $blockhandle "%8s\t%8d\t%8d\t%8d", $scf, $start, $end, $length;
+    for my $type (@{$types}) {
+        print $blockhandle "\t";
+        print $blockhandle $curpat->{$type} // $empty;
     }
     print $blockhandle "\n";
+}
+
+sub get_next_pat {
+    my ( $i, $type, $scfpos, $pos ) = @_;
+    while ( $i < @{$pos} ) {
+        return $scfpos->{ $pos->[$i] }{types}{$type}
+          if defined $scfpos->{ $pos->[$i] }{types}{$type};
+        $i++;
+    }
+    return "";
 }
 
 1;
