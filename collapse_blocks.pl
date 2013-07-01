@@ -7,12 +7,15 @@ use English;
 use Getopt::Long;
 use Pod::Usage;
 use Data::Dumper;
+use Memoize;
 
 use Parallel::ForkManager;
 use Term::ExtendedColor qw/:all/;
 use List::Util qw/min max/;
 
 $OUTPUT_AUTOFLUSH = 1;
+
+memoize "mirror";
 
 my $samplenum = 69;
 my $empty     = ' ' x $samplenum;
@@ -24,48 +27,27 @@ my %mstheader = (
     cut_off_p_value              => "0.000001",
     no_map_dist                  => "15",
     no_map_size                  => "2",
-    missing_threshold            => "0.25",
-    estimation_before_clustering => "yes",
+    missing_threshold            => "0.75",
+    estimation_before_clustering => "no",
     detect_bad_data              => "yes",
     objective_function           => "ML",
 );
 
+my %sex = ( "Paternal-AHAB_AHB" => 0, "Paternal-AHAB_AHA" => 0 );
+
 my %args;
-$args{blocks} = "";
+$args{input} = "";
 $args{output} = "test";
 
 my $options_okay =
-  GetOptions( 'blocks=s' => \$args{blocks}, 'output=s' => \$args{output} );
+  GetOptions( 'input=s' => \$args{input}, 'output=s' => \$args{output} );
 
-my ( $header, $types, $blocklist ) = load_blocks( $args{blocks} );
-
-print "After LOAD BLOCKS\n";
-for my $block (@{$blocklist}) {
-    print Dumper $block if ($block->{'Start'} == 53270);
-}
+my ( $header, $types, $blocklist ) = load_blocks( $args{input} );
 
 fill_blocks( $header, $types, $blocklist );
-print "After FILL BLOCKS\n";
-
-for my $block (@{$blocklist}) {
-    print Dumper $block if ($block->{'Start'} == 53270);
-}
-
 correct_maternal( "Maternal-AHAH", $blocklist );
-print "After CORRECT MATERNAL\n";
-
-for my $block (@{$blocklist}) {
-    print Dumper $block if ($block->{'Start'} == 53270);
-}
-
 collapse( $blocklist, $types );
-print "After COLLAPSE\n";
-
-for my $block (@{$blocklist}) {
-    print Dumper $block if ($block->{'Start'} == 53270);
-}
-
-make_maps( $blocklist, $args{output} );
+make_chrom_maps( $blocklist, $args{output} );
 
 my %presents;
 for my $block ( @{$blocklist} ) {
@@ -73,20 +55,29 @@ for my $block ( @{$blocklist} ) {
     print STDERR "\n";
 }
 
-sub make_maps {
+sub make_chrom_maps {
     my ( $blocklist, $output ) = @_;
 
     my %matpat;
     my %patmat;
     my $glength = 0;
     my %pattern_block;
+    my $sexmat;
     for my $block ( @{$blocklist} ) {
-        my $mat = $block->{"Maternal-AHAH"};
-        my $pat = $block->{"Paternal-AHAH"};
-        next if $mat =~ /[ \-]/;
+        my $mat = $block->{'Sex-HB'};
+        $sexmat = $mat if $mat !~ /[ \-]/;
+        my $pat = $block->{'Paternal-AHAB_AHA'};
+        $pat = $block->{'Paternal-AHAB_AHB'} if ( $pat =~ /[ \-]/ );
+        $mat = defined $sexmat ? $sexmat : 'S' x length $pat if ($pat !~ /[ \-]/ and $mat =~ /[ \-]/);
+
+        $mat = $block->{"Maternal-AHAH"} if ( $mat =~ /[ \-]/ );
+        $pat = $block->{"Paternal-AHAH"} if ( $pat =~ /[ \-]/ );
+
+        next if ( $mat =~ /\-/ );
         if ( $pat =~ /^( +)$/ ) {
-            $pat = convert_intercross($block);
+            ( $mat, $pat ) = convert_intercross($block);
         }
+        next if $mat =~ /[ \-]/;
         next if $pat =~ /[ \-]/;
         $matpat{$mat}{$pat}{length} += $block->{'Length'};
         $matpat{$mat}{$pat}{blocks}++;
@@ -95,21 +86,55 @@ sub make_maps {
         $pattern_block{$pat}{ $block->{'Scaffold'} }{ $block->{'Start'} } =
           $block->{'End'};
     }
-    exit;
 
-    for my $pat (sort keys %patmat) {
-        if (keys %{$patmat{$pat}} > 1) {
-            for my $mat (sort keys %{$patmat{$pat}}) {
-                print "$pat\t$mat\t$patmat{$pat}{$mat}{blocks}\t$patmat{$pat}{$mat}{length}\n";
+    for my $mat (keys %matpat) {
+        if ($mat =~ /^(S+)$/) {
+            for my $sexpat (keys %{$matpat{$mat}}) {
+                $patmat{$sexpat}{$sexmat}{length} += $patmat{$sexpat}{$mat}{length};
+                $patmat{$sexpat}{$sexmat}{blocks} += $patmat{$sexpat}{$mat}{blocks};
+                delete $patmat{$sexpat}{$mat};
+                $matpat{$sexmat}{$sexpat}{length} += $matpat{$mat}{$sexpat}{length};
+                $matpat{$sexmat}{$sexpat}{blocks} += $matpat{$mat}{$sexpat}{blocks};
             }
-            for my $scf (keys %{$pattern_block{$pat}}) {
-                for my $start (keys %{$pattern_block{$pat}{$scf}}) {
-                    my $length = $pattern_block{$pat}{$scf}{$start} - $start + 1;
-                    print "\t$scf\t$start\t$pattern_block{$pat}{$scf}{$start}\t$length\n";
-                }
+            delete $matpat{$mat};
+        }
+    }
+
+    my @int;
+    my @pat;
+
+    for my $pat ( keys %pattern_block ) {
+        $pat =~ 'H' ? push @int, $pat : push @pat, $pat;
+    }
+
+    my %matint;
+    for my $int (@int) {
+        for my $pat (@pat) {
+            my @i = split //, $int;
+            my @p = split //, $pat;
+            my $match = 1;
+            for my $a ( 0 .. $#i ) {
+                next if $i[$a] eq 'H';
+                if ( $i[$a] ne $p[$a] ) { $match = 0; last; }
+            }
+            if ($match) {
+                my $imat = "I" x length $int;
+                my $pmat = (
+                    sort {
+                        $patmat{$pat}{$b}{length} <=> $patmat{$pat}{$a}{length}
+                    } keys %{ $patmat{$pat} }
+                )[0];
+                $patmat{$int}{$pmat}{length} = $patmat{$int}{$imat}{length};
+                $patmat{$int}{$pmat}{blocks} = $patmat{$int}{$imat}{blocks};
+                delete $patmat{$int}{$imat};
+                $matpat{$pmat}{$int}{length} = $matpat{$imat}{$int}{length};
+                $matpat{$pmat}{$int}{blocks} = $matpat{$imat}{$int}{blocks};
+                delete $matpat{$imat}{$int};
+                last;
             }
         }
     }
+
     my %scfmap;
     my %genome;
     for my $mat ( keys %matpat ) {
@@ -121,6 +146,7 @@ sub make_maps {
         next if ( keys %{ $matpat{$mat} } == 0 );
         my $markercode = run_mstmap( $mat, $matpat{$mat}, $output );
         $genome{$mat} = load_map( $output, $mat );
+        
         for my $lg ( sort keys %{ $genome{$mat} } ) {
             for my $cm ( sort { $a <=> $b } keys %{ $genome{$mat}{$lg} } ) {
                 for my $marker (
@@ -141,17 +167,13 @@ sub make_maps {
                             $scfmap{$scf}{$start}{mat} = $mat;
                             $scfmap{$scf}{$start}{lg}  = $lg;
                             $scfmap{$scf}{$start}{cm}  = $cm;
-                            if ($scf eq 'HE670564') {
-                                print "$mat\t$lg\t$cm\t$marker\t$pattern\t$scf\t$start\n";
-                                print Dumper $scfmap{$scf};
-                            } 
                         }
                     }
                 }
             }
         }
     }
-exit;
+
     my $curscf = "";
     my @scfblocks;
     my %scfstats;
@@ -167,6 +189,8 @@ exit;
         push @scfblocks, $block;
     }
     validate_scaffold( \@scfblocks, \%scfmap, \%genome, \%scfstats );
+
+    check_unassigned($args{input}, \%scfstats, \%patmat);
 
     my %genomestat;
     foreach my $scf ( sort keys %scfstats ) {
@@ -211,6 +235,38 @@ exit;
         $genomescf  += $genomestat{$stat}{scf};
     }
     printf STDERR "%16s\t%4d\t%9d\n", 'Genome', $genomescf, $genomesize;
+    
+    
+}
+
+sub check_unassigned {
+    my ($input, $scfstats, $patmat) = @_;
+    my %unassigned;
+    for my $scf (keys %{$scfstats}) {
+        $unassigned{$scf}++ if $scfstats->{$scf}{markerblocks} == 0;
+    }
+
+    open my $snps, '<', "$input.markers.out" or croak "Can't open SNP file! $OS_ERROR\n";
+    my %scfsnps;
+    my $scf;
+    while (my $snp = <$snps>) {
+        if ($snp =~ /Reject/) {
+            my @f = split /\t/, $snp;
+            next if !(defined $unassigned{$f[0]});
+            $scf = $f[0];
+            my $pattern = uncolor $f[8];
+            next if $pattern =~ /[01]/;
+            $scfsnps{$pattern}++;
+        }
+        if ($snp =~ /^\-/ and keys %scfsnps > 0) {
+            foreach my $pattern (sort {$scfsnps{$b}<=>$scfsnps{$a}} keys %scfsnps) {
+                next if $scfsnps{$pattern} == 1;
+                print "$scf\t$scfstats->{$scf}{length}\t$pattern\t$scfsnps{$pattern}\n";
+            }
+            %scfsnps = ();
+        }
+    }
+    close $snps;
 }
 
 sub validate_scaffold {
@@ -271,15 +327,18 @@ sub convert_intercross {
     for my $ic ( "Intercross-ABHABH_HHA", "Intercross-ABHABH_HHH" ) {
         next if $block->{$ic} =~ /[ \-]/;
         my $mat = $block->{'Maternal-AHAH'};
+        if ( $mat =~ /^( +)$/ ) {
+            return ( "I" x length( $block->{$ic} ), phase( $block->{$ic} ) );
+        }
         my @int = split //, phase( $block->{$ic} );
         my @mat = split //, $mat;
         my @pat =
           map { $int[$_] eq 'H' ? ( $mat[$_] eq 'A' ? 'B' : 'A' ) : $mat[$_] }
           0 .. $#int;
         my $pat = join '', @pat;
-        return $pat;
+        return ( $mat, $pat );
     }
-    return " ";
+    return ( " ", " " );
 }
 
 sub phase {
@@ -300,12 +359,12 @@ sub phase {
     return " " x length($pat) if !@checkbases;
     for my $gt (@p) {
         my $added = 0;
-        for my $bi (0,1) {
+        for my $bi ( 0, 1 ) {
             if ( $gt eq $checkbases[$bi] ) {
                 if ( !defined $trans{$gt} ) {
-                    $trans{$checkbases[$bi]} = 'A';
+                    $trans{ $checkbases[$bi] } = 'A';
                     my $other = $bi == 0 ? 1 : 0;
-                    $trans{$checkbases[$other]} = 'B';
+                    $trans{ $checkbases[$other] } = 'B';
                 }
                 $out .= $trans{$gt};
                 $added++;
@@ -390,14 +449,9 @@ sub run_mstmap {
 
     print $codein "ID\tPattern\n";
     my $id = 1;
-    while ( my ($marker) = each %{$markers} ) {
-        print $mstmapin "$id";
-        print $codein "$id\t$marker\n";
-        my @gt = split //, $marker;
-        map { print $mstmapin "\t$_"; } @gt;
-        print $mstmapin "\n";
-        $marker_lookup{$id} = $marker;
-        $id++;
+    for my $marker (keys %{$markers}) {
+        my $outmarker = check_mirror($marker, $markers);
+        $id = output_marker($id, $outmarker, $mstmapin, $codein, \%marker_lookup);
     }
 
     close $codein;
@@ -408,6 +462,39 @@ sub run_mstmap {
     );
 
     return \%marker_lookup;
+}
+
+sub check_mirror {
+    my ($marker, $markers) = @_;
+    my $mirror = mirror($marker);
+    my @markerlist = keys %{$markers};
+    my $mirror_minh = min_hamming($mirror, \@markerlist);
+    my $marker_minh = min_hamming($marker, \@markerlist);
+    return $mirror_minh < $marker_minh ? $mirror : $marker;
+}
+
+sub min_hamming {
+    my ($marker, $list) = @_;
+    my $minh = length $marker;
+    for my $l (@{$list}) {
+        next if $l eq $marker;
+        my $h = hamming($l, $marker);
+        $minh = $h if $h < $minh;
+    }
+    return $minh;
+}
+
+sub output_marker {
+    my ($id, $marker, $mstmapin, $codein, $marker_lookup) = @_;
+
+    print $codein "$id\t$marker\n";
+    print $mstmapin "$id";
+    my @gt = split //, $marker;
+    map { print $mstmapin "\t"; print $mstmapin $_ eq 'H' ? 'X' : $_; } @gt;
+    print $mstmapin "\n";
+    $marker_lookup->{$id} = $marker;
+    $id++;
+    return $id;
 }
 
 sub collapse {
@@ -441,73 +528,16 @@ sub fill_blocks {
     my ( $header, $types, $blocklist ) = @_;
     fill_type_pair( "Intercross-ABHABH_HHA", "Intercross-ABHABH_HHH",
         $blocklist );
-    print "After Intercross-ABHABH_HHA Intercross-ABHABH_HHH\n";
-
-        for my $block (@{$blocklist}) {
-            print Dumper $block if ($block->{'Start'} == 53270);
-        }
-    
     fill_type_pair( "Intercross-ABHABH_HHH", "Intercross-ABHABH_HHA",
         $blocklist );
-        print "After Intercross-ABHABH_HHH Intercross-ABHABH_HHA\n";
-
-            for my $block (@{$blocklist}) {
-                print Dumper $block if ($block->{'Start'} == 53270);
-            }
-
     fill_type_pair( "Intercross-ABHABH_HHA", "Paternal-AHAH", $blocklist );
-
-    print "After Intercross-ABHABH_HHA Paternal-AHAH\n";
-
-        for my $block (@{$blocklist}) {
-            print Dumper $block if ($block->{'Start'} == 53270);
-        }
-
     fill_type_pair( "Paternal-AHAH", "Intercross-ABHABH_HHA", $blocklist );
-
-    print "After Paternal-AHAH Intercross-ABHABH_HHA\n";
-
-        for my $block (@{$blocklist}) {
-            print Dumper $block if ($block->{'Start'} == 53270);
-        }
-
-    fill_type_pair( "Intercross-ABHABH_HHA", "Maternal-AHAH", $blocklist );
-
-    print "After Intercross-ABHABH_HHA Maternal-AHAH\n";
-
-        for my $block (@{$blocklist}) {
-            print Dumper $block if ($block->{'Start'} == 53270);
-        }
-
-
-    fill_type_pair( "Intercross-ABHABH_HHH", "Maternal-AHAH", $blocklist );
-    print "After Intercross-ABHABH_HHH Maternal-AHAH\n";
-
-        for my $block (@{$blocklist}) {
-            print Dumper $block if ($block->{'Start'} == 53270);
-        }
-
-
-    fill_type_pair( "Paternal-AHAH",         "Maternal-AHAH", $blocklist );
-    print "After Paternal-AHAH Maternal-AHAH\n";
-
-        for my $block (@{$blocklist}) {
-            print Dumper $block if ($block->{'Start'} == 53270);
-        }
-
-
-
-    fill_type_pair( "Paternal-AHAB_AHB",     "Sex-HB",        $blocklist );
-
-    print "After Paternal-AHAB_AHB Sex-HB\n";
-
-        for my $block (@{$blocklist}) {
-            print Dumper $block if ($block->{'Start'} == 53270);
-        }
-
-
-
-
+    fill_type_pair( "Intercross-ABHABH_HHA", "Maternal-AHAH",     $blocklist );
+    fill_type_pair( "Intercross-ABHABH_HHH", "Maternal-AHAH",     $blocklist );
+    fill_type_pair( "Paternal-AHAH",         "Maternal-AHAH",     $blocklist );
+    fill_type_pair( "Paternal-AHAB_AHB",     "Paternal-AHAB_AHA", $blocklist );
+    fill_type_pair( "Paternal-AHAB_AHA",     "Paternal-AHAB_AHB", $blocklist );
+    fill_type_pair( "Paternal-AHAB_AHB",     "Sex-HB",            $blocklist );
 }
 
 sub correct_maternal {
@@ -533,8 +563,8 @@ sub correct_maternal {
             next if $mata eq $matb;
             next if $mat{$mata}{length} < $mat{$matb}{length};
             my $fix = 0;
-            $fix = 1 if hamming( $mata,         $matb );
-            $fix = 1 if hamming( mirror($mata), $matb );
+            $fix = 1 if hamming( $mata,         $matb ) <= 6;
+            $fix = 1 if hamming( mirror($mata), $matb ) <= 6;
 
             if ($fix) {
                 $merged{$matb} = $mata;
@@ -615,8 +645,8 @@ sub fill_type_pair {
 
             my $fix = 0;
             $fix = 1 if $bpat eq $empty;
-            $fix = 1 if hamming( $maxbpat, $bpat );
-            $fix = 1 if hamming( mirror($maxbpat), $bpat );
+            $fix = 1 if hamming( $maxbpat, $bpat ) <= 6;
+            $fix = 1 if hamming( mirror($maxbpat), $bpat ) <= 6;
 
             if ($fix) {
                 for my $b ( @{ $ab{$apat}{$bpat}{blocks} } ) {
@@ -646,17 +676,18 @@ sub mirror {
 sub hamming {
     my ( $a, $b ) = @_;
     my $hamming = ( $a ^ $b ) =~ tr/\001-\255//;
-    return $hamming <= 6;
+    return $hamming;
 }
 
 sub load_blocks {
-    my $blockfilename = shift;
+    my $inputstub = shift;
 
     my @blocklist;
     my %types;
     my @header;
     my %matpat;
 
+    my $blockfilename = $inputstub . ".blocks.out";
     open my $blocksfile, '<', $blockfilename
       or croak "Can't open $blockfilename: $OS_ERROR\n";
     while ( my $blocksline = <$blocksfile> ) {
@@ -675,6 +706,8 @@ sub load_blocks {
             my %block;
             for my $i ( 0 .. $#f ) {
                 $block{ $header[$i] } = $f[$i];
+                $block{ $header[$i] } = convert_sex( $block{ $header[$i] } )
+                  if defined $sex{ $header[$i] } && $f[$i] !~ /^( +)$/;
                 $block{ $header[$i] } = phase( $block{ $header[$i] } )
                   if defined $types{ $header[$i] } && $f[$i] !~ /^( +)$/;
             }
@@ -683,4 +716,10 @@ sub load_blocks {
     }
     close $blocksfile;
     return ( \@header, \%types, \@blocklist );
+}
+
+sub convert_sex {
+    my ($pat) = @_;
+    $pat =~ s/B/H/g;
+    return $pat;
 }
