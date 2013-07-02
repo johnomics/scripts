@@ -42,11 +42,29 @@ $args{output} = "test";
 my $options_okay =
   GetOptions( 'input=s' => \$args{input}, 'output=s' => \$args{output} );
 
+print STDERR "Loading blocks...\n";
 my ( $header, $types, $blocklist ) = load_blocks( $args{input} );
 
+printf STDERR "%-60s", "Step";
+for my $t (4..$#{$header}) {
+    printf STDERR "\t%-40s", $header->[$t];
+}
+print STDERR "\n";
+
+get_block_stats("After load_blocks", $header, $types, $blocklist);
+
 fill_blocks( $header, $types, $blocklist );
+
 correct_maternal( "Maternal-AHAH", $blocklist );
+
+get_block_stats("After correct_maternal", $header, $types, $blocklist);
+
 collapse( $blocklist, $types );
+
+get_block_stats("After collapse", $header, $types, $blocklist);
+
+
+
 make_chrom_maps( $blocklist, $args{output} );
 
 my %presents;
@@ -79,6 +97,9 @@ sub make_chrom_maps {
         }
         next if $mat =~ /[ \-]/;
         next if $pat =~ /[ \-]/;
+
+        $block->{'Maternal-AHAH'} = $mat if ($block->{'Maternal-AHAH'} eq $empty);
+        $block->{'Paternal-AHAH'} = $pat if ($block->{'Paternal-AHAH'} eq $empty);
         $matpat{$mat}{$pat}{length} += $block->{'Length'};
         $matpat{$mat}{$pat}{blocks}++;
         $patmat{$pat}{$mat}{length} += $block->{'Length'};
@@ -86,6 +107,8 @@ sub make_chrom_maps {
         $pattern_block{$pat}{ $block->{'Scaffold'} }{ $block->{'Start'} } =
           $block->{'End'};
     }
+
+    get_block_stats("After finding mat and pat", $header, $types, $blocklist);
 
     for my $mat (keys %matpat) {
         if ($mat =~ /^(S+)$/) {
@@ -107,18 +130,13 @@ sub make_chrom_maps {
         $pat =~ 'H' ? push @int, $pat : push @pat, $pat;
     }
 
-    my %matint;
     for my $int (@int) {
+        my $imat = "I" x length $int;
+        my @i = split //, $int;
+        my $int_pmatched = 0;
         for my $pat (@pat) {
-            my @i = split //, $int;
-            my @p = split //, $pat;
-            my $match = 1;
-            for my $a ( 0 .. $#i ) {
-                next if $i[$a] eq 'H';
-                if ( $i[$a] ne $p[$a] ) { $match = 0; last; }
-            }
-            if ($match) {
-                my $imat = "I" x length $int;
+            if (int_match(\@i, $pat)) {
+                $int_pmatched++;
                 my $pmat = (
                     sort {
                         $patmat{$pat}{$b}{length} <=> $patmat{$pat}{$a}{length}
@@ -131,6 +149,30 @@ sub make_chrom_maps {
                 $matpat{$pmat}{$int}{blocks} = $matpat{$imat}{$int}{blocks};
                 delete $matpat{$imat}{$int};
                 last;
+            }
+        }
+        if (!$int_pmatched) {
+            my $minh = length $int;
+            my $minh_mat = $empty;
+            for my $mat (keys %matpat) {
+                my $hamming = 0;
+                my @m = split //, $mat;
+                for my $b (0..$#i) {
+                    next if $i[$b] eq 'H' or $i[$b] eq '-';
+                    $hamming++ if $i[$b] ne $m[$b];
+                }
+                if ($hamming < $minh) {
+                    $minh = $hamming;
+                    $minh_mat = $mat;
+                };
+            }
+            if ($minh == 0) {
+                $patmat{$int}{$minh_mat}{length} = $patmat{$int}{$imat}{length};
+                $patmat{$int}{$minh_mat}{blocks} = $patmat{$int}{$imat}{blocks};
+                delete $patmat{$int}{$imat};
+                $matpat{$minh_mat}{$int}{length} = $matpat{$imat}{$int}{length};
+                $matpat{$minh_mat}{$int}{blocks} = $matpat{$imat}{$int}{blocks};
+                delete $matpat{$imat}{$int};
             }
         }
     }
@@ -190,7 +232,7 @@ sub make_chrom_maps {
     }
     validate_scaffold( \@scfblocks, \%scfmap, \%genome, \%scfstats );
 
-    check_unassigned($args{input}, \%scfstats, \%patmat);
+#    check_unassigned($args{input}, \%scfstats, \%patmat);
 
     my %genomestat;
     foreach my $scf ( sort keys %scfstats ) {
@@ -237,6 +279,17 @@ sub make_chrom_maps {
     printf STDERR "%16s\t%4d\t%9d\n", 'Genome', $genomescf, $genomesize;
     
     
+}
+
+sub int_match {
+    my ($inta, $pat) = @_;
+    my @p = split //, $pat;
+    my $match = 1;
+    for my $a ( 0 .. $#{$inta} ) {
+        next if $inta->[$a] eq 'H' or $inta->[$a] eq '-';
+        if ( $inta->[$a] ne $p[$a] ) { $match = 0; last; }
+    }
+    return $match;
 }
 
 sub check_unassigned {
@@ -531,13 +584,17 @@ sub fill_blocks {
     fill_type_pair( "Intercross-ABHABH_HHH", "Intercross-ABHABH_HHA",
         $blocklist );
     fill_type_pair( "Intercross-ABHABH_HHA", "Paternal-AHAH", $blocklist );
+    fill_type_pair( "Intercross-ABHABH_HHH", "Paternal-AHAH", $blocklist );
     fill_type_pair( "Paternal-AHAH", "Intercross-ABHABH_HHA", $blocklist );
+    fill_type_pair( "Paternal-AHAH", "Intercross-ABHABH_HHH", $blocklist );
+    fill_type_pair( "Maternal-ABHABH",       "Maternal-AHAH", $blocklist );
     fill_type_pair( "Intercross-ABHABH_HHA", "Maternal-AHAH",     $blocklist );
     fill_type_pair( "Intercross-ABHABH_HHH", "Maternal-AHAH",     $blocklist );
     fill_type_pair( "Paternal-AHAH",         "Maternal-AHAH",     $blocklist );
     fill_type_pair( "Paternal-AHAB_AHB",     "Paternal-AHAB_AHA", $blocklist );
     fill_type_pair( "Paternal-AHAB_AHA",     "Paternal-AHAB_AHB", $blocklist );
     fill_type_pair( "Paternal-AHAB_AHB",     "Sex-HB",            $blocklist );
+    fill_type_pair( "Paternal-AHAB_AHA",     "Sex-HB",            $blocklist );
 }
 
 sub correct_maternal {
@@ -655,6 +712,8 @@ sub fill_type_pair {
             }
         }
     }
+    
+    get_block_stats("After fill $typea\-\>$typeb", $header, $types, $blocklist);
 }
 
 sub mirror {
@@ -722,4 +781,45 @@ sub convert_sex {
     my ($pat) = @_;
     $pat =~ s/B/H/g;
     return $pat;
+}
+
+sub get_block_stats {
+    my ($step, $header, $types, $blocklist) = @_;
+    my %typeblocks;
+    my %typepatterns;
+    my %typebases;
+    for my $block (@{$blocklist}) {
+        for my $type (keys %{$types}) {
+            next if $block->{$type} eq $empty;
+            if ($block->{$type} =~ /\-/) {
+                $typeblocks{error}{$type}++;
+                $typepatterns{error}{$type}{$block->{$type}}++;
+                $typebases{error}{$type}+=$block->{'Length'};
+            }
+            else {
+                $typeblocks{ok}{$type}++;
+                $typepatterns{ok}{$type}{$block->{$type}}++;
+                $typebases{ok}{$type}+=$block->{'Length'};
+            }
+        }
+    }
+    printf STDERR "%-60s", $step;
+    for my $t (4..$#{$header}) {
+        my $typestats = "";
+        my $type = $header->[$t];
+        $typestats .= $typeblocks{ok}{$type} // '0';
+        $typestats .= ':';
+        $typestats .= $typeblocks{error}{$type} // '0';
+        $typestats .= ';';
+        $typestats .= defined $typepatterns{ok}{$type} ? scalar keys %{$typepatterns{ok}{$type}} : '0';
+        $typestats .= ':';
+        $typestats .= defined $typepatterns{error}{$type} ? scalar keys %{$typepatterns{error}{$type}} : '0';
+        $typestats .= ';';
+        $typestats .= $typebases{ok}{$type} // '0';
+        $typestats .= ':';
+        $typestats .= $typebases{error}{$type} // '0';
+
+        printf STDERR "\t%-40s", $typestats;
+    }
+    print STDERR "\n";
 }
