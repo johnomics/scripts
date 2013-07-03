@@ -11,6 +11,7 @@ use constant ERRORBLOCK   => 2000;
 use constant ERRORSNPS    => 5;
 use constant FS_THRESHOLD => 35;
 use constant MQ_THRESHOLD => 57;
+use constant GAPSIZE      => 4000;
 
 my %swapphase = (
     "Intercross" => { "A" => "B", "B" => "A" },
@@ -229,14 +230,14 @@ sub parse_snp {
     }
 
     my @pgqs = split /:/, $info{pgqs};
-    my @pcs = split //, $parentcall;
+    my @pcs  = split //,  $parentcall;
     my $poorqual = 0;
     map {
         my $threshold = $pcs[$_] eq 'H' ? 99 : 60;
         $poorqual = 1 if $pgqs[$_] < $threshold;
-    } 0..2;
-        
-    if ( $poorqual ) {
+    } 0 .. 2;
+
+    if ($poorqual) {
         $info{error} = "Poor quality parental calls";
         return ( \%marker, "Reject", $parentcall, $pos, \%info );
     }
@@ -401,30 +402,20 @@ sub get_cp {
 sub find_edges {
     my ( $markers, $samples, $genetics ) = @_;
 
-    foreach my $type ( keys %{$markers} ) {
+    for my $type ( keys %{$markers} ) {
         next if ( $type eq "Reject" );
         my @pos = sort { $a <=> $b } keys %{ $markers->{$type} };
-        foreach my $sample ( @{ $samples->{offspring}{order} } ) {
-            foreach my $maska (
-                keys %{
-                    $genetics->{masks}{$type}{ $genetics->{samplesex}{$sample} }
-                }
-              )
-            {
-                my %maskcall = ( 'A' => 0, 'B' => 0, 'H' => 0, '.' => 0 );
-                $maskcall{$maska} = 1;
-                map { $maskcall{$_} = -1 }
-                  keys %{ $genetics->{masks}{$type}
-                      { $genetics->{samplesex}{$sample} }{$maska} };
+        for my $sample ( @{ $samples->{offspring}{order} } ) {
 
-                get_sample_blocks( $markers->{$type},
-                    $sample, \@pos, \%maskcall, MASKLEN );
+            for my $gt ( 'A', 'B', 'H', '.' ) {
+                my %maskcall = ( 'A' => -1, 'B' => -1, 'H' => -1, '.' => -1 );
+                $maskcall{$gt} = 1;
+                get_sample_blocks( $markers->{$type}, $sample, \@pos,
+                    \%maskcall, MASKLEN );
             }
+
             call_blocks( $markers->{$type}, $sample, \@pos, MASKLEN, $type,
                 $genetics );
-
-   #            get_block_consensus( $markers->{$type}, $sample, \@pos, MASKLEN,
-   #                $type, $genetics );
             clean_blocks( $markers->{$type}, $sample, \@pos, $type );
         }
     }
@@ -434,9 +425,9 @@ sub call_blocks {
     my ( $marker, $sample, $pos, $masklen, $type, $genetics ) = @_;
 
     my $blocknum = 0;
-    my @blocks;
+    my @blocks = ();
     my $validgts;
-    my $prevpos = 0;
+    my $prevpos = -100;
     for my $p ( @{$pos} ) {
         $validgts = $genetics->{types}{ $marker->{$p}{parent} }{$type}
           { $genetics->{samplesex}{$sample} };
@@ -447,34 +438,25 @@ sub call_blocks {
           if ( defined $marker->{$p}{marker}{$sample}{edge}
             && abs( $marker->{$p}{marker}{$sample}{edge} ) > $masklen );
         push @{ $blocks[$blocknum]{pos} }, $p;
-        $blocks[$blocknum]{gt}{ $marker->{$p}{marker}{$sample}{gt} }++
-          if $validgts =~ /$marker->{$p}{marker}{$sample}{gt}/;
-        $prevpos = $p;
+        if (
+            $validgts =~ /$marker->{$p}{marker}{$sample}{gt}/
+            && (   $p - $prevpos > 100
+                || $marker->{$prevpos}{marker}{$sample}{gt} ne
+                $marker->{$p}{marker}{$sample}{gt} )
+          )
+        {
+            $blocks[$blocknum]{gt}{ $marker->{$p}{marker}{$sample}{gt} }++;
+            $prevpos = $p;
+        }
     }
 
     my @blocksbysize =
       sort { @{ $blocks[$b]{pos} } <=> @{ $blocks[$a]{pos} } } 0 .. $#blocks;
 
-    #      print Dumper \@blocks;
-    #      print Dumper \@blocksbysize;
     for my $i (@blocksbysize) {
 
         my %gts;
         my $size;
-
-    # Double weight genotypes in end blocks
-    #        my $end = $i == 0 ? 2 : $i == $#{ $blocks[$i]{pos} } ? 2 : 1;
-    #           map { $gts{$_} = $blocks[$i]{gt}{$_} * $end; $size += $gts{$_} }
-    #             keys %{ $blocks[$i]{gt} };
-
-# Add neighbouring genotypes if possible
-#        if ( $i != $blocksbysize[0] )
-#        {    # If not the first, largest block (where no neighbours are called)
-#            get_neighbour_gts( $i, \@blocks, \%gts, $size, $genetics, $marker,
-#                $type, $sample );
-#        }
-
-        #        my @sortgt = sort { $gts{$b} <=> $gts{$a} } keys %gts;
 
         my @sortgt =
           sort { $blocks[$i]{gt}{$b} <=> $blocks[$i]{gt}{$a} }
@@ -487,30 +469,6 @@ sub call_blocks {
           : '~';
         map { $marker->{$_}{marker}{$sample}{cons} = $maxgt }
           @{ $blocks[$i]{pos} };
-    }
-
-}
-
-sub get_neighbour_gts {
-    my ( $i, $blocks, $gts, $size, $genetics, $marker, $type, $sample ) = @_;
-
-    for my $dir ( 1, -1 ) {
-        my $nextblock = $i + 1 * $dir;
-        my $found     = 0;
-        while ( defined $blocks->[$nextblock] && $found < $size ) {
-            my $posi = $dir eq 1 ? 0 : $#{ $blocks->[$nextblock]{pos} };
-            my $lastpos = $dir eq 1 ? $#{ $blocks->[$nextblock]{pos} } : 0;
-            while ( $posi != $lastpos && $found < $size ) {
-                my $p = $blocks->[$nextblock]{pos}[$posi];
-                if ( defined $marker->{$p}{marker}{$sample}{cons} ) {
-                    $gts->{ $marker->{$p}{marker}{$sample}{cons} }++;
-                    $found++;
-                }
-                $posi += $dir * 1;
-
-            }
-            $nextblock += $dir * 1;
-        }
     }
 
 }
@@ -537,9 +495,15 @@ sub clean_blocks {
             && $b <= $#blocks - 1
             && $blocks[ $b - 1 ]{cons} eq $blocks[ $b + 1 ]{cons}
             && $blocks[ $b - 1 ]{cons} ne $blocks[$b]{cons}
-            && ( ( max( @{ $blocks[$b]{pos} } ) - min( @{ $blocks[$b]{pos} } ) )
-                < ERRORBLOCK )
-            || ( @{ $blocks[$b]{pos} } <= ERRORSNPS )
+            && (
+                (
+                    (
+                        max( @{ $blocks[$b]{pos} } ) -
+                        min( @{ $blocks[$b]{pos} } )
+                    ) < ERRORBLOCK
+                )
+                || ( @{ $blocks[$b]{pos} } <= ERRORSNPS )
+            )
           )
         {
             for my $p ( @{ $blocks[$b]{pos} } ) {
@@ -562,13 +526,26 @@ sub get_sample_blocks {
 
     @mask = ( (-1) x $masklen, 0, (1) x $masklen ) if ( !@mask );
     my @called;
+    my $prevpos = -100;
     foreach my $p ( @{$pos} ) {
-        push @called, $p
-          if $maskcall->{ $marker->{$p}{marker}{$sample}{gt} } != 0;
+        # Check if previous and current SNP are separated by a large gap
+        if ($prevpos > -100 and $p - $prevpos >= GAPSIZE) {
+            $marker->{ $p }{marker}{$sample}{edge} = $masklen + 1;
+        }
+        next if !defined $marker->{$p}{marker}{$sample}{gt};
+        next if $maskcall->{ $marker->{$p}{marker}{$sample}{gt} } == 0;
+
+        if (   $p - $prevpos > 100
+            || $marker->{$p}{marker}{$sample}{gt} ne
+            $marker->{$prevpos}{marker}{$sample}{gt} )
+        {
+            push @called, $p;
+            $prevpos = $p;
+        }
     }
 
-    foreach my $i ( $masklen .. $#called - $masklen ) {
-        next if defined $marker->{ $called[$i] }{marker}{$sample}{edge};
+    foreach my $i ( $masklen .. $#called -$masklen ) {
+
         my @maskcallpos = @called[ $i - $masklen .. $i + $masklen ];
 
         my $edgesum = 0;
@@ -582,53 +559,6 @@ sub get_sample_blocks {
           if !defined $marker->{ $called[$i] }{marker}{$sample}{edge}
           or $edge > $marker->{ $called[$i] }{marker}{$sample}{edge};
     }
-}
-
-sub get_block_consensus {
-    my ( $marker, $sample, $pos, $masklen, $type, $genetics ) = @_;
-    my @blockpos;
-    foreach my $p ( @{$pos} ) {
-
-        if ( defined $marker->{$p}{marker}{$sample}{edge}
-            && abs( $marker->{$p}{marker}{$sample}{edge} ) > $masklen )
-        {
-            # Don't include the edge position in the current block;
-            # calculate the consensus for the edge position on its own,
-            # then move on to the following positions
-            calculate_consensus( \@blockpos, $marker, $sample, $type,
-                $genetics )
-              if @blockpos >= 1;
-            @blockpos = ($p);
-            calculate_consensus( \@blockpos, $marker, $sample, $type,
-                $genetics );
-            @blockpos = ();
-        }
-        else {
-            push @blockpos, $p;
-        }
-
-    }
-    calculate_consensus( \@blockpos, $marker, $sample, $type, $genetics );
-}
-
-sub calculate_consensus {
-    my ( $blockpos, $marker, $sample, $type, $genetics ) = @_;
-    my %blockgt;
-    my $validgts;
-    map {
-        $validgts = $genetics->{types}{ $marker->{$_}{parent} }{$type}
-          { $genetics->{samplesex}{$sample} };
-        $blockgt{ $marker->{$_}{marker}{$sample}{gt} }++
-          if $validgts =~ /$marker->{$_}{marker}{$sample}{gt}/;
-    } @{$blockpos};
-
-    my @sortgt = sort { $blockgt{$b} <=> $blockgt{$a} } keys %blockgt;
-    my $maxgt =
-        @sortgt == 0                                         ? '~'
-      : @sortgt == 1                                         ? $sortgt[0]
-      : $blockgt{ $sortgt[0] } / $blockgt{ $sortgt[1] } >= 2 ? $sortgt[0]
-      :                                                        '~';
-    map { $marker->{$_}{marker}{$sample}{cons} = $maxgt } @{$blockpos};
 }
 
 sub merge {
