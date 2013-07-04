@@ -11,7 +11,7 @@ use constant ERRORBLOCK   => 2000;
 use constant ERRORSNPS    => 5;
 use constant FS_THRESHOLD => 35;
 use constant MQ_THRESHOLD => 57;
-use constant GAPSIZE      => 4000;
+use constant GAPSIZE      => 3000;
 
 my %swapphase = (
     "Intercross" => { "A" => "B", "B" => "A" },
@@ -230,15 +230,23 @@ sub parse_snp {
     }
 
     my @pgqs = split /:/, $info{pgqs};
+    my @pdps = split /:/, $info{pdps};
     my @pcs  = split //,  $parentcall;
     my $poorqual = 0;
+    my $highdp = 0;
     map {
         my $threshold = $pcs[$_] eq 'H' ? 99 : 60;
         $poorqual = 1 if $pgqs[$_] < $threshold;
+        $highdp = 1 if $pdps[$_] >= 85;
     } 0 .. 2;
 
     if ($poorqual) {
         $info{error} = "Poor quality parental calls";
+        return ( \%marker, "Reject", $parentcall, $pos, \%info );
+    }
+    
+    if ($highdp) {
+        $info{error} = "Depth>100 for at least one parent";
         return ( \%marker, "Reject", $parentcall, $pos, \%info );
     }
 
