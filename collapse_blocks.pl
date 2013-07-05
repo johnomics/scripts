@@ -160,18 +160,17 @@ sub make_chrom_maps {
             my $minh     = length $int;
             my $minh_mat = $empty;
             for my $mat ( keys %matpat ) {
-                my $hamming = 0;
-                my @m = split //, $mat;
-                for my $b ( 0 .. $#i ) {
-                    next if $i[$b] eq 'H' or $i[$b] eq '-';
-                    $hamming++ if $i[$b] ne $m[$b];
-                }
-                if ( $hamming < $minh ) {
-                    $minh     = $hamming;
+                my $forh = int_hamming(\@i, $mat);
+                my $revh = int_hamming(\@i, mirror($mat));
+                my $math = $forh < $revh ? $forh : $revh;
+                if ($math < $minh) {
+                    $minh = $math;
                     $minh_mat = $mat;
                 }
             }
-            if ( $minh == 0 ) {
+
+#            if ( $minh == 0 ) {
+             if ( $minh_mat ne $empty) {
                 $patmat{$int}{$minh_mat}{length} = $patmat{$int}{$imat}{length};
                 $patmat{$int}{$minh_mat}{blocks} = $patmat{$int}{$imat}{blocks};
                 delete $patmat{$int}{$imat};
@@ -181,7 +180,6 @@ sub make_chrom_maps {
             }
         }
     }
-
     my %scfmap;
     my %genome;
     for my $mat ( keys %matpat ) {
@@ -302,6 +300,17 @@ sub make_chrom_maps {
     }
     printf STDERR "%16s\t%4d\t%9d\n", 'Genome', $genomescf, $genomesize;
 
+}
+
+sub int_hamming {
+    my ($int, $pat) = @_;
+    my $hamming = 0;
+    my @p = split //, $pat;
+    for my $b ( 0 .. $#{$int} ) {
+        next if $int->[$b] eq 'H' or $int->[$b] eq '-';
+        $hamming++ if $int->[$b] ne $p[$b];
+    }
+    return $hamming;
 }
 
 sub int_match {
