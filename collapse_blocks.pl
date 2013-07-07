@@ -182,6 +182,7 @@ sub make_chrom_maps {
     }
     my %scfmap;
     my %genome;
+    my %markerscf;
     for my $mat ( keys %matpat ) {
         for my $pat ( keys %{ $matpat{$mat} } ) {
             delete $matpat{$mat}{$pat}
@@ -231,6 +232,7 @@ sub make_chrom_maps {
                             $scfmap{$scf}{$start}{mat} = $mat;
                             $scfmap{$scf}{$start}{lg}  = $lg;
                             $scfmap{$scf}{$start}{cm}  = $cm;
+                            $markerscf{"$mat:$lg:$cm"}{$scf}++;
                         }
                     }
                 }
@@ -257,9 +259,31 @@ sub make_chrom_maps {
     #    check_unassigned($args{input}, \%scfstats, \%patmat);
 
     my %genomestat;
+    my %local_assembly_markers;
     foreach my $scf ( sort keys %scfstats ) {
 
         my $stat = $scfstats{$scf};
+        $stat->{ordered}=0;
+        if ($stat->{chromosomes} == 1 and $stat->{lgs} == 1 and $stat->{gaps} == 0 and !$stat->{oriented}) {
+            my %markers;
+            for my $pos (keys %{$scfmap{$scf}}) {
+                $markers{"$scfmap{$scf}{$pos}{mat}:$scfmap{$scf}{$pos}{lg}:$scfmap{$scf}{$pos}{cm}"}++;
+            }
+            croak "Should only be one marker at non-oriented scaffold $scf!" if (keys %markers != 1);
+            my $marker = (keys %markers)[0];
+            my $unoriented_marker_scfs = 0;
+            for my $markerscf (keys %{$markerscf{$marker}}) {
+                next if $markerscf eq $scf;
+                if ($scfstats{$markerscf}{chromosomes} != 1 or $scfstats{$markerscf}{lgs} != 1 or $scfstats{$markerscf}{gaps} > 0 or !$scfstats{$markerscf}{oriented}) {
+                    $unoriented_marker_scfs++;
+                }
+            }
+            if (!$unoriented_marker_scfs) {
+                $stat->{ordered}++;
+            }
+            
+            $local_assembly_markers{$marker}++ if !$stat->{ordered};
+        }
 
         print
 "$scf\t$stat->{markerblocks}\t$stat->{allblocks}\t$stat->{length}\t$stat->{chromosomes}\t$stat->{lgs}\t$stat->{gaps}\n";
@@ -274,6 +298,14 @@ sub make_chrom_maps {
                 if ( $stat->{gaps} == 0 ) {
                     $genomestat{"Assigned"}{scf}++;
                     $genomestat{"Assigned"}{len} += $stat->{length};
+                    if ($stat->{oriented}) {
+                        $genomestat{"Oriented"}{scf}++;
+                        $genomestat{"Oriented"}{len} += $stat->{length};
+                    }
+                    if ($stat->{ordered}) {
+                        $genomestat{"Ordered"}{scf}++;
+                        $genomestat{"Ordered"}{len} += $stat->{length};
+                    }
                 }
                 else {
                     $genomestat{"Gaps"}{scf}++;
@@ -295,11 +327,28 @@ sub make_chrom_maps {
     for my $stat ( sort keys %genomestat ) {
         printf STDERR "%16s\t%4d\t%9d\n", $stat, $genomestat{$stat}{scf},
           $genomestat{$stat}{len};
+        next if $stat =~ /Oriented/ or $stat =~ /Ordered/;
         $genomesize += $genomestat{$stat}{len};
         $genomescf  += $genomestat{$stat}{scf};
     }
     printf STDERR "%16s\t%4d\t%9d\n", 'Genome', $genomescf, $genomesize;
-
+    
+    print STDERR "Marker blocks requiring local assembly: ", scalar keys %local_assembly_markers, "\n";
+    my %lam_block_scfs;
+    my %lam_block_sizes;
+    for my $lam (sort keys %local_assembly_markers) {
+        my $scfnum = keys %{$markerscf{$lam}};
+        $lam_block_scfs{$scfnum}++;
+        for my $scf (keys %{$markerscf{$lam}}) {
+            $lam_block_sizes{$lam}+=$scfstats{$scf}{length};
+        }
+    }
+    for my $lam (sort {$lam_block_sizes{$b} <=> $lam_block_sizes{$a}} keys %lam_block_sizes) {
+        print "$lam\t", scalar keys %{$markerscf{$lam}}, "\t$lam_block_sizes{$lam}\n";
+    }
+    for my $scfnum (sort {$a<=>$b} keys %lam_block_scfs) {
+        print "$scfnum\t$lam_block_scfs{$scfnum}\n";
+    }
 }
 
 sub int_hamming {
@@ -364,6 +413,7 @@ sub validate_scaffold {
     my $scf                = $scfblocks->[0]{'Scaffold'};
     my %scfcms;
     my $scflen = 0;
+    my %scfmarkers;
     for my $block ( @{$scfblocks} ) {
         $scflen += $block->{'Length'};
         if ( defined $scfmap->{ $block->{'Scaffold'} }{ $block->{'Start'} } ) {
@@ -373,15 +423,19 @@ sub validate_scaffold {
               {blocks}++;
             $scfcms{ $mappos->{mat} }{ $mappos->{lg} }{ $mappos->{cm} }{length}
               += $block->{'Length'};
+            $scfmarkers{"$mappos->{mat}:$mappos->{lg}:$mappos->{cm}"}{$block->{'Scaffold'}}++;
         }
     }
     my $scfchroms = keys %scfcms // 0;
     my $scflgs    = 0;
     my $scfgaps   = 0;
+    $stats->{$scf}{oriented} = 0;
+    
     for my $mat ( sort keys %scfcms ) {
         for my $lg ( sort keys %{ $scfcms{$mat} } ) {
             $scflgs++;
             my @scfcm       = sort { $a <=> $b } keys %{ $scfcms{$mat}{$lg} };
+            $stats->{$scf}{oriented}++ if @scfcm > 1;
             my $start_check = 0;
             my $gap_cms     = 0;
             for my $lgcm ( sort { $a <=> $b } keys %{ $genome->{$mat}{$lg} } ) {
