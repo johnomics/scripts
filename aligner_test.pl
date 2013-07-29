@@ -40,6 +40,10 @@ $refoutseq =~ s/-//g;
 print $refout ">$reference\n$refoutseq\n";
 close $refout;
 
+# Prepare Stampy indices
+system("stampy -G $output_dir/$reference\_ref $output_dir/$reference\_ref.fa");
+system("stampy -g $output_dir/$reference\_ref -H $output_dir/$reference\_ref");
+
 my $pm = new Parallel::ForkManager($threads);
 $pm->set_max_procs($threads);
 
@@ -49,17 +53,43 @@ for my $seqname ( keys %{$seqs_ref} ) {
         for my $endtype ( 'single', 'paired' ) {
             next if $endtype eq 'paired';
             $pm->start and next;
-            print "$seqname\t$readlen\t$endtype\n";
             generate_read_alignment(
                 $seqname,  $readlen,   $endtype,
                 $seqs_ref, $reference, $output_dir
             );
+            run_aligner($seqname, $readlen, $endtype, $reference, $output_dir);
             $pm->finish;
         }
     }
 }
 
 $pm->wait_all_children;
+
+sub run_aligner {
+    my ($seqname, $readlen, $endtype, $reference, $output_dir) = @_;
+
+    system("stampy -g $output_dir/$reference\_ref -h $output_dir/$reference\_ref -M $output_dir/$seqname.$readlen.$endtype\_1.fq -o $output_dir/$seqname.$readlen.$endtype.stampy.sam");
+    
+    open my $result, "<", "$output_dir/$seqname.$readlen.$endtype.stampy.sam" or croak "Can't open results file!\n";
+    my $matchpos;
+    my $matchcigar;
+    my $reads;
+    while (my $samline = <$result>) {
+        chomp $samline;
+        next if $samline =~ /^@/;
+        $reads++;
+        my ($readname, $flag, $ref, $refpos, $mq, $cigar, @other) = split /\t/, $samline;
+        
+        my ($true_readpos, $snps, $snppos, $true_cigar) = split /_/, $readname;
+        
+        $matchpos++ if ($true_readpos eq $refpos);
+        $matchcigar++ if ($true_cigar eq $cigar);
+    }
+    close $result;
+    
+    print "$seqname\t$readlen\t$endtype\tStampy\t$reads\t$matchpos\t$matchcigar\n";
+    return;
+}
 
 sub generate_read_alignment {
     my ( $seqname, $readlen, $endtype, $seqs_ref, $reference, $output_dir ) =
