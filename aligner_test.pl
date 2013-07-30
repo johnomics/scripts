@@ -5,20 +5,22 @@ use warnings;
 use Carp;
 use English;
 use Getopt::Long;
+use Data::Dumper;
 use Parallel::ForkManager;
-use Memoize;
-
-memoize 'test_block';
 
 my $alignment    = "";
 my $reference    = "";
 my $output_dir   = "aligner_test_out";
 my $threads      = 1;
+my $commands     = "";
+my $maxseqs      = 0;
 my $options_okay = GetOptions(
     'alignment=s' => \$alignment,
     'reference=s' => \$reference,
+    'commands=s'  => \$commands,
     'output=s'    => \$output_dir,
     'threads=i'   => \$threads,
+    'maxseqs=i'   => \$maxseqs,
 );
 
 croak
@@ -27,87 +29,101 @@ croak
 croak
   "Please specify the name of the reference sequence in the alignment with -r"
   if $reference eq "";
+croak "Please specify a file containing aligner commands with -c"
+  if $commands eq "";
 
-my $seqs_ref = load_alignment($alignment);
+my $seqs = load_alignment($alignment);
 croak "Reference must be present in alignment"
-  if !defined $seqs_ref->{$reference};
+  if !defined $seqs->{$reference};
+
+my $aligners = load_commands($commands);
 
 -d $output_dir or mkdir $output_dir;
 
-open my $refout, ">", "$output_dir/$reference\_ref.fa" or croak "Can't open output reference FASTA file!\n";
-my $refoutseq = $seqs_ref->{$reference};
-$refoutseq =~ s/-//g;
-print $refout ">$reference\n$refoutseq\n";
-close $refout;
-
-# Prepare Stampy indices
-system("stampy -G $output_dir/$reference\_ref $output_dir/$reference\_ref.fa");
-system("stampy -g $output_dir/$reference\_ref -H $output_dir/$reference\_ref");
+prepare_reference( $reference, $output_dir, $seqs, $aligners );
 
 my $pm = new Parallel::ForkManager($threads);
 $pm->set_max_procs($threads);
 
-for my $seqname ( keys %{$seqs_ref} ) {
+my $seqsdone = 0;
+for my $seqname ( keys %{$seqs} ) {
     next if $seqname eq $reference;
-    for my $readlen ( 50, 100 ) {
-        for my $endtype ( 'single', 'paired' ) {
-            next if $endtype eq 'paired';
-            $pm->start and next;
-            generate_read_alignment(
-                $seqname,  $readlen,   $endtype,
-                $seqs_ref, $reference, $output_dir
-            );
-            run_aligner($seqname, $readlen, $endtype, $reference, $output_dir);
-            $pm->finish;
+
+    last if $maxseqs and $seqsdone == $maxseqs;
+    my ( $testbp, $refbp, $refpos, $stats ) =
+      get_aligned_bases( $seqname, $reference, $seqs );
+
+    next if !defined $testbp;
+
+    for my $readlen (50) {
+        $pm->start and next;
+        generate_read_alignment( $testbp, $refbp, $refpos, $seqname, $readlen,
+            $seqs, $reference, $output_dir );
+
+        my $refpath   = "$output_dir/$reference";
+        my $fastqpath = "$output_dir/$seqname.$readlen";
+
+        for my $aligner ( sort keys %{$aligners} ) {
+
+            run_aligner( $aligners->{$aligner}, $refpath, $fastqpath );
+            my $result = compare_alignment( $fastqpath, $aligner );
+
+            print
+"$stats->{bases}\t$stats->{matches}\t$stats->{ns}\t$stats->{snps}\t$stats->{ins}\t$stats->{del}\t$readlen\t$aligner\t$result\t$seqname\n";
         }
+
+        $pm->finish;
     }
+    $seqsdone++;
 }
 
 $pm->wait_all_children;
 
-sub run_aligner {
-    my ($seqname, $readlen, $endtype, $reference, $output_dir) = @_;
+sub compare_alignment {
+    my ( $fastqpath, $aligner ) = @_;
+    open my $result, "<", "$fastqpath.$aligner.sam"
+      or croak "Can't open results file $fastqpath.$aligner.sam!\n";
 
-    system("stampy -g $output_dir/$reference\_ref -h $output_dir/$reference\_ref -M $output_dir/$seqname.$readlen.$endtype\_1.fq -o $output_dir/$seqname.$readlen.$endtype.stampy.sam");
-    
-    open my $result, "<", "$output_dir/$seqname.$readlen.$endtype.stampy.sam" or croak "Can't open results file!\n";
-    my $matchpos;
-    my $matchcigar;
-    my $reads;
-    while (my $samline = <$result>) {
+    my $matchpos   = 0;
+    my $matchcigar = 0;
+    my $reads      = 0;
+    while ( my $samline = <$result> ) {
         chomp $samline;
         next if $samline =~ /^@/;
         $reads++;
-        my ($readname, $flag, $ref, $refpos, $mq, $cigar, @other) = split /\t/, $samline;
-        
-        my ($true_readpos, $snps, $snppos, $true_cigar) = split /_/, $readname;
-        
-        $matchpos++ if ($true_readpos eq $refpos);
-        $matchcigar++ if ($true_cigar eq $cigar);
+        my ( $readname, $flag, $ref, $refpos, $mq, $cigar, @other ) =
+          split /\t/, $samline;
+
+        my ( $true_readpos, $snps, $snppos, $true_cigar ) = split /_/,
+          $readname;
+
+        $matchpos++   if ( $true_readpos eq $refpos );
+        $matchcigar++ if ( $true_cigar eq $cigar );
     }
     close $result;
-    
-    print "$seqname\t$readlen\t$endtype\tStampy\t$reads\t$matchpos\t$matchcigar\n";
+
+    return "$reads\t$matchpos\t$matchcigar";
+}
+
+sub run_aligner {
+    my ( $aligner, $refpath, $fastqpath ) = @_;
+
+    for my $cmd ( @{ $aligner->{align}{cmd} } ) {
+        $cmd =~ s/REFERENCE/$refpath/g;
+        $cmd =~ s/FASTQ/$fastqpath/g;
+        system($cmd);
+    }
     return;
 }
 
 sub generate_read_alignment {
-    my ( $seqname, $readlen, $endtype, $seqs_ref, $reference, $output_dir ) =
-      @_;
-    open my $sam, ">", "$output_dir/$seqname.$readlen.$endtype.sam"
-      or croak
-      "Can't open SAM file for $seqname, $readlen bp reads, $endtype end\n";
-    open my $fq, ">", "$output_dir/$seqname.$readlen.$endtype\_1.fq"
+    my ( $testbp, $refbp, $refpos, $seqname, $readlen,
+        $seqs, $reference, $output_dir )
+      = @_;
+    open my $sam, ">", "$output_dir/$seqname.$readlen.sam"
+      or croak "Can't open SAM file for $seqname, $readlen bp reads\n";
+    open my $fq, ">", "$output_dir/$seqname.$readlen.fq"
       or croak "Can't open read 1 FASTQ file for $seqname, $readlen bp reads\n";
-
-    my $testseq = $seqs_ref->{$seqname};
-    my $refseq  = $seqs_ref->{$reference};
-    print STDERR
-      "$seqname alignment is not the same length as reference alignment!\n"
-      and next
-      if length($testseq) != length($refseq);
-
-    my ( $testbp, $refbp, $refpos ) = get_aligned_bases( $testseq, $refseq );
 
     for my $i ( 1 .. $#{$refbp} - $readlen + 1 ) {
 
@@ -142,14 +158,23 @@ sub generate_read_alignment {
                 $write_del++ if $del > 0;
                 $mat++;
 
-                push @snps, $refpos->[$j] if ( $testbp->[$j] ne $refbp->[$j] );
+                push @snps, $refpos->[$j]
+                  if (  $testbp->[$j] ne $refbp->[$j]
+                    and $testbp->[$j] ne 'N'
+                    and $refbp->[$j] ne 'N' );
             }
-            ( $write_ins, $ins, $cigar ) =
-              test_block( $write_ins, $ins, 'I', $cigar );
-            ( $write_del, $del, $cigar ) =
-              test_block( $write_del, $del, 'D', $cigar );
-            ( $write_mat, $mat, $cigar ) =
-              test_block( $write_mat, $mat, 'M', $cigar );
+            if ($write_ins) {
+                $cigar .= $ins . "I";
+                $write_ins = $ins = 0;
+            }
+            elsif ($write_del) {
+                $cigar .= $del . "D";
+                $write_del = $del = 0;
+            }
+            elsif ($write_mat) {
+                $cigar .= $mat . "M";
+                $write_mat = $mat = 0;
+            }
 
             if ( $del == 0 ) {
                 $start = $refpos->[$j] if not defined $start;
@@ -164,12 +189,14 @@ sub generate_read_alignment {
 
         my $testreadseq = join( '', @testread );
 
-        next if $testreadseq =~ /N/ or length($testreadseq) < $readlen;
+        #        next if $testreadseq =~ /N/;
+        next if length($testreadseq) < $readlen;
 
         my $snpstr = join ',', @snps;
         my $snpnum = @snps;
         print $sam "$start\t"
-          . join( '', @testread )
+          . join( '', @testread ) . "\t"
+          . join( '', @refread )
           . "\t$snpnum\t$snpstr\t$cigar\n";
         print $fq '@'
           . "$start\_$snpnum\_$snpstr\_$cigar\n$testreadseq\n+\n"
@@ -179,22 +206,26 @@ sub generate_read_alignment {
     close $sam;
 }
 
-sub test_block {
-    my ( $write, $len, $let, $cigar ) = @_;
-    if ($write) {
-        $cigar .= "$len$let";
-        $write = 0;
-        $len   = 0;
-    }
-    return ( $write, $len, $cigar );
-}
-
 sub get_aligned_bases {
-    my ( $testseq, $refseq ) = @_;
+    my ( $seqname, $reference, $seqs ) = @_;
 
     my @testbases;
     my @refbases;
     my @refpos;
+    my %stats;
+
+    $stats{bases}   = 0;
+    $stats{ins}     = 0;
+    $stats{del}     = 0;
+    $stats{ns}      = 0;
+    $stats{matches} = 0;
+
+    my $testseq = $seqs->{$seqname};
+    my $refseq  = $seqs->{$reference};
+    print STDERR
+      "$seqname alignment is not the same length as reference alignment!\n"
+      and return
+      if length($testseq) != length($refseq);
 
     my $refi = 0;
     for my $i ( 0 .. length($refseq) ) {
@@ -203,19 +234,34 @@ sub get_aligned_bases {
 
         next if ( $ti eq '-' and $ri eq '-' );
 
+        $stats{bases}++;
         push @testbases, $ti;
         push @refbases,  $ri;
 
-        if ($ri eq '-') {
+        if ( $ri eq '-' ) {
             push @refpos, '-';
+            $stats{ins}++;
         }
         else {
             $refi++;
             push @refpos, $refi;
+
+            if ( $ti eq '-' ) {
+                $stats{del}++;
+            }
+            elsif ( $ti eq 'N' or $ri eq 'N' ) {
+                $stats{ns}++;
+            }
+            elsif ( $ti ne $ri ) {
+                $stats{snps}++;
+            }
+            else {
+                $stats{matches}++;
+            }
         }
     }
 
-    return ( \@testbases, \@refbases, \@refpos );
+    ( \@testbases, \@refbases, \@refpos, \%stats );
 }
 
 sub load_alignment {
@@ -240,5 +286,48 @@ sub load_alignment {
     $seqs{$seqname} = $seqbases;
     close $fa;
 
-    return \%seqs;
+    \%seqs;
+}
+
+sub load_commands {
+    my $commands = shift;
+
+    open my $cmdfile, '<', $commands
+      or croak "Can't open commands file $commands! $OS_ERROR\n";
+    my $aligner = "";
+    my $stage   = "";
+    my %aligners;
+    while ( my $cmdline = <$cmdfile> ) {
+        chomp $cmdline;
+        if ( $cmdline =~ /^#(.+)(\s+)(.+)$/ ) {
+            $aligner = $1;
+            $stage   = $3;
+        }
+        else {
+            push @{ $aligners{$aligner}{$stage}{cmd} }, $cmdline;
+        }
+    }
+    close $cmdfile;
+
+    \%aligners;
+}
+
+sub prepare_reference {
+    my ( $reference, $output_dir, $seqs, $aligners ) = @_;
+
+    my $refpath = "$output_dir/$reference";
+    open my $refout, ">", "$refpath.fa"
+      or croak "Can't open output reference FASTA file!\n";
+    my $refoutseq = $seqs->{$reference};
+    $refoutseq =~ s/-//g;
+    print $refout ">$reference\n$refoutseq\n";
+    close $refout;
+
+    for my $aligner ( keys %{$aligners} ) {
+        for my $cmd ( @{ $aligners->{$aligner}{index}{cmd} } ) {
+            $cmd =~ s/REFERENCE/$refpath/g;
+            print "$aligner:$cmd\n";
+            system($cmd);
+        }
+    }
 }
