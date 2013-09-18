@@ -35,6 +35,52 @@ my %mstheader = (
 
 my %sex = ( "Paternal-AHAB_AHB" => 0, "Paternal-AHAB_AHA" => 0 );
 
+# Chroms only used for graphics and output! Patterns are inferred correctly without them
+my %chroms = (
+    "ABBBBBBABABAABAAAABBBBBAABABBABABAABAAABABBBABBABBABBAABBABBAABBAABBB" =>
+      "1",
+    "ABBBABABBAABBBBBBABBAABBBBBBABBBABBABABAABBAAABBABBABBAAAAAAAABBAABAB" =>
+      "2",
+    "ABABABAABAABBBBBBABBBAABBBBAABAABAABAABAAAAABAABBAAAAAAAABBBBABBABBBA" =>
+      "3",
+    "ABBABBBBBABBABAAAAABAABBBBBBAAAAABABBAABABABAABABBAABABBAAABBBAABBABB" =>
+      "4",
+    "AABABBABBBABABABBBBABBBBBAABBABABAABABBABAAAAABBBAAABBAABBBBABBBBBABA" =>
+      "5",
+    "AABABBBBBABBAABABAABAABABABAAAAABAAAABAABBBBAABAABBBBAAABABAABAAAABAB" =>
+      "6",
+    "AABBAABBABBBAAABBBBBBBBABAAABBAAABAAAAAAABBAAABAAAABAABBBBABABABAABBB" =>
+      "7",
+    "AABBABBAABBBAAABAABABAAAAABBABBAAAABBABAABABABBBAABAABAAABABAAAAAAAAB" =>
+      "8",
+    "AABBBABBABAABBABBABBBAABABBBABBABAAAAAABABABAAAAABBBBBAABBABBAABABBAA" =>
+      "9",
+    "ABAAABABAAAABAABBAABABABABBABABABAABABBBBABBABBBBBBBBABAAAAABBBABABBB" =>
+      "10",
+    "ABAABBBABBAABAABBAAAAAABABBAABAAAAABBAAAAAAABABBABAAABBABAAAABABABBAB" =>
+      "11",
+    "AAABBAABBBBABBBABABABBABBAAAAABAAABBABAABBBABAABAAABAAABBBBBBAABBBBAA" =>
+      "12",
+    "ABAABBBBAAAABABAABBBAAAAAABBBBBBBBAAAAABAAABABABBBABABAABAAABBAABBBAA" =>
+      "13",
+    "AAABABBBABBAABBABABABBBAAAABBAAAAABBAABBAAABAABBBBBAABBABBAABBAABBAAB" =>
+      "14",
+    "ABBBBBABBAAAABBBBBBABBABBBAAABAABBABAAAAAAAABBABAABABBABBAAAAABAABBAA" =>
+      "15",
+    "ABBAABBABBBABBBBBBAAAABABBAAABBBBAABABAABBAAABAAABBBBBBBBBABBBAAABABB" =>
+      "16",
+    "ABBBAABAABBABAABABABABBAABAABBABBAABBAAAABAAABBBAAAABAABBBAAABBBAABAB" =>
+      "17",
+    "ABAAAABAAAABAABAAAAABAABBAABABBAABAABBAABBBAAAABBAABABBBABBABBBAAABBB" =>
+      "18",
+    "ABBAABBAABBBAABBBBBAAABBBBAABBBAABAABBBABABBAAABAABBAABBAAAAAABBAABAA" =>
+      "19",
+    "ABBBABAAABBBBABAABBBBAABBABBABBABBABBBBBBBBBAAABBAAAABBBBBBBABBBBAAAA" =>
+      "20",
+    "ABBABABBBBAABBBBBBBAAAAABABAAABBBBABABABBBABBABABBAAAAAABABBAABBAABAB" =>
+      "21",
+);
+
 my %args;
 $args{input}  = "";
 $args{output} = "test";
@@ -65,7 +111,6 @@ get_block_stats( "After collapse", $header, $types, $blocklist );
 
 make_chrom_maps( $blocklist, $args{output} );
 
-my %presents;
 for my $block ( @{$blocklist} ) {
     map { print STDERR "$block->{$_}\t" } @{$header};
     print STDERR "\n";
@@ -160,17 +205,17 @@ sub make_chrom_maps {
             my $minh     = length $int;
             my $minh_mat = $empty;
             for my $mat ( keys %matpat ) {
-                my $forh = int_hamming(\@i, $mat);
-                my $revh = int_hamming(\@i, mirror($mat));
+                my $forh = int_hamming( \@i, $mat );
+                my $revh = int_hamming( \@i, mirror($mat) );
                 my $math = $forh < $revh ? $forh : $revh;
-                if ($math < $minh) {
-                    $minh = $math;
+                if ( $math < $minh ) {
+                    $minh     = $math;
                     $minh_mat = $mat;
                 }
             }
 
-#            if ( $minh == 0 ) {
-             if ( $minh_mat ne $empty) {
+            #            if ( $minh == 0 ) {
+            if ( $minh_mat ne $empty ) {
                 $patmat{$int}{$minh_mat}{length} = $patmat{$int}{$imat}{length};
                 $patmat{$int}{$minh_mat}{blocks} = $patmat{$int}{$imat}{blocks};
                 delete $patmat{$int}{$imat};
@@ -191,26 +236,27 @@ sub make_chrom_maps {
         }
         next if ( keys %{ $matpat{$mat} } == 0 );
         my $markercode = run_mstmap( $mat, $matpat{$mat}, $output );
+
        #        my $markercode = run_carthagene( $mat, $matpat{$mat}, $output );
 
         $genome{$mat} = load_map( $output, $mat );
 
-        if (keys %{$genome{$mat}} == 2) {
-            my $mirlg = (keys %{$genome{$mat}})[0];
+        if ( keys %{ $genome{$mat} } == 2 ) {
+            my $mirlg = ( keys %{ $genome{$mat} } )[0];
             my %phased;
-            for my $lg (keys %{$genome{$mat}}) {
-                for my $cm (keys %{$genome{$mat}{$lg}}) {
-                    for my $markernum (keys %{$genome{$mat}{$lg}{$cm}}) {
+            for my $lg ( keys %{ $genome{$mat} } ) {
+                for my $cm ( keys %{ $genome{$mat}{$lg} } ) {
+                    for my $markernum ( keys %{ $genome{$mat}{$lg}{$cm} } ) {
                         my $pattern = $markercode->{$markernum}{orig};
                         my $fixed = $lg eq $mirlg ? mirror($pattern) : $pattern;
                         $phased{$fixed}++;
                     }
                 }
             }
-            $markercode = run_mstmap( $mat, \%phased, $output);
-            $genome{$mat} = load_map($output,$mat);
+            $markercode = run_mstmap( $mat, \%phased, $output );
+            $genome{$mat} = load_map( $output, $mat );
         }
-        
+
         for my $lg ( sort keys %{ $genome{$mat} } ) {
             for my $cm ( sort { $a <=> $b } keys %{ $genome{$mat}{$lg} } ) {
                 for my $marker (
@@ -219,7 +265,8 @@ sub make_chrom_maps {
                   )
                 {
                     my $pattern = $markercode->{$marker}{orig};
-                    $pattern = mirror($pattern) if !defined $pattern_block{$pattern};
+                    $pattern = mirror($pattern)
+                      if !defined $pattern_block{$pattern};
                     for my $scf ( sort keys %{ $pattern_block{$pattern} } ) {
                         for my $start (
                             sort { $a <=> $b }
@@ -256,6 +303,75 @@ sub make_chrom_maps {
     }
     validate_scaffold( \@scfblocks, \%scfmap, \%genome, \%scfstats );
 
+    open my $chrommap, ">", "$args{output}.chrommap.tsv"
+      or croak "Can't open chromosome map!\n";
+    open my $scfmap, ">", "$args{output}.scfmap.tsv"
+      or croak "Can't open scaffold map!\n";
+
+    print $chrommap "Chromosome\tcM\tStart\tLength\n";
+
+    print $scfmap "Chromosome\tScaffold\tScfStart\tScfEnd\tChrStart\tLength\n";
+
+    foreach my $mat ( sort { $chroms{$a} <=> $chroms{$b} } keys %genome ) {
+        croak "More than one linkage group found for $chroms{$mat}!\n"
+          if ( keys %{ $genome{$mat} } > 1 );
+        foreach my $lg ( keys %{ $genome{$mat} } ) {
+            my $chrpos_cm  = 1;
+            my $chrpos_scf = 1;
+
+            my @cms = sort { $a <=> $b } keys %{ $genome{$mat}{$lg} };
+            my @chromscf;
+            foreach my $cm_i ( 0 .. $#cms ) {
+                print $chrommap
+"$chroms{$mat}\t$cms[$cm_i]\t$chrpos_cm\t$genome{$mat}{$lg}{$cms[$cm_i]}{len}\n";
+                my @ordered_scfs = order_scfs(
+                    $genome{$mat}{$lg}{ $cms[$cm_i] }{scf},
+                    $genome{$mat}{$lg},
+                    \@cms, $cm_i
+                );
+                foreach my $scf (@ordered_scfs) {
+                    if ( @chromscf == 0 ) {
+                        $chromscf[0]{scf} = $scf;
+                        $chromscf[0]{scfstart} =
+                          $genome{$mat}{$lg}{ $cms[$cm_i] }{scf}{$scf}{start};
+                        $chromscf[0]{chrstart} = $chrpos_scf;
+                        $chromscf[0]{length} =
+                          $genome{$mat}{$lg}{ $cms[$cm_i] }{scf}{$scf}{length};
+                    }
+                    elsif ( $chromscf[-1]{scf} eq $scf ) {
+                        $chromscf[-1]{length} +=
+                          $genome{$mat}{$lg}{ $cms[$cm_i] }{scf}{$scf}{length};
+                    }
+                    else {
+                        push @chromscf,
+                          {
+                            scf => $scf,
+                            scfstart =>
+                              $genome{$mat}{$lg}{ $cms[$cm_i] }{scf}{$scf}
+                              {start},
+                            chrstart => $chrpos_scf,
+                            length =>
+                              $genome{$mat}{$lg}{ $cms[$cm_i] }{scf}{$scf}
+                              {length}
+                          };
+                    }
+                    $chrpos_scf +=
+                      $genome{$mat}{$lg}{ $cms[$cm_i] }{scf}{$scf}{length};
+                }
+                $chrpos_cm += $genome{$mat}{$lg}{ $cms[$cm_i] }{len};
+
+            }
+            foreach my $i ( 0 .. $#chromscf ) {
+                my $end = $chromscf[$i]{scfstart} + $chromscf[$i]{length};
+                print $scfmap
+"$chroms{$mat}\t$chromscf[$i]{scf}\t$chromscf[$i]{scfstart}\t$end\t$chromscf[$i]{chrstart}\t$chromscf[$i]{length}\n";
+            }
+        }
+    }
+
+    close $scfmap;
+    close $chrommap;
+
     #    check_unassigned($args{input}, \%scfstats, \%patmat);
 
     my %genomestat;
@@ -263,30 +379,41 @@ sub make_chrom_maps {
     foreach my $scf ( sort keys %scfstats ) {
 
         my $stat = $scfstats{$scf};
-        $stat->{ordered}=0;
-        if ($stat->{chromosomes} == 1 and $stat->{lgs} == 1 and $stat->{gaps} == 0 and !$stat->{oriented}) {
+        $stat->{ordered} = 0;
+        if (    $stat->{chromosomes} == 1
+            and $stat->{lgs} == 1
+            and $stat->{gaps} == 0
+            and !$stat->{oriented} )
+        {
             my %markers;
-            for my $pos (keys %{$scfmap{$scf}}) {
-                $markers{"$scfmap{$scf}{$pos}{mat}:$scfmap{$scf}{$pos}{lg}:$scfmap{$scf}{$pos}{cm}"}++;
+            for my $pos ( keys %{ $scfmap{$scf} } ) {
+                $markers{
+"$scfmap{$scf}{$pos}{mat}:$scfmap{$scf}{$pos}{lg}:$scfmap{$scf}{$pos}{cm}"
+                }++;
             }
-            croak "Should only be one marker at non-oriented scaffold $scf!" if (keys %markers != 1);
-            my $marker = (keys %markers)[0];
+            croak "Should only be one marker at non-oriented scaffold $scf!"
+              if ( keys %markers != 1 );
+            my $marker                 = ( keys %markers )[0];
             my $unoriented_marker_scfs = 0;
-            for my $markerscf (keys %{$markerscf{$marker}}) {
+            for my $markerscf ( keys %{ $markerscf{$marker} } ) {
                 next if $markerscf eq $scf;
-                if ($scfstats{$markerscf}{chromosomes} != 1 or $scfstats{$markerscf}{lgs} != 1 or $scfstats{$markerscf}{gaps} > 0 or !$scfstats{$markerscf}{oriented}) {
+                if (   $scfstats{$markerscf}{chromosomes} != 1
+                    or $scfstats{$markerscf}{lgs} != 1
+                    or $scfstats{$markerscf}{gaps} > 0
+                    or !$scfstats{$markerscf}{oriented} )
+                {
                     $unoriented_marker_scfs++;
                 }
             }
-            if (!$unoriented_marker_scfs) {
+            if ( !$unoriented_marker_scfs ) {
                 $stat->{ordered}++;
             }
-            
+
             $local_assembly_markers{$marker}++ if !$stat->{ordered};
         }
 
-        print
-"$scf\t$stat->{markerblocks}\t$stat->{allblocks}\t$stat->{length}\t$stat->{chromosomes}\t$stat->{lgs}\t$stat->{gaps}\n";
+#        print
+#"$scf\t$stat->{markerblocks}\t$stat->{allblocks}\t$stat->{length}\t$stat->{chromosomes}\t$stat->{lgs}\t$stat->{gaps}\n";
         if ( $stat->{chromosomes} == 0 ) {
             if ( $stat->{lgs} == 0 and $stat->{gaps} == 0 ) {
                 $genomestat{"Unassigned"}{scf}++;
@@ -298,11 +425,11 @@ sub make_chrom_maps {
                 if ( $stat->{gaps} == 0 ) {
                     $genomestat{"Assigned"}{scf}++;
                     $genomestat{"Assigned"}{len} += $stat->{length};
-                    if ($stat->{oriented}) {
+                    if ( $stat->{oriented} ) {
                         $genomestat{"Oriented"}{scf}++;
                         $genomestat{"Oriented"}{len} += $stat->{length};
                     }
-                    if ($stat->{ordered}) {
+                    if ( $stat->{ordered} ) {
                         $genomestat{"Ordered"}{scf}++;
                         $genomestat{"Ordered"}{len} += $stat->{length};
                     }
@@ -332,27 +459,56 @@ sub make_chrom_maps {
         $genomescf  += $genomestat{$stat}{scf};
     }
     printf STDERR "%16s\t%4d\t%9d\n", 'Genome', $genomescf, $genomesize;
-    
-    print STDERR "Marker blocks requiring local assembly: ", scalar keys %local_assembly_markers, "\n";
+
+    print STDERR "Marker blocks requiring local assembly: ",
+      scalar keys %local_assembly_markers, "\n";
     my %lam_block_scfs;
     my %lam_block_sizes;
-    for my $lam (sort keys %local_assembly_markers) {
-        my $scfnum = keys %{$markerscf{$lam}};
+    for my $lam ( sort keys %local_assembly_markers ) {
+        my $scfnum = keys %{ $markerscf{$lam} };
         $lam_block_scfs{$scfnum}++;
-        for my $scf (keys %{$markerscf{$lam}}) {
-            $lam_block_sizes{$lam}+=$scfstats{$scf}{length};
+        for my $scf ( keys %{ $markerscf{$lam} } ) {
+            $lam_block_sizes{$lam} += $scfstats{$scf}{length};
         }
     }
-    for my $lam (sort {$lam_block_sizes{$b} <=> $lam_block_sizes{$a}} keys %lam_block_sizes) {
-        print "$lam\t", scalar keys %{$markerscf{$lam}}, "\t$lam_block_sizes{$lam}\n";
-    }
-    for my $scfnum (sort {$a<=>$b} keys %lam_block_scfs) {
-        print "$scfnum\t$lam_block_scfs{$scfnum}\n";
-    }
+
+    #    for my $lam ( sort { $lam_block_sizes{$b} <=> $lam_block_sizes{$a} }
+    #        keys %lam_block_sizes )
+    #    {
+    #        print "$lam\t", scalar keys %{ $markerscf{$lam} },
+    #          "\t$lam_block_sizes{$lam}\n";
+    #    }
+    #    for my $scfnum ( sort { $a <=> $b } keys %lam_block_scfs ) {
+    #        print "$scfnum\t$lam_block_scfs{$scfnum}\n";
+    #    }
+}
+
+sub order_scfs {
+    my ( $scf_ref, $lg_ref, $cms_ref, $cm_i ) = @_;
+
+    my @scfs = keys %{$scf_ref};
+    my @ordered_scfs;
+
+    my $first = "";
+    my $last  = "";
+    map {
+        $first = $_
+          if (  ( $cm_i > 0 )
+            and ( defined $lg_ref->{ $cms_ref->[ $cm_i - 1 ] }{scf}{$_} ) );
+        $last = $_
+          if (  ( $cm_i < $#{$cms_ref} )
+            and ( defined $lg_ref->{ $cms_ref->[ $cm_i + 1 ] }{scf}{$_} ) );
+    } @scfs;
+
+    push @ordered_scfs, $first if $first ne "";
+    map { push @ordered_scfs, $_ if ( ( $_ ne $first ) and ( $_ ne $last ) ); }
+      @scfs;
+    push @ordered_scfs, $last if $last ne "" and $first ne $last;
+    return @ordered_scfs;
 }
 
 sub int_hamming {
-    my ($int, $pat) = @_;
+    my ( $int, $pat ) = @_;
     my $hamming = 0;
     my @p = split //, $pat;
     for my $b ( 0 .. $#{$int} ) {
@@ -394,12 +550,15 @@ sub check_unassigned {
             $scfsnps{$pattern}++;
         }
         if ( $snp =~ /^\-/ and keys %scfsnps > 0 ) {
-            foreach my $pattern ( sort { $scfsnps{$b} <=> $scfsnps{$a} }
-                keys %scfsnps )
+            foreach my $pattern (
+                sort { $scfsnps{$b} <=> $scfsnps{$a} }
+                keys %scfsnps
+              )
             {
                 next if $scfsnps{$pattern} == 1;
-                print
-"$scf\t$scfstats->{$scf}{length}\t$pattern\t$scfsnps{$pattern}\n";
+
+             #                print
+             #"$scf\t$scfstats->{$scf}{length}\t$pattern\t$scfsnps{$pattern}\n";
             }
             %scfsnps = ();
         }
@@ -423,18 +582,48 @@ sub validate_scaffold {
               {blocks}++;
             $scfcms{ $mappos->{mat} }{ $mappos->{lg} }{ $mappos->{cm} }{length}
               += $block->{'Length'};
-            $scfmarkers{"$mappos->{mat}:$mappos->{lg}:$mappos->{cm}"}{$block->{'Scaffold'}}++;
+
+            if (
+                !(
+                    defined $scfcms{ $mappos->{mat} }{ $mappos->{lg} }
+                    { $mappos->{cm} }{start}
+                )
+                or ( $block->{'Start'} <
+                    $scfcms{ $mappos->{mat} }{ $mappos->{lg} }{ $mappos->{cm} }
+                    {start} )
+              )
+            {
+                $scfcms{ $mappos->{mat} }{ $mappos->{lg} }{ $mappos->{cm} }
+                  {start} = $block->{'Start'};
+            }
+
+            if (
+                !(
+                    defined $scfcms{ $mappos->{mat} }{ $mappos->{lg} }
+                    { $mappos->{cm} }{end}
+                )
+                or ( $block->{'End'} >
+                    $scfcms{ $mappos->{mat} }{ $mappos->{lg} }{ $mappos->{cm} }
+                    {end} )
+              )
+            {
+                $scfcms{ $mappos->{mat} }{ $mappos->{lg} }{ $mappos->{cm} }{end}
+                  = $block->{'End'};
+            }
+
+            $scfmarkers{"$mappos->{mat}:$mappos->{lg}:$mappos->{cm}"}
+              { $block->{'Scaffold'} }++;
         }
     }
     my $scfchroms = keys %scfcms // 0;
     my $scflgs    = 0;
     my $scfgaps   = 0;
     $stats->{$scf}{oriented} = 0;
-    
+
     for my $mat ( sort keys %scfcms ) {
         for my $lg ( sort keys %{ $scfcms{$mat} } ) {
             $scflgs++;
-            my @scfcm       = sort { $a <=> $b } keys %{ $scfcms{$mat}{$lg} };
+            my @scfcm = sort { $a <=> $b } keys %{ $scfcms{$mat}{$lg} };
             $stats->{$scf}{oriented}++ if @scfcm > 1;
             my $start_check = 0;
             my $gap_cms     = 0;
@@ -446,10 +635,20 @@ sub validate_scaffold {
                     }
                 }
                 if ( $scfcm[0] eq $lgcm ) {
-                    print
-"$scf\t$mat\t$lg\t$lgcm\t$scfcms{$mat}{$lg}{$lgcm}{length}\t$scfcms{$mat}{$lg}{$lgcm}{blocks}\n";
+
+#                    my $chrom = $chroms{$mat} // "Unknown";
+#                    print
+#"$scf\t$chrom\t$mat\t$lg\t$lgcm\t$scfcms{$mat}{$lg}{$lgcm}{length}\t$scfcms{$mat}{$lg}{$lgcm}{blocks}\n";
                     $start_check = 1;
                     shift @scfcm;
+                    $genome->{$mat}{$lg}{$lgcm}{scf}{$scf}{start} =
+                      $scfcms{$mat}{$lg}{$lgcm}{start};
+                    $genome->{$mat}{$lg}{$lgcm}{scf}{$scf}{end} =
+                      $scfcms{$mat}{$lg}{$lgcm}{end};
+                    $genome->{$mat}{$lg}{$lgcm}{scf}{$scf}{length} =
+                      $scfcms{$mat}{$lg}{$lgcm}{length};
+                    $genome->{$mat}{$lg}{$lgcm}{len} +=
+                      $scfcms{$mat}{$lg}{$lgcm}{length};
                 }
             }
             $scfgaps++ if $gap_cms > 0;
@@ -552,7 +751,7 @@ sub load_map {
             }
         }
     }
-    map {delete $lg{$_} if keys %{$lg{$_}}==1} keys %lg;
+    map { delete $lg{$_} if keys %{ $lg{$_} } == 1 } keys %lg;
     close $mstout;
     return \%lg;
 }
@@ -603,15 +802,18 @@ sub run_mstmap {
 
     print $codein "ID\tPattern\n";
     my $id = 1;
-#    my @markerlist = keys %{$markers};
-#    my $phased_markers = phase_markers (\@markerlist, $pattern);
-    
+
+    #    my @markerlist = keys %{$markers};
+    #    my $phased_markers = phase_markers (\@markerlist, $pattern);
+
     for my $marker ( keys %{$markers} ) {
         my $outmarker = $marker;
-        $outmarker = convert_intercross($pattern, $marker) if $marker =~ /H/;
+        $outmarker = convert_intercross( $pattern, $marker )
+          if $marker =~ /H/;
         $outmarker = check_mirror( $outmarker, $markers );
         $id =
-          output_marker( $id, $outmarker, $marker, $mstmapin, $codein, \%marker_lookup );
+          output_marker( $id, $outmarker, $marker, $mstmapin, $codein,
+            \%marker_lookup );
     }
 
     close $codein;
@@ -625,18 +827,20 @@ sub run_mstmap {
 }
 
 sub phase_markers {
-    my ($markers,$pattern) = @_;
-    my @sm = sort map {$_ =~ /H/ ? convert_intercross($pattern,$_) : $_} @{$markers};
-    my $len = length $sm[0];
+    my ( $markers, $pattern ) = @_;
+    my @sm =
+      sort map { $_ =~ /H/ ? convert_intercross( $pattern, $_ ) : $_ }
+      @{$markers};
+    my $len    = length $sm[0];
     my $mirror = 0;
     my %phased;
-    $phased{$sm[0]} = $sm[0];
-    for my $i (1..$#sm) {
-        $mirror = 1 if hamming($sm[$i-1], $sm[$i]) > ($len/2);
-        my $phase = $mirror ? mirror($sm[$i]) : $sm[$i];
+    $phased{ $sm[0] } = $sm[0];
+    for my $i ( 1 .. $#sm ) {
+        $mirror = 1 if hamming( $sm[ $i - 1 ], $sm[$i] ) > ( $len / 2 );
+        my $phase = $mirror ? mirror( $sm[$i] ) : $sm[$i];
         $phased{$phase} = $sm[$i];
     }
-    
+
     return \%phased;
 }
 
@@ -668,15 +872,15 @@ sub run_carthagene {
 
 sub check_mirror {
     my ( $marker, $markers ) = @_;
-    my $mirror      = mirror($marker);
-    my @markerlist  = keys %{$markers};
-    my $markerh = sum_hamming($marker, \@markerlist);
-    my $mirrorh = sum_hamming($mirror, \@markerlist);
+    my $mirror     = mirror($marker);
+    my @markerlist = keys %{$markers};
+    my $markerh    = sum_hamming( $marker, \@markerlist );
+    my $mirrorh    = sum_hamming( $mirror, \@markerlist );
     return $markerh < $mirrorh ? $marker : $mirror;
 
-#    my $mirror_minh = min_hamming( $mirror, \@markerlist );
-#    my $marker_minh = min_hamming( $marker, \@markerlist );
-#    return $mirror_minh < $marker_minh ? $mirror : $marker;
+    #    my $mirror_minh = min_hamming( $mirror, \@markerlist );
+    #    my $marker_minh = min_hamming( $marker, \@markerlist );
+    #    return $mirror_minh < $marker_minh ? $mirror : $marker;
 }
 
 sub min_hamming {
@@ -701,14 +905,15 @@ sub sum_hamming {
 }
 
 sub output_marker {
-    my ( $id, $outmarker, $origmarker, $mstmapin, $codein, $marker_lookup ) = @_;
+    my ( $id, $outmarker, $origmarker, $mstmapin, $codein, $marker_lookup ) =
+      @_;
 
     print $codein "$id\t$outmarker\t$origmarker\n";
     print $mstmapin "$id";
     my @gt = split //, $outmarker;
     map { print $mstmapin "\t"; print $mstmapin $_ eq 'H' ? 'X' : $_; } @gt;
     print $mstmapin "\n";
-    $marker_lookup->{$id}{out} = $outmarker;
+    $marker_lookup->{$id}{out}  = $outmarker;
     $marker_lookup->{$id}{orig} = $origmarker;
     $id++;
     return $id;
@@ -994,3 +1199,4 @@ sub get_block_stats {
     }
     print STDERR "\n";
 }
+
