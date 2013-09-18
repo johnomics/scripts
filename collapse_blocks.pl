@@ -310,7 +310,7 @@ sub make_chrom_maps {
 
     print $chrommap "Chromosome\tcM\tStart\tLength\n";
 
-    print $scfmap "Chromosome\tScaffold\tScfStart\tScfEnd\tChrStart\tLength\n";
+    print $scfmap "Chromosome\tScaffold\tScfStart\tScfEnd\tChrStart\tLength\tScfChroms\tScfGaps\tScfOriented\n";
 
     foreach my $mat ( sort { $chroms{$a} <=> $chroms{$b} } keys %genome ) {
         croak "More than one linkage group found for $chroms{$mat}!\n"
@@ -330,17 +330,17 @@ sub make_chrom_maps {
                     \@cms, $cm_i
                 );
                 foreach my $scf (@ordered_scfs) {
-                    if ( @chromscf == 0 ) {
-                        $chromscf[0]{scf} = $scf;
-                        $chromscf[0]{scfstart} =
+                    if ( defined( $chromscf[-1] )
+                        and $chromscf[-1]{scf} eq $scf )
+                    {
+                        my $start =
                           $genome{$mat}{$lg}{ $cms[$cm_i] }{scf}{$scf}{start};
-                        $chromscf[0]{chrstart} = $chrpos_scf;
-                        $chromscf[0]{length} =
-                          $genome{$mat}{$lg}{ $cms[$cm_i] }{scf}{$scf}{length};
-                    }
-                    elsif ( $chromscf[-1]{scf} eq $scf ) {
-                        $chromscf[-1]{length} +=
-                          $genome{$mat}{$lg}{ $cms[$cm_i] }{scf}{$scf}{length};
+                        my $end =
+                          $genome{$mat}{$lg}{ $cms[$cm_i] }{scf}{$scf}{end};
+                        $chromscf[-1]{scfstart} = $start if ($start < $chromscf[-1]{scfstart});
+                        $chromscf[-1]{scfend} = $end if ($chromscf[-1]{scfend} < $end);
+                        $chromscf[-1]{length} += $genome{$mat}{$lg}{$cms[$cm_i]}{scf}{$scf}{length};
+                        $chromscf[-1]{oriented}++;
                     }
                     else {
                         push @chromscf,
@@ -349,22 +349,24 @@ sub make_chrom_maps {
                             scfstart =>
                               $genome{$mat}{$lg}{ $cms[$cm_i] }{scf}{$scf}
                               {start},
+                            scfend =>
+                              $genome{$mat}{$lg}{ $cms[$cm_i] }{scf}{$scf}{end},
                             chrstart => $chrpos_scf,
-                            length =>
-                              $genome{$mat}{$lg}{ $cms[$cm_i] }{scf}{$scf}
-                              {length}
+                            length => $genome{$mat}{$lg}{$cms[$cm_i]}{scf}{$scf}{length},
+                            oriented => 0
                           };
                     }
                     $chrpos_scf +=
                       $genome{$mat}{$lg}{ $cms[$cm_i] }{scf}{$scf}{length};
                 }
                 $chrpos_cm += $genome{$mat}{$lg}{ $cms[$cm_i] }{len};
-
             }
             foreach my $i ( 0 .. $#chromscf ) {
-                my $end = $chromscf[$i]{scfstart} + $chromscf[$i]{length};
+                my $scfi = $chromscf[$i]{scf};
                 print $scfmap
-"$chroms{$mat}\t$chromscf[$i]{scf}\t$chromscf[$i]{scfstart}\t$end\t$chromscf[$i]{chrstart}\t$chromscf[$i]{length}\n";
+"$chroms{$mat}\t$scfi\t$chromscf[$i]{scfstart}\t$chromscf[$i]{scfend}\t$chromscf[$i]{chrstart}\t$chromscf[$i]{length}";
+                print $scfmap "\t$scfstats{$scfi}{chromosomes}\t$scfstats{$scfi}{gaps}\t$chromscf[$i]{oriented}";
+                print $scfmap "\n";
             }
         }
     }

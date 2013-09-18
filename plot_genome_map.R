@@ -54,13 +54,13 @@ plotchrom<-function(chr,cmmap,scfcmmap) {
     
     geneticvp<-viewport(0,0,width=0.5,height=0.9,yscale=c(maxcm,0),just=c("left","bottom"))
     pushViewport(geneticvp)
-    grid.lines(c(0.6,0.6),unit(c(max(cmmap$cM),0),"native"),gp=gpar(col=rgb(141,160,203,max=255),lwd=5,lineend="round"))
+    grid.lines(c(0.6,0.6),unit(c(max(cmmap$cM),0),"native"),gp=gpar(col=rgb(141,160,203,max=255),lwd=3,lineend="round"))
     grid.text(cmmap$cM,0.35,unit(cmmap$cM,"native"),just=c("right","centre"),gp=gpar(fontsize=8))
     grid.polyline(
         c(rep(0.4,nrow(cmmap)),rep(0.8,nrow(cmmap))),
         unit(c(cmmap$cM,cmmap$cM),"native"),
         id=rep(1:nrow(cmmap),2),
-        gp=gpar(col=genetic.colours,lwd=3,lineend="round")
+        gp=gpar(col=genetic.colours,lwd=2,lineend="round")
     )
     popViewport() #geneticvp
     
@@ -76,20 +76,39 @@ plotchrom<-function(chr,cmmap,scfcmmap) {
     		popViewport()
     		pushViewport(physicalvp)
     		midpoint = as.numeric(x[3])+as.numeric(x[4])/2
-    		grid.line.to(0.3,unit(midpoint,"native"),gp=gpar(col=x[5],lwd=1,lty="dashed"))
-    		grid.lines(c(0.3,0.3),unit(c(as.numeric(x[3])+20000,as.numeric(x[3])+as.numeric(x[4])-20000),"native"),gp=gpar(col=x[5],lwd=1,lineend="round"))
+    		grid.line.to(0.1,unit(midpoint,"native"),gp=gpar(col=x[5],lwd=1,lty="dashed"))
+    		grid.lines(c(0.1,0.1),unit(c(as.numeric(x[3])+20000,as.numeric(x[3])+as.numeric(x[4])-20000),"native"),gp=gpar(col=x[5],lwd=1,lineend="round"))
     	}
     )
 
-
-
+    # physical scale
+    chrmaxbp<-max(scfcmmap$ChrStart+scfcmmap$Length)
+    mb.onemil.tick<-seq(8000,chrmaxbp,1000000)
+    chrmb<-ceiling(chrmaxbp/1000000)
+    grid.text(sprintf("%2d", 0:chrmb), 0.29, unit(mb.onemil.tick, "native"), just="right", gp=gpar(fontsize=4))
+    grid.text("Mb",0.29, unit(chrmaxbp,"native"),just="right",gp=gpar(fontsize=4))
+    grid.lines(c(0.4,0.4),unit(c(0,chrmaxbp),"native"),gp=gpar(col="grey",lineend="round"))
     grid.polyline(
-        c(rep(0.5,nrow(scfcmmap)),rep(0.5,nrow(scfcmmap))),
+    	c(rep(0.35,chrmb),rep(0.4,chrmb)),
+    	unit(c(mb.onemil.tick,mb.onemil.tick),"native"),
+    	id=rep(1:chrmb,2),
+    	gp=gpar(col="grey",lwd=1,lineend="round")
+    )
+
+
+
+    scffontface<-sapply(scfcmmap$ScfOriented, function(x){if (x>0) "bold" else "plain"})
+    scfxpos<-sapply(scfcmmap$ScfOriented, function(x){if (x>0) 0.5 else 0.75})
+    scfmisassembled<-scfcmmap$ScfChroms > 1 | scfcmmap$ScfGaps > 0
+    scfnamecol<-sapply(scfmisassembled, function(x){if (x==TRUE) "red" else "black"})
+    
+    grid.polyline(
+        c(scfxpos,scfxpos),
         unit(c(scfcmmap$ChrStart,scfcmmap$ChrStart+scfcmmap$Length),"native"),
         id=rep(1:nrow(scfcmmap),2),
-        gp=gpar(col=genetic.colours,lwd=3,lineend="butt")
+        gp=gpar(col=chrcol[chr],alpha=c(1,0.3),lwd=1,lineend="butt")
     )
-    grid.text(scfcmmap$Scaffold,0.55,unit(scfcmmap$ChrStart+scfcmmap$Length/2,"native"),just=c("left","centre"),gp=gpar(fontsize=2))
+    grid.text(scfcmmap$Scaffold,scfxpos+0.05,unit(scfcmmap$ChrStart+scfcmmap$Length/2,"native"),just=c("left","centre"),gp=gpar(col=scfnamecol, fontsize=2,fontface=scffontface))
     popViewport() #physicalvp
     
     
