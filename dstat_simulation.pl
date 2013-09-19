@@ -80,7 +80,7 @@ for my $h ( "noflow", "admixture", "structure" ) {
     print "Running $h model...\n";
     system "ms $nsam $howmany -T $model{common} $model{$h} | grep ^\\( > $h.ms";
 
-    for my $s ( 0.1, 0.3, 0.5, 0.7 ) {
+    for my $s ( 0.01, 0.05, 0.1, 0.3 ) {
         system "seq-gen -mHKY -l $seqlen -s $s $h.ms > $h.s$s.sg 2> $h.s$s.sg.log";
 
         open my $sgout, "<", "$h.s$s.sg"
