@@ -94,7 +94,7 @@ $genome{$chrom} = $seq;
 close $in_file;
 
 
-
+print "Genome\tP1Name\tP1Seq\tP1Sites\tP1Fragments\tP2Name\tP2Seq\tP1P2Fragments\tP1P2Pippin\tP1P2Illumina\tP1SitesP2Cut\tP1SitesP2CutProp\tP1SitesP2CutPippin\tP1SitesP2CutPippinProp\tP1SitesP2CutIllumina\tP1SitesP2CutIlluminaProp\n";
 my $pm = Parallel::ForkManager->new($threads);
 
 $pm->run_on_finish (
@@ -110,24 +110,32 @@ for my $enzyme (keys %enzymes) {
     my $pid = $pm->start and next;
     my $frags = 0;
     my $illumina = 0;
+    my $pippin = 0;
 
     my %lengths;
     my $p1count = 0;
     my $p1p2count = 0;
     my $p1p2illcount = 0;
+    my $p1p2pippincount = 0;
     for my $chrom (keys %genome) {
-        my ($chrp1count, $chrp1p2count, $chrp1p2illcount) = process_chrom($genome{$chrom},\%lengths,$p1enzyme,$enzymes{$enzyme});
+        my ($chrp1count, $chrp1p2count, $chrp1p2illcount,$chrp1p2pippincount) = process_chrom($genome{$chrom},\%lengths,$p1enzyme,$enzymes{$enzyme});
         $p1count += $chrp1count;
         $p1p2count += $chrp1p2count;
         $p1p2illcount += $chrp1p2illcount;
+        $p1p2pippincount += $chrp1p2pippincount;
     }
+    
+    my $p1p2prop = sprintf "%5.2f", $p1p2count/$p1count*100;
+    my $p1p2illprop = sprintf "%5.2f", $p1p2illcount/$p1count*100;
+    my $p1p2pippinprop = sprintf "%5.2f", $p1p2pippincount/$p1count*100;
+    
     for my $len (sort {$a<=>$b} keys %lengths) {
         $frags += $lengths{$len};
         $illumina += $lengths{$len} if $len >= ILLUMINA_MIN && $len <= ILLUMINA_MAX;
+        $pippin += $lengths{$len} if $len >= ILLUMINA_MIN;
     }
-
-    my $prop = $frags == 0 ? 0 : sprintf "%5.2f", $illumina/$frags*100;
-    my $outstr = "$in_filename\t$p1enzyme\t$p1count\t$enzyme\t$enzymes{$enzyme}\t$frags\t$illumina\t$prop\t$p1p2count\t$p1p2illcount\n";
+    my $p1frags = $p1count * 2;
+    my $outstr = "$in_filename\tPstI\t$p1enzyme\t$p1count\t$p1frags\t$enzyme\t$enzymes{$enzyme}\t$frags\t$pippin\t$illumina\t$p1p2count\t$p1p2prop\t$p1p2pippincount\t$p1p2pippinprop\t$p1p2illcount\t$p1p2illprop\n";
     
     $pm->finish(0, \$outstr);
 }
@@ -141,25 +149,30 @@ sub process_chrom {
     my $p1count = () = $seq =~ /$p1enzyme/g;
     my $p1p2count = 0;
     my $p1p2illcount = 0;
+    my $p1p2pippincount = 0;
     for my $f (0..$#frags) {
         my $found = 0;
         my $ill_found = 0;
+        my $pippin_found = 0;
         if ($frags[$f] eq $p1enzyme) {
             if ($frags[$f-1] =~ /(.*)$p2enzyme(.+)$/) {
                 my $l = length $2;
                 $len->{$l}++;
                 $found++;
                 $ill_found++ if $l >= ILLUMINA_MIN && $l <= ILLUMINA_MAX;
+                $pippin_found++ if $l >= ILLUMINA_MIN;
             }
             if ($frags[$f+1] =~ /^(.+?)$p2enzyme/) {
                 my $l = length $1;
                 $len->{$l}++;
                 $found++;
                 $ill_found++ if $l >= ILLUMINA_MIN && $l <= ILLUMINA_MAX;
+                $pippin_found++ if $l >= ILLUMINA_MIN;
             }
         }
         $p1p2count++ if $found;
         $p1p2illcount++ if $ill_found;
+        $p1p2pippincount++ if $pippin_found;
     }
-    ($p1count,$p1p2count,$p1p2illcount);
+    ($p1count,$p1p2count,$p1p2illcount,$p1p2pippincount);
 }
