@@ -139,7 +139,7 @@ while ( my $marker = <$markerfile> ) {
     my ( $scf, $pos, $type, $parents, $mq, $fs, $p, $rmsobs, $rmspat, $orig, $edge, $cons, $corrected ) =
       split /\t/,
       uncolor($marker);
-    next if ( $type !~ "Maternal-A" );
+    next if ( $type !~ "Maternal-AHAH" );
     $marker_count++;
     $prev_scf = $scf if !defined $prev_scf;
 

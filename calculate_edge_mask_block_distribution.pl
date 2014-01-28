@@ -24,64 +24,97 @@ open my $blockfile, '<', $args{block_file}
   or croak "Can't open $args{block_file}! $OS_ERROR\n";
 
 my $prev_scf;
-my $prev_type;
-my @prev_call;
-my @blocks;
-my %blocklength;
-
 my $scf_count = 0;
+my @scflines;
+my %block;
+my $final_scf;
 while ( my $marker = <$blockfile> ) {
     next if ( $marker =~ /^(-+)$/ );
     chomp $marker;
-    my ( $scf, $snp, $type, $orig, $edge, $cons ) = split /\t/,
+    my ( $scf, $snp, $type, $orig, $edge, $cons, $corrected ) = split /\t/,
       uncolor($marker);
-    $prev_scf  = $scf  if !defined $prev_scf;
-    $prev_type = $type if !defined $prev_type;
 
-    if ( $scf ne $prev_scf or $type ne $prev_type ) {
-        
-        if ($scf ne $prev_scf) {
-            $scf_count++;
-            print "." if ($scf_count % 10 == 0);
-            print "$scf_count\n" if ($scf_count % 100 == 0);
-        }
-        map { emit_block($blocks[$_], $scf) } 0 .. $#blocks;
-        $prev_scf  = $scf;
-        $prev_type = $type;
-        @prev_call = ();
+    next if ( $type eq 'paternal' );
+
+    if ( !defined $prev_scf ) {
+        $prev_scf = $scf;
     }
-    else {
-        my @calls = split //, $cons;
-        foreach my $sample ( 0 .. $#calls ) {
-            if ( defined $prev_call[$sample]
-                and $calls[$sample] ne $prev_call[$sample] )
-            {
-                emit_block($blocks[$sample], $scf);
-                @prev_call = ();
-            }
-            push @{ $blocks[$sample] }, $calls[$sample];
-            $prev_call[$sample] = $calls[$sample];
-        }
+    if ( $prev_scf ne $scf ) {
+        process_blocks( $prev_scf, \@scflines, \%block );
+        @scflines = ();
+        $prev_scf = $scf;
+        $final_scf = $scf;
+
+        $scf_count++;
+        print STDERR '.'            if ( $scf_count % 10 == 0 );
+        print STDERR "$scf_count\n" if ( $scf_count % 100 == 0 );
     }
+    push @scflines, { pos => $snp, calls => $corrected };
 }
+
+process_blocks( $final_scf, \@scflines, \%block );
 
 close $blockfile;
 
-my %bl;
-foreach my $scf (keys %blocklength) {
-    shift @{$blocklength{$scf}};
-    pop @{$blocklength{$scf}};
-    map {$bl{$_}++;} @{$blocklength{$scf}};
+my %blocksum;
+foreach my $scf (keys %block) {
+    foreach my $pos1 (sort {$a<=>$b} keys %{$block{$scf}}) {
+        foreach my $pos2 (sort {$a<=>$b} keys %{$block{$scf}{$pos1}}) {
+            my $blocksize = $pos2-$pos1+1;
+            $blocksum{$blocksize}{$block{$scf}{$pos1}{$pos2}}++;
+        }
+    }
 }
 
-foreach my $len (sort {$a<=>$b} keys %bl) {
-    print "$len\t$bl{$len}\n";
+print "Size";
+map {print "\t$_"} (1..69);
+print "\n";
+
+foreach my $blocksize (sort {$a<=>$b} keys %blocksum) {
+    print $blocksize;
+    foreach my $blocksamples (1..69) {
+        print "\t";
+        print $blocksum{$blocksize}{$blocksamples} // "0";
+    }
+    print "\n";
 }
 
-sub emit_block {
-    my ($blockref, $scf) = @_;
-    my $blen = scalar @{$blockref};
-    push @{$blocklength{$scf}}, $blen;
-    @{$blockref} = ();
-    return;
+sub process_blocks {
+    my ( $scfname, $scf, $block ) = @_;
+
+    my @start;
+    my @prev_call;
+    my $prev_pos;
+    my @calls;
+    for my $marker ( @{$scf} ) {
+        @calls = split //, $marker->{calls};
+
+        for my $i ( 0 .. $#calls ) {
+            if ( !defined $start[$i] ) {
+                $start[$i] = $marker->{pos};
+            }
+
+            if (defined $prev_call[$i] and $prev_call[$i] ne $calls[$i]) {
+                $block->{$scfname}{$start[$i]}{$prev_pos}++;
+                $start[$i] = $marker->{pos};
+            }
+            $prev_call[$i] = $calls[$i];
+        }
+        $prev_pos = $marker->{pos};
+    }
+    for my $i (0..$#calls) {
+        $block->{$scfname}{$start[$i]}{$prev_pos}++;
+    }
+}
+
+sub output_block {
+    my ($block) = @_;
+    
+    foreach my $scf (sort keys %{$block}) {
+        foreach my $pos1 (sort {$a<=>$b} keys %{$block->{$scf}}) {
+            foreach my $pos2 (sort {$a<=>$b} keys %{$block->{$scf}{$pos1}}) {
+                print "$scf\t$pos1\t$pos2\t$block->{$scf}{$pos1}{$pos2}\n";
+            }
+        }
+    }
 }

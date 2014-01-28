@@ -113,8 +113,6 @@ while ( my $vcf_line = <$vcf_file> ) {
     $missing++ while ( $vcf_line =~ /\.\/\./g );
     next if ( $missing > $uncalled_genotypes );
 
-#    next if ( $vcf_line =~ /\.\/\./ );    # Discard bases with missing genotypes
-
     my %base;
     my @fields = split /\t/, $vcf_line;
     next if ( $fields[4] eq "." );    # If no alternate call
@@ -129,21 +127,13 @@ while ( my $vcf_line = <$vcf_file> ) {
         if ( $format_fields[$i] eq "GQ" ) { $gq_field_num = $i; }
         if ( $format_fields[$i] eq "DP" ) { $dp_field_num = $i; }
     }
-#    if (   ( $gt_field_num == -1 )
-#        or ( $gq_field_num == -1 )
-#        or ( $dp_field_num == -1 ) )
-#    {
-#        print STDERR
-#"$vcf_filename\t$base{scf}\t$base{pos}\tCan't find GT, GQ and DP fields\n";
-#    }
+
     for my $i ( 9 .. ( @sample_names + 8 ) ) {
         if ( $fields[$i] eq "./." ) {
             $base{ $sample_names[ $i - 9 ] }{gt} = "-/-";
             $base{ $sample_names[ $i - 9 ] }{dp} = 0;
             $base{ $sample_names[ $i - 9 ] }{gq} = 0;
             next;
-
-            #            $skip_line++; last;
         }
         my @sample_fields = split /:/, $fields[$i];
         if (($gq_field_num > -1) && ( $sample_fields[$gq_field_num] < $qthreshold )) {
@@ -170,13 +160,9 @@ while ( my $vcf_line = <$vcf_file> ) {
         $marker_type         = "<lmxll>";
         $f2_genotypes{"0/0"} = "ll";
         $f2_genotypes{"0/1"} = "lm";
-
-        #        $f2_genotypes{"1/1"} = "--";
     }
     elsif ( $f1pattern eq "1/1 0/1" ) {
         $marker_type = "<lmxll>";
-
-        #        $f2_genotypes{"0/0"} = "--";
         $f2_genotypes{"0/1"} = "lm";
         $f2_genotypes{"1/1"} = "ll";
     }
@@ -184,13 +170,9 @@ while ( my $vcf_line = <$vcf_file> ) {
         $marker_type         = "<nnxnp>";
         $f2_genotypes{"0/0"} = "nn";
         $f2_genotypes{"0/1"} = "np";
-
-        #        $f2_genotypes{"1/1"} = "--";
     }
     elsif ( $f1pattern eq "0/1 1/1" ) {
         $marker_type = "<nnxnp>";
-
-        #        $f2_genotypes{"0/0"} = "--";
         $f2_genotypes{"0/1"} = "np";
         $f2_genotypes{"1/1"} = "nn";
     }
@@ -199,38 +181,6 @@ while ( my $vcf_line = <$vcf_file> ) {
         $f2_genotypes{"0/0"} = "hh";
         $f2_genotypes{"0/1"} = "hk";
         $f2_genotypes{"1/1"} = "kk";
-    }
-    elsif ( $f1pattern eq "0/0 1/1" ) {
-        $marker_type         = "sex";
-        $f2_genotypes{"0/1"} = "lm";
-        $f2_genotypes{"0/0"} = "ll";
-    }
-    elsif ( $f1pattern eq "1/1 0/0" ) {
-        $marker_type         = "sex";
-        $f2_genotypes{"0/1"} = "lm";
-        $f2_genotypes{"1/1"} = "ll";
-    }
-    else {
-        if ($base{$father_name}{gt} eq "-/-") {
-            if ($base{$mother_name}{gt} eq "0/1") {
-                $marker_type = "<abxcd>";
-                $f2_genotypes{"0/1"} = "--";
-                $f2_genotypes{"0/0"} = "a-";
-                $f2_genotypes{"1/1"} = "b-";
-            }
-            elsif ($base{$mother_name}{gt} eq "0/0") {
-                next;
-            }
-            elsif ($base{$mother_name}{gt} eq "1/1") {
-                next;
-            }
-            else {
-                next;
-            }
-        }
-        else {
-            next;
-        }
     }
     my $scaffold       = $fields[0];
     my $joinmap_marker = "";
@@ -319,17 +269,12 @@ foreach my $type ( sort keys %joinmap ) {
         my $num_bases        = scalar keys %{ $joinmap{$type}{$marker} };
         next if ( $num_bases <= 1 );
         $marker_num++;
-        my $sex_indicator = "";
         my $output_type   = $type;
-        if ( $type eq "sex" ) {
-            $output_type   = "<lmxll>";
-            $sex_indicator = "_sex";
-        }
         print $joinmap_file
-          "$marker_num$sex_indicator:$num_bases\t$output_type\t$marker\n";
+          "$marker_num:$num_bases\t$output_type\t$marker\n";
         foreach my $base ( sort keys %{ $joinmap{$type}{$marker} } ) {
             print $pattern_file
-"$marker_num$sex_indicator\t$base\t$output_type\t$marker\t$joinmap{$type}{$marker}{$base}{dp}\t$joinmap{$type}{$marker}{$base}{gq}\t$joinmap{$type}{$marker}{$base}{pos_dp}\t$joinmap{$type}{$marker}{$base}{pos_mq}\t$joinmap{$type}{$marker}{$base}{male_dp}\t$joinmap{$type}{$marker}{$base}{male_gq}\t$joinmap{$type}{$marker}{$base}{female_dp}\t$joinmap{$type}{$marker}{$base}{female_gq}\n";
+"$marker_num\t$base\t$output_type\t$marker\t$joinmap{$type}{$marker}{$base}{dp}\t$joinmap{$type}{$marker}{$base}{gq}\t$joinmap{$type}{$marker}{$base}{pos_dp}\t$joinmap{$type}{$marker}{$base}{pos_mq}\t$joinmap{$type}{$marker}{$base}{male_dp}\t$joinmap{$type}{$marker}{$base}{male_gq}\t$joinmap{$type}{$marker}{$base}{female_dp}\t$joinmap{$type}{$marker}{$base}{female_gq}\n";
         }
     }
 }
