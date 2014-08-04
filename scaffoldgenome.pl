@@ -396,15 +396,15 @@ sub get_parent_call {
 sub get_cp {
     my ( $part, $call, $order ) = @_;
 
-    return $nullcall{$part} if $call eq './.';
+    return $nullcall{$part} if $call =~ /^\.\/\./;
 
     my @cp = split ':', $call;
     if ( !defined $callorder{$order} ) {
         my @neworder = split ':', $order;
         map { $callorder{$order}{ $neworder[$_] } = $_ } 0 .. $#neworder;
     }
-
-    return $cp[ $callorder{$order}{$part} ];
+    my $callpart = $cp[ $callorder{$order}{$part} ];
+    return $callpart eq '.' ? 0 : $callpart;
 }
 
 sub find_edges {
