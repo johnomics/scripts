@@ -2,6 +2,7 @@ use List::Util qw/sum min max/;
 use POSIX qw/ceil/;
 use Term::ExtendedColor qw/:all/;
 use Memoize;
+use Getopt::Long qw/GetOptionsFromString/;
 
 use strict;
 use warnings;
@@ -26,7 +27,139 @@ my %nullcall = ( 'GT' => './.', 'GQ' => 0, 'DP' => 0 );
 my @mask;
 
 our $setup = sub {
+    my ( $vcf_filename, $extraargs ) = @_;
+
+    my $genetics_filename = "";
+    my $rms_filename      = "";
+    my $options_okay      = GetOptionsFromString(
+        $extraargs,
+        'genetics=s'    => \$genetics_filename,
+        'rmsfilename=s' => \$rms_filename,
+    );
+    croak "Can't process user options: $OS_ERROR\n" if !$options_okay;
+    
+    croak "No genetics file! Please specify -g to define parents, poor quality individuals and marker types\n"
+      if ( $genetics_filename eq "" );
+
+    my $genetics = load_genetics( $genetics_filename, $rms_filename );
+
+    my $samples = get_samples( $vcf_filename, $genetics );
+
+    { genetics => $genetics, samples => $samples };
+};
+
+sub load_genetics {
+    my ($geneticsfilename, $rmsfilename) = @_;
+
+    my %genetics;
+
+    open my $geneticsfile, "<", $geneticsfilename
+      or croak "Can't open marker type file $geneticsfilename: $OS_ERROR\n";
+
+    my $infoline;
+    while ( $infoline = <$geneticsfile> ) {
+        chomp $infoline;
+        last if ( $infoline =~ /Type/ );
+
+        if ( $infoline =~ /^Ignore/ ) {
+            my ( $ignore, $ind ) = split /\t/, $infoline;
+            $genetics{ignore}{$ind} = 0;
+        }
+        elsif ( $infoline =~ /^Parents/ ) {
+            my ( $header, $parents ) = split /\t/, $infoline;
+            my @parents = split /,/, $parents;
+            $genetics{parents} = \@parents;
+        }
+        elsif ( $infoline =~ /^Female/ or $infoline =~ /^Male/ ) {
+            my ( $sex, $samples ) = split /\t/, $infoline;
+            my @samples = split /,/, $samples;
+            $genetics{sex}{$sex} = \@samples;
+            map { $genetics{samplesex}{$_} = $sex } @samples;
+        }
+    }
+
+    # Now $infoline contains type table header; ignore
+
+    my %f2patterns;
+    while ( my $marker_type = <$geneticsfile> ) {
+        chomp $marker_type;
+        my ( $parents, $males, $females, $type, $corrections ) = split /\t/, $marker_type;
+        $genetics{types}{$parents}{$type}{'Male'}   = $males;
+        $genetics{types}{$parents}{$type}{'Female'} = $females;
+
+        $genetics{masks}{$type}{'Male'} = $genetics{masks}{$type}{'Male'}
+          // generate_masks( $genetics{types}{$parents}{$type}{'Male'} );
+        $genetics{masks}{$type}{'Female'} = $genetics{masks}{$type}{'Female'}
+          // generate_masks( $genetics{types}{$parents}{$type}{'Female'} );
+
+        if ( $corrections ne "" ) {
+            my ( $orig, $fix ) = split '->', $corrections;
+            $genetics{types}{$parents}{$type}{corrections}{$orig} =
+              $fix;
+        }
+
+        $f2patterns{"$males:$females"}++;
+    }
+    close $geneticsfile;
+
+    if ( keys %f2patterns ) {
+        if ( $rmsfilename eq "" ) {
+            $rmsfilename = $geneticsfilename;
+            $rmsfilename =~ s/txt$/rms_pval.txt/;
+        }
+
+        my $numf2patterns = keys %f2patterns;
+
+        if ( !-e $rmsfilename ) {
+            system("generate_rms_distributions.pl -g $geneticsfilename -t $numf2patterns -s 1000000");
+        }
+
+        open my $rmsfile, "<", $rmsfilename
+          or croak "Can't open $rmsfilename! $OS_ERROR\n";
+        my $header = <$rmsfile>;
+        chomp $header;
+        my @patterns = split /\t/, $header;
+        shift @patterns;    # Pvalue
+        while ( my $pval_line = <$rmsfile> ) {
+            chomp $pval_line;
+            my @vals = split /\t/, $pval_line;
+            my $pval = shift @vals;
+            for my $i ( 0 .. $#patterns ) {
+                $genetics{rms}{ $patterns[$i] }{$pval} = $vals[$i];
+            }
+        }
+
+        close $rmsfile;
+    }
+    \%genetics;
+}
+
+sub generate_masks {
+    my ($gtstr) = @_;
+    my @gts = split /,/, $gtstr;
+    map { $_ = substr $_, -1; } @gts;
+
+    my %mask;
+    if ( @gts == 2 ) {
+        $mask{ $gts[0] }{ $gts[1] }++;
+    }
+    else {
+        for my $i ( 0 .. $#gts ) {
+            for my $j ( 0 .. $#gts ) {
+                next if $i eq $j;
+                $mask{ $gts[$i] }{ $gts[$j] }++;
+            }
+        }
+    }
+    \%mask;
+}
+
+sub get_samples {
     my $vcf_filename = shift;
+    my $genetics     = shift;
+
+    my %parents;
+    map { $parents{$_} = 0 } @{ $genetics->{parents} };
 
     open my $vcf_file, '<', $vcf_filename
       or croak "Can't open VCF file $vcf_filename! $OS_ERROR\n";
@@ -44,21 +177,28 @@ our $setup = sub {
     chomp $vcf_line;
     my @sample_names = split /\t/, $vcf_line;
     map {
-        $samples{offspring}{lookup}{ $sample_names[$_] } = $_;
-        push @{ $samples{offspring}{order} }, $sample_names[$_];
+        if ( defined $parents{ $sample_names[$_] } ) {
+            $samples{parents}{lookup}{ $sample_names[$_] } = $_;
+            push @{ $samples{parents}{order} }, $sample_names[$_];
+        }
+        else {
+            if ( !defined $genetics->{ignore}{ $sample_names[$_] } ) {
+                $samples{offspring}{lookup}{ $sample_names[$_] } = $_;
+                push @{ $samples{offspring}{order} }, $sample_names[$_];
+            }
+        }
     } 9 .. $#sample_names;
 
     \%samples;
-};
-
+}
 
 our $process = sub {
-    my ( $scf, $scfref, $samples, $data, $genetics, $scfl ) = @_;
-    $data->{$scf} = get_markers( $scfref, $samples, $genetics );
-    find_edges( $data->{$scf}, $samples, $genetics );
-    collapse( $data->{$scf}, $samples );
+    my ( $scf, $scfref, $data, $userdata, $scfl ) = @_;
+    $data->{$scf} = get_markers( $scfref, $userdata->{samples}, $userdata->{genetics} );
+    find_edges( $data->{$scf}, $userdata->{samples}, $userdata->{genetics} );
+    collapse( $data->{$scf}, $userdata->{samples} );
     output_markers_to_file( $scf, $data->{$scf} );
-    output_blocks_to_file( $scf, $data->{$scf}, $genetics, $samples, $scfl );
+    output_blocks_to_file( $scf, $data->{$scf}, $userdata->{samples}, $userdata->{genetics}, $scfl );
 };
 
 sub collapse {
@@ -71,7 +211,7 @@ sub collapse {
             my @edge;
             my $cons      = "";
             my $corrected = "";
-
+            
             foreach my $sample ( @{ $samples->{offspring}{order} } ) {
                 my $ref = $scfref->{$type}{$pos}{marker}{$sample};
 
@@ -105,8 +245,7 @@ sub get_markers {
     my %prevpos;
     foreach my $snp ( @{$scfref} ) {
         chomp $snp;
-        my ( $marker, $type, $parentcall, $pos, $info ) =
-          parse_snp( $snp, $samples, $genetics );
+        my ( $marker, $type, $parentcall, $pos, $info ) = parse_snp( $snp, $samples, $genetics );
         if ( $type ne "Reject" && $info->{'FS'} > FS_THRESHOLD ) {
             $info->{error} = "Fails FS threshold: Type $type";
             $type = "Reject";
@@ -116,8 +255,7 @@ sub get_markers {
             $type = "Reject";
         }
 
-        check_phase( $marker, $markers{$type}{ $prevpos{$type} }{marker},
-            $type )
+        check_phase( $marker, $markers{$type}{ $prevpos{$type} }{marker}, $type )
           if ( $type ne "Reject" && $prevpos{$type} );
         $markers{$type}{$pos}{marker}     = $marker;
         $markers{$type}{$pos}{parent}     = $parentcall;
@@ -143,15 +281,13 @@ sub check_phase {
         if ( defined $swapphase{$type}{ $cur->{$sample}{gt} } ) {
             $phasea++ if ( $cur->{$sample}{gt} eq $prev->{$sample}{gt} );
             $phaseb++
-              if $swapphase{$type}{ $cur->{$sample}{gt} } eq
-              $prev->{$sample}{gt};
+              if $swapphase{$type}{ $cur->{$sample}{gt} } eq $prev->{$sample}{gt};
         }
     }
 
     if ( $phaseb > $phasea ) {
         foreach my $sample ( keys %{$cur} ) {
-            $cur->{$sample}{gt} = $swapphase{$type}{ $cur->{$sample}{gt} }
-              // $cur->{$sample}{gt};
+            $cur->{$sample}{gt} = $swapphase{$type}{ $cur->{$sample}{gt} } // $cur->{$sample}{gt};
         }
     }
     return;
@@ -164,8 +300,7 @@ sub parse_snp {
     my $callf = $f[8];
     my $pos   = $f[1];
     my @parentcalls =
-      map { get_cp( 'GT', $f[ $samples->{parents}{lookup}{$_} ], $callf ) }
-      @{ $genetics->{parents} };
+      map { get_cp( 'GT', $f[ $samples->{parents}{lookup}{$_} ], $callf ) } @{ $genetics->{parents} };
 
     my ( $parentcall, $vgt ) = get_parent_call( \@parentcalls );
 
@@ -174,15 +309,11 @@ sub parse_snp {
     map { $info{$1} = $2 if (/^(.+)=(.+)$/); } @info;
 
     # Get parental GQs and DPs
-    $info{pgqs} = join ':', map {
-        sprintf "%2d",
-          get_cp( 'GQ', $f[ $samples->{parents}{lookup}{$_} ], $callf )
-    } @{ $genetics->{parents} };
+    $info{pgqs} = join ':',
+      map { sprintf "%2d", get_cp( 'GQ', $f[ $samples->{parents}{lookup}{$_} ], $callf ) } @{ $genetics->{parents} };
 
-    $info{pdps} = join ':', map {
-        sprintf "%3d",
-          get_cp( 'DP', $f[ $samples->{parents}{lookup}{$_} ], $callf )
-    } @{ $genetics->{parents} };
+    $info{pdps} = join ':',
+      map { sprintf "%3d", get_cp( 'DP', $f[ $samples->{parents}{lookup}{$_} ], $callf ) } @{ $genetics->{parents} };
 
     my %marker;
 
@@ -194,8 +325,7 @@ sub parse_snp {
             my $call = get_cp( 'GT', $f[$opos], $callf );
             my $a    = substr $call, 0, 1;
             my $b    = substr $call, -1;
-            $marker{$sample}{gt} =
-              $a eq '.' && $b eq '.' ? '.' : $a eq $b ? $a : 'H';
+            $marker{$sample}{gt} = $a eq '.' && $b eq '.' ? '.' : $a eq $b ? $a : 'H';
             $marker{$sample}{gq} = get_cp( 'GQ', $f[$opos], $callf );
         }
         return ( \%marker, "Reject", $parentcall, $pos, \%info );
@@ -285,8 +415,7 @@ sub parse_snp {
     if ( defined $genetics->{types}{$parentcall}{$type}{corrections} ) {
         foreach my $sample ( @{ $samples->{offspring}{order} } ) {
             $marker{$sample}{gt} =
-              $genetics->{types}{$parentcall}{$type}{corrections}
-              { $marker{$sample}{gt} } // $marker{$sample}{gt};
+              $genetics->{types}{$parentcall}{$type}{corrections}{ $marker{$sample}{gt} } // $marker{$sample}{gt};
         }
     }
 
@@ -445,12 +574,10 @@ sub find_edges {
             for my $gt ( 'A', 'B', 'H', '.' ) {
                 my %maskcall = ( 'A' => -1, 'B' => -1, 'H' => -1, '.' => -1 );
                 $maskcall{$gt} = 1;
-                get_sample_blocks( $markers->{$type}, $sample, \@pos,
-                    \%maskcall, MASKLEN );
+                get_sample_blocks( $markers->{$type}, $sample, \@pos, \%maskcall, MASKLEN );
             }
 
-            call_blocks( $markers->{$type}, $sample, \@pos, MASKLEN, $type,
-                $genetics );
+            call_blocks( $markers->{$type}, $sample, \@pos, MASKLEN, $type, $genetics );
             clean_blocks( $markers->{$type}, $sample, \@pos, $type );
         }
     }
@@ -464,8 +591,7 @@ sub call_blocks {
     my $validgts;
     my $prevpos = -100;
     for my $p ( @{$pos} ) {
-        $validgts = $genetics->{types}{ $marker->{$p}{parent} }{$type}
-          { $genetics->{samplesex}{$sample} };
+        $validgts = $genetics->{types}{ $marker->{$p}{parent} }{$type}{ $genetics->{samplesex}{$sample} };
 
         # Create a new block if the edge value is greater than
         # the mask length
@@ -476,8 +602,7 @@ sub call_blocks {
         if (
             $validgts =~ /$marker->{$p}{marker}{$sample}{gt}/
             && (   $p - $prevpos > 100
-                || $marker->{$prevpos}{marker}{$sample}{gt} ne
-                $marker->{$p}{marker}{$sample}{gt} )
+                || $marker->{$prevpos}{marker}{$sample}{gt} ne $marker->{$p}{marker}{$sample}{gt} )
           )
         {
             $blocks[$blocknum]{gt}{ $marker->{$p}{marker}{$sample}{gt} }++;
@@ -497,13 +622,11 @@ sub call_blocks {
           sort { $blocks[$i]{gt}{$b} <=> $blocks[$i]{gt}{$a} }
           keys %{ $blocks[$i]{gt} };
         my $maxgt =
-            @sortgt == 0 ? '~'
-          : @sortgt == 1 ? $sortgt[0]
-          : $blocks[$i]{gt}{ $sortgt[0] } / $blocks[$i]{gt}{ $sortgt[1] } > 2
-          ? $sortgt[0]
-          : '~';
-        map { $marker->{$_}{marker}{$sample}{cons} = $maxgt }
-          @{ $blocks[$i]{pos} };
+            @sortgt == 0                                                      ? '~'
+          : @sortgt == 1                                                      ? $sortgt[0]
+          : $blocks[$i]{gt}{ $sortgt[0] } / $blocks[$i]{gt}{ $sortgt[1] } > 2 ? $sortgt[0]
+          :                                                                     '~';
+        map { $marker->{$_}{marker}{$sample}{cons} = $maxgt } @{ $blocks[$i]{pos} };
     }
 
 }
@@ -530,15 +653,8 @@ sub clean_blocks {
             && $b <= $#blocks - 1
             && $blocks[ $b - 1 ]{cons} eq $blocks[ $b + 1 ]{cons}
             && $blocks[ $b - 1 ]{cons} ne $blocks[$b]{cons}
-            && (
-                (
-                    (
-                        max( @{ $blocks[$b]{pos} } ) -
-                        min( @{ $blocks[$b]{pos} } )
-                    ) < ERRORBLOCK
-                )
-                || ( @{ $blocks[$b]{pos} } <= ERRORSNPS )
-            )
+            && (   ( ( max( @{ $blocks[$b]{pos} } ) - min( @{ $blocks[$b]{pos} } ) ) < ERRORBLOCK )
+                || ( @{ $blocks[$b]{pos} } <= ERRORSNPS ) )
           )
         {
             for my $p ( @{ $blocks[$b]{pos} } ) {
@@ -572,8 +688,7 @@ sub get_sample_blocks {
         next if $maskcall->{ $marker->{$p}{marker}{$sample}{gt} } == 0;
 
         if (   $p - $prevpos > 100
-            || $marker->{$p}{marker}{$sample}{gt} ne
-            $marker->{$prevpos}{marker}{$sample}{gt} )
+            || $marker->{$p}{marker}{$sample}{gt} ne $marker->{$prevpos}{marker}{$sample}{gt} )
         {
             push @called, $p;
             $prevpos = $p;
@@ -586,10 +701,8 @@ sub get_sample_blocks {
 
         my $edgesum = 0;
 
-        my $edge = int sum map {
-            $maskcall->{ $marker->{ $maskcallpos[$_] }{marker}{$sample}{gt} } *
-              $mask[$_]
-        } 0 .. $#mask;
+        my $edge =
+          int sum map { $maskcall->{ $marker->{ $maskcallpos[$_] }{marker}{$sample}{gt} } * $mask[$_] } 0 .. $#mask;
 
         $marker->{ $called[$i] }{marker}{$sample}{edge} = $edge
           if !defined $marker->{ $called[$i] }{marker}{$sample}{edge}
@@ -605,7 +718,7 @@ our $merge = sub {
 };
 
 our $output = sub {
-    my ( $data, $samples, $genome, $outfix ) = @_;
+    my ( $data, $genome, $outfix ) = @_;
     print STDERR "Outputting...\n";
 
     my %outfile;
@@ -617,8 +730,7 @@ our $output = sub {
     foreach my $scf ( sort keys %{ $data->{scf} } ) {
         foreach my $filetype ( 'markers', 'blocks' ) {
             open my $scffile, '<', "$scf.$filetype.tmp.out"
-              or croak
-              "Can't open scaffold $filetype output for $scf: $OS_ERROR\n";
+              or croak "Can't open scaffold $filetype output for $scf: $OS_ERROR\n";
             while ( my $scfline = <$scffile> ) {
                 print { $outfile{$filetype} } $scfline;
             }
@@ -692,7 +804,7 @@ sub output_scf_markers {
 }
 
 sub output_blocks_to_file {
-    my ( $scf, $data, $genetics, $samples, $scfl ) = @_;
+    my ( $scf, $data, $samples, $genetics, $scfl ) = @_;
     open my $blockhandle, '>', "$scf.blocks.tmp.out"
       or croak "Can't open blocks output file for $scf: $OS_ERROR\n";
     output_scf_blocks( $scf, $data, $blockhandle, $genetics, $samples, $scfl );
@@ -705,8 +817,7 @@ sub output_scf_blocks {
     my $samplenum = @{ $samples->{offspring}{order} };
     my @types     = sort keys %{ $genetics->{masks} };
 
-    printf $blockhandle "%8s\t%8s\t%8s\t%8s", 'Scaffold', 'Start', 'End',
-      'Length';
+    printf $blockhandle "%8s\t%8s\t%8s\t%8s", 'Scaffold', 'Start', 'End', 'Length';
 
     map { printf $blockhandle "\t%-${samplenum}s", $_; } @types;
     print $blockhandle "\n";
@@ -723,8 +834,7 @@ sub output_scf_blocks {
             $scfpos{$pos}{end} = $pos;
 
             if (   $prevpos eq 0
-                or $scfpos{$prevpos}{types}{$type} ne
-                $scfpos{$pos}{types}{$type} )
+                or $scfpos{$prevpos}{types}{$type} ne $scfpos{$pos}{types}{$type} )
             {
                 $scfpos{ $prevpos + 1 }{types}{$type} = $empty;
             }
@@ -742,16 +852,14 @@ sub output_scf_blocks {
             if ( defined $scfpos{$p}{types}{$t}
                 and $scfpos{$p}{types}{$t} ne $curpat{$t} )
             {
-                output_block( $scf, $blockpos, $p - 1, $blockhandle, \@types,
-                    \%curpat, $empty );
+                output_block( $scf, $blockpos, $p - 1, $blockhandle, \@types, \%curpat, $empty );
                 $curpat{$t} = $scfpos{$p}{types}{$t};
                 $blockpos = $p;
             }
         }
         $lastpos = $p;
     }
-    output_block( $scf, $blockpos, $scfl->{$scf}, $blockhandle, \@types,
-        \%curpat, $empty );
+    output_block( $scf, $blockpos, $scfl->{$scf}, $blockhandle, \@types, \%curpat, $empty );
 }
 
 sub output_block {

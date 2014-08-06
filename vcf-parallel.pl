@@ -21,31 +21,26 @@ $args{vcf_filename}     = "";
 $args{vcf_subs}         = "";
 $args{threads}          = 1;
 $args{output_prefix}    = "vcf-parallel-output";
-$args{genetics}         = "";
 $args{lengths_filename} = "";
-$args{rms_filename}     = "";
 $args{byscf}            = 0;
 $args{maxscf}           = 0;
 $args{uniquescf}        = "";
+$args{extraargs}        = "";
 
 my $options_okay = GetOptions(
     'vcf=s'       => \$args{vcf_filename},
     'script=s'    => \$args{vcf_subs},
     'threads=i'   => \$args{threads},
     'output=s'    => \$args{output_prefix},
-    'genetics=s'  => \$args{genetics},
     'lengths=s'   => \$args{lengths_filename},
-    'rmsfile=s'   => \$args{rms_filename},
     'byscaffold'  => \$args{byscf},
     'maxscf=i'    => \$args{maxscf},
     'uniquescf=s' => \$args{uniquescf},
+    'extraargs=s' => \$args{extraargs},
 );
+croak "Can't process general options: $OS_ERROR\n" if !$options_okay;
 croak "No VCF file! Please specify -v $OS_ERROR\n"
   if ( $args{vcf_filename} eq "" );
-
-croak
-"No genetics file! Please specify -g to define parents, poor quality individuals and marker types\n"
-  if ( $args{genetics} eq "" );
 
 our $setup;
 our $process;
@@ -56,7 +51,7 @@ if ( $args{vcf_subs} eq "" ) {
     print STDERR "No script file given with -s, so will count lines in file\n";
 
     $setup = sub {
-        my $vcf_filename = shift;
+        my ( $vcf_filename, $extraargs ) = @_;
 
         open my $vcf_file, '<', $vcf_filename
           or croak "Can't open VCF file $vcf_filename! $OS_ERROR\n";
@@ -107,155 +102,30 @@ else {
     require( $args{vcf_subs} );
 }
 
-my $genetics = load_genetics( $args{genetics} );
-
 my $genome = load_genome( \%args );
-
-my $samples = get_samples( $args{vcf_filename}, $genetics );
 
 $genome->{scfp} = get_partitions( $genome, $args{threads} );
 $args{threads} = keys %{ $genome->{scfp} };    # last thread may not be used;
-     # each part is always larger than minimum size, so scaffolds for final
-     # thread may be spread around the other threads
+                                               # each part is always larger than minimum size, so scaffolds for final
+                                               # thread may be spread around the other threads
 
 print_partitions( $genome->{scfp}, $genome->{scfl} );
 
-my $userdata = $setup->( $args{vcf_filename} );
+my $userdata = $setup->( $args{vcf_filename}, $args{extraargs} );
 
-$output->( parse_vcf( $genome, $samples, $genetics, \%args ),
-    $samples, $genome, $args{output_prefix} );
-
-sub load_genetics {
-    my $geneticsfilename = shift;
-
-    my %genetics;
-
-    open my $geneticsfile, "<", $geneticsfilename
-      or croak "Can't open marker type file $geneticsfilename: $OS_ERROR\n";
-
-    my $infoline;
-    while ( $infoline = <$geneticsfile> ) {
-        chomp $infoline;
-        last if ( $infoline =~ /Type/ );
-
-        if ( $infoline =~ /^Ignore/ ) {
-            my ( $ignore, $ind ) = split /\t/, $infoline;
-            $genetics{ignore}{$ind} = 0;
-        }
-        elsif ( $infoline =~ /^Parents/ ) {
-            my ( $header, $parents ) = split /\t/, $infoline;
-            my @parents = split /,/, $parents;
-            $genetics{parents} = \@parents;
-        }
-        elsif ( $infoline =~ /^Female/ or $infoline =~ /^Male/ ) {
-            my ( $sex, $samples ) = split /\t/, $infoline;
-            my @samples = split /,/, $samples;
-            $genetics{sex}{$sex} = \@samples;
-            map { $genetics{samplesex}{$_} = $sex } @samples;
-        }
-    }
-
-    # Now $infoline contains type table header; ignore
-
-    my %f2patterns;
-    while ( my $marker_type = <$geneticsfile> ) {
-        chomp $marker_type;
-        my ( $parents, $males, $females, $type, $corrections ) = split /\t/,
-          $marker_type;
-        $genetics{types}{$parents}{$type}{'Male'}   = $males;
-        $genetics{types}{$parents}{$type}{'Female'} = $females;
-
-        $genetics{masks}{$type}{'Male'} = $genetics{masks}{$type}{'Male'}
-          // generate_masks( $genetics{types}{$parents}{$type}{'Male'} );
-        $genetics{masks}{$type}{'Female'} = $genetics{masks}{$type}{'Female'}
-          // generate_masks( $genetics{types}{$parents}{$type}{'Female'} );
-
-        if ( $corrections ne "" ) {
-            my ( $orig, $fix ) = split '->', $corrections;
-            $genetics{types}{$parents}{$type}{corrections}{$orig} =
-              $fix;
-        }
-
-        $f2patterns{"$males:$females"}++;
-    }
-    close $geneticsfile;
-
-    if ( keys %f2patterns ) {
-        my $rmsfilename;
-        if ( $args{rms_filename} ne "" ) {
-            $rmsfilename = $args{rms_filename};
-        }
-        else {
-            $rmsfilename = $geneticsfilename;
-            $rmsfilename =~ s/txt$/rms_pval.txt/;
-        }
-
-        my $numf2patterns = keys %f2patterns;
-
-        if ( !-e $rmsfilename ) {
-            if ( !defined $args{rms_filename} ) {
-                system(
-"generate_rms_distributions.pl -g $geneticsfilename -t $numf2patterns -s 1000000"
-                );
-            }
-            else {
-                croak "RMS filename doesn't exist! $args{rms_filename}\n";
-            }
-        }
-
-        open my $rmsfile, "<", $rmsfilename
-          or croak "Can't open $rmsfilename! $OS_ERROR\n";
-        my $header = <$rmsfile>;
-        chomp $header;
-        my @patterns = split /\t/, $header;
-        shift @patterns;    # Pvalue
-        while ( my $pval_line = <$rmsfile> ) {
-            chomp $pval_line;
-            my @vals = split /\t/, $pval_line;
-            my $pval = shift @vals;
-            for my $i ( 0 .. $#patterns ) {
-                $genetics{rms}{ $patterns[$i] }{$pval} = $vals[$i];
-            }
-        }
-
-        close $rmsfile;
-    }
-    \%genetics;
-}
-
-sub generate_masks {
-    my ($gtstr) = @_;
-    my @gts = split /,/, $gtstr;
-    map { $_ = substr $_, -1; } @gts;
-
-    my %mask;
-    if ( @gts == 2 ) {
-        $mask{ $gts[0] }{ $gts[1] }++;
-    }
-    else {
-        for my $i ( 0 .. $#gts ) {
-            for my $j ( 0 .. $#gts ) {
-                next if $i eq $j;
-                $mask{ $gts[$i] }{ $gts[$j] }++;
-            }
-        }
-    }
-    \%mask;
-}
+$output->( parse_vcf( $genome, $userdata, \%args ), $genome, $args{output_prefix} );
 
 sub parse_vcf {
-    my ( $genome, $samples, $genetics, $argref ) = @_;
+    my ( $genome, $userdata, $argref ) = @_;
     my %data;
 
     # If only one thread specified, do not fork thread
     # (This allows code to be profiled)
-    if ($argref->{threads} == 1) {
-        my ( $partdata, $scfi ) =
-          run_part( 1, $genome, $samples, $genetics, $argref );
+    if ( $argref->{threads} == 1 ) {
+        my ( $partdata, $scfi ) = run_part( 1, $genome, $userdata, $argref );
 
-        print STDERR "1:Done, processed $scfi scaffolds of " .
-          keys( %{ $genome->{scfp}{1} } ) . "\n";
-        $merge->( $partdata, \%data);
+        print STDERR "1:Done, processed $scfi scaffolds of " . keys( %{ $genome->{scfp}{1} } ) . "\n";
+        $merge->( $partdata, \%data );
         print STDERR "1:Merged\n";
         return \%data;
     }
@@ -277,11 +147,9 @@ sub parse_vcf {
     foreach my $part ( 1 .. $argref->{threads} ) {
         $part_pm->start($part) and next;
 
-        my ( $partdata, $scfi ) =
-          run_part( $part, $genome, $samples, $genetics, $argref );
+        my ( $partdata, $scfi ) = run_part( $part, $genome, $userdata, $argref );
 
-        print STDERR "$part:Done, processed $scfi scaffolds of " .
-          keys( %{ $genome->{scfp}{$part} } ) . "\n";
+        print STDERR "$part:Done, processed $scfi scaffolds of " . keys( %{ $genome->{scfp}{$part} } ) . "\n";
         $part_pm->finish( 0, $partdata );
     }
     $part_pm->wait_all_children;
@@ -290,7 +158,7 @@ sub parse_vcf {
 }
 
 sub run_part {
-    my ( $part, $genome, $samples, $genetics, $argref ) = @_;
+    my ( $part, $genome, $userdata, $argref ) = @_;
 
     open my $vcf_file, '<', $argref->{vcf_filename}
       or croak "Can't open $argref->{vcf_filename} $OS_ERROR!\n";
@@ -320,36 +188,36 @@ sub run_part {
 
             if ( $curscf ne $scf ) {
                 if ( $argref->{byscf} && @scf_vcf ) {
-                    $process->( $curscf, \@scf_vcf, $samples, \%data, $genetics,
-                        $genome->{scfl} ) if $process_this_scf;
+                    $process->( $curscf, \@scf_vcf, \%data, $userdata, $genome->{scfl} ) if $process_this_scf;
                     @scf_vcf = ();
                 }
                 print_part_progress( $scfi, $part, $genome->{scfp} )
                   if ( $scfi % 10 == 0 );
                 $scfi++;
+
                 last if $curscf eq $argref->{uniquescf};
                 $curscf = $scf;
                 $process_this_scf = ( $argref->{uniquescf} eq "" or $curscf eq $argref->{uniquescf} ) ? 1 : 0;
             }
             $argref->{byscf}
-              ? push @scf_vcf,
-              $vcf_line
-              : $process->( $curscf, $vcf_line, $samples, \%data, $genetics,
-                $genome->{scfl} ) if $process_this_scf;
+              ? push @scf_vcf, $vcf_line
+              : $process->( $curscf, $vcf_line, \%data, $userdata, $genome->{scfl} )
+              if $process_this_scf;
         }
         else {
             if ($foundpart) {
-                $process->( $curscf, \@scf_vcf, $samples, \%data, $genetics,
-                    $genome->{scfl} )
+                $process->( $curscf, \@scf_vcf, \%data, $userdata, $genome->{scfl} )
                   if $argref->{byscf}
                   && $process_this_scf;
                 @scf_vcf = ();
+                $scfi--;    # Last iteration will add an extra scaffold to the count,
+                            #  so remove it here, after part has been processed
                 last;
             }
         }
     }
     close $vcf_file;
-    $process->( $curscf, \@scf_vcf, $samples, \%data, $genetics, $genome->{scfl} )
+    $process->( $curscf, \@scf_vcf, \%data, $userdata, $genome->{scfl} )
       if $argref->{byscf}
       && @scf_vcf
       && $process_this_scf;
@@ -360,8 +228,7 @@ sub run_part {
 sub print_part_progress {
     my ( $scfi, $part, $scfpref ) = @_;
 
-    printf STDERR "%3d:%4d scaffolds processed, %4d remaining\n",
-      $part, $scfi, keys( %{ $scfpref->{$part} } ) - $scfi;
+    printf STDERR "%3d:%4d scaffolds processed, %4d remaining\n", $part, $scfi, keys( %{ $scfpref->{$part} } ) - $scfi;
 
 }
 
@@ -405,52 +272,13 @@ sub get_partitions {
     \%scfp;
 }
 
-sub get_samples {
-    my $vcf_filename = shift;
-    my $genetics     = shift;
-
-    my %parents;
-    map { $parents{$_} = 0 } @{ $genetics->{parents} };
-
-    open my $vcf_file, '<', $vcf_filename
-      or croak "Can't open VCF file $vcf_filename! $OS_ERROR\n";
-
-    my %samples;
-
-    my $vcf_line;
-    while ( $vcf_line = <$vcf_file> ) {
-        if ( $vcf_line =~ /^#CHROM/ ) {
-            last;
-        }
-    }
-    close $vcf_file;
-
-    chomp $vcf_line;
-    my @sample_names = split /\t/, $vcf_line;
-    map {
-        if ( defined $parents{ $sample_names[$_] } ) {
-            $samples{parents}{lookup}{ $sample_names[$_] } = $_;
-            push @{ $samples{parents}{order} }, $sample_names[$_];
-        }
-        else {
-            if ( !defined $genetics->{ignore}{ $sample_names[$_] } ) {
-                $samples{offspring}{lookup}{ $sample_names[$_] } = $_;
-                push @{ $samples{offspring}{order} }, $sample_names[$_];
-            }
-        }
-    } 9 .. $#sample_names;
-
-    \%samples;
-}
-
 sub load_genome {
     my $argref = shift;
 
     my @scflines =
          parse_vcf_header( $argref->{vcf_filename} )
       or load_lengths( $argref->{lengths_filename} )
-      or croak
-      "No scaffold lengths in VCF header or scaffold lengths file (-l)\n";
+      or croak "No scaffold lengths in VCF header or scaffold lengths file (-l)\n";
     return load_scflen(@scflines);
 }
 
@@ -495,8 +323,7 @@ sub load_lengths {
     return @scflines if ( $lengths_filename eq "" );
 
     open my $lengths_file, "<", $lengths_filename
-      or croak
-      "Can't open scaffold lengths file $lengths_filename! $OS_ERROR\n";
+      or croak "Can't open scaffold lengths file $lengths_filename! $OS_ERROR\n";
 
     while ( my $scf_line = <$lengths_file> ) {
         if ( $scf_line =~ /^(.+)\t(.+)$/ ) {
