@@ -47,25 +47,61 @@ croak
 "No genetics file! Please specify -g to define parents, poor quality individuals and marker types\n"
   if ( $args{genetics} eq "" );
 
+our $setup;
+our $process;
+our $merge;
+our $output;
+
 if ( $args{vcf_subs} eq "" ) {
     print STDERR "No script file given with -s, so will count lines in file\n";
 
-    sub process {
-        my ( $scf, $line, $samples, $data, $genetics ) = @_;
-        $data->{lines}++;
-    }
+    $setup = sub {
+        my $vcf_filename = shift;
 
-    sub merge {
+        open my $vcf_file, '<', $vcf_filename
+          or croak "Can't open VCF file $vcf_filename! $OS_ERROR\n";
+
+        my %samples;
+
+        my $vcf_line;
+        while ( $vcf_line = <$vcf_file> ) {
+            if ( $vcf_line =~ /^#CHROM/ ) {
+                last;
+            }
+        }
+        close $vcf_file;
+
+        chomp $vcf_line;
+        my @sample_names = split /\t/, $vcf_line;
+        map {
+            $samples{offspring}{lookup}{ $sample_names[$_] } = $_;
+            push @{ $samples{offspring}{order} }, $sample_names[$_];
+        } 9 .. $#sample_names;
+
+        \%samples;
+    };
+
+    $process = sub {
+        my ( $scf, $lines, $samples, $scfdata, $userdata ) = @_;
+        if ( ref($lines) eq "ARRAY" ) {
+            $scfdata->{lines} += @{$lines};
+        }
+        else {
+            $scfdata->{lines}++;
+        }
+    };
+
+    $merge = sub {
         my ( $part, $all ) = @_;
         return if !defined $part;
         $all->{lines} += $part->{lines};
-    }
+    };
 
-    sub output {
+    $output = sub {
         my ( $data, $genome, $outfix ) = @_;
 
         print "$data->{lines} lines in VCF file\n";
-    }
+    };
 }
 else {
     require( $args{vcf_subs} );
@@ -84,7 +120,9 @@ $args{threads} = keys %{ $genome->{scfp} };    # last thread may not be used;
 
 print_partitions( $genome->{scfp}, $genome->{scfl} );
 
-output( parse_vcf( $genome, $samples, $genetics, \%args ),
+my $userdata = $setup->( $args{vcf_filename} );
+
+$output->( parse_vcf( $genome, $samples, $genetics, \%args ),
     $samples, $genome, $args{output_prefix} );
 
 sub load_genetics {
@@ -217,7 +255,7 @@ sub parse_vcf {
 
         print STDERR "1:Done, processed $scfi scaffolds of " .
           keys( %{ $genome->{scfp}{1} } ) . "\n";
-        merge( $partdata, \%data);
+        $merge->( $partdata, \%data);
         print STDERR "1:Merged\n";
         return \%data;
     }
@@ -231,7 +269,7 @@ sub parse_vcf {
             my $exit      = shift;
             my $part      = shift;
             my $childdata = pop;
-            merge( $childdata, \%data );
+            $merge->( $childdata, \%data );
             print STDERR "$part:Merged\n";
         }
     );
@@ -268,53 +306,53 @@ sub run_part {
     my %data;
     my @scf_vcf;
     my $scf;
+    my $process_this_scf;
     while ( my $vcf_line = <$vcf_file> ) {
         last if ( $argref->{maxscf} && $scfi >= $argref->{maxscf} );
         $scf = $vcf_line =~ /^(.+?)\t/ ? $1 : "";
 
         $curscf = $scf if $curscf eq "";    # Fill curscf at the start
 
+        $process_this_scf = ( $argref->{uniquescf} eq "" or $curscf eq $argref->{uniquescf} ) ? 1 : 0;
+
         if ( defined $genome->{scfp}{$part}{$scf} ) {
             $foundpart = 1;
 
             if ( $curscf ne $scf ) {
                 if ( $argref->{byscf} && @scf_vcf ) {
-                    process( $curscf, \@scf_vcf, $samples, \%data, $genetics,
-                        $genome->{scfl} )
-                      if $argref->{uniquescf} eq ""
-                      or $curscf eq $argref->{uniquescf};
+                    $process->( $curscf, \@scf_vcf, $samples, \%data, $genetics,
+                        $genome->{scfl} ) if $process_this_scf;
                     @scf_vcf = ();
-                    print_part_progress( $scfi, $part, $genome->{scfp} )
-                      if ( $scfi % 10 == 0 );
-                    $scfi++;
                 }
+                print_part_progress( $scfi, $part, $genome->{scfp} )
+                  if ( $scfi % 10 == 0 );
+                $scfi++;
                 last if $curscf eq $argref->{uniquescf};
                 $curscf = $scf;
+                $process_this_scf = ( $argref->{uniquescf} eq "" or $curscf eq $argref->{uniquescf} ) ? 1 : 0;
             }
             $argref->{byscf}
               ? push @scf_vcf,
               $vcf_line
-              : process( $curscf, $vcf_line, $samples, \%data, $genetics,
-                $genome->{scfl} );
+              : $process->( $curscf, $vcf_line, $samples, \%data, $genetics,
+                $genome->{scfl} ) if $process_this_scf;
         }
         else {
             if ($foundpart) {
-                process( $curscf, \@scf_vcf, $samples, \%data, $genetics,
+                $process->( $curscf, \@scf_vcf, $samples, \%data, $genetics,
                     $genome->{scfl} )
                   if $argref->{byscf}
-                  && ( $argref->{uniquescf} eq ""
-                    or $curscf eq $argref->{uniquescf} );
+                  && $process_this_scf;
                 @scf_vcf = ();
                 last;
             }
         }
     }
     close $vcf_file;
-    process( $curscf, \@scf_vcf, $samples, \%data, $genetics, $genome->{scfl} )
+    $process->( $curscf, \@scf_vcf, $samples, \%data, $genetics, $genome->{scfl} )
       if $argref->{byscf}
       && @scf_vcf
-      && ( $argref->{uniquescf} eq ""
-        or $curscf eq $argref->{uniquescf} );
+      && $process_this_scf;
 
     return ( \%data, $scfi );
 }

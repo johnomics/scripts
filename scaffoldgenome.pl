@@ -25,14 +25,41 @@ my %nullcall = ( 'GT' => './.', 'GQ' => 0, 'DP' => 0 );
 
 my @mask;
 
-sub process {
+our $setup = sub {
+    my $vcf_filename = shift;
+
+    open my $vcf_file, '<', $vcf_filename
+      or croak "Can't open VCF file $vcf_filename! $OS_ERROR\n";
+
+    my %samples;
+
+    my $vcf_line;
+    while ( $vcf_line = <$vcf_file> ) {
+        if ( $vcf_line =~ /^#CHROM/ ) {
+            last;
+        }
+    }
+    close $vcf_file;
+
+    chomp $vcf_line;
+    my @sample_names = split /\t/, $vcf_line;
+    map {
+        $samples{offspring}{lookup}{ $sample_names[$_] } = $_;
+        push @{ $samples{offspring}{order} }, $sample_names[$_];
+    } 9 .. $#sample_names;
+
+    \%samples;
+};
+
+
+our $process = sub {
     my ( $scf, $scfref, $samples, $data, $genetics, $scfl ) = @_;
     $data->{$scf} = get_markers( $scfref, $samples, $genetics );
     find_edges( $data->{$scf}, $samples, $genetics );
     collapse( $data->{$scf}, $samples );
     output_markers_to_file( $scf, $data->{$scf} );
     output_blocks_to_file( $scf, $data->{$scf}, $genetics, $samples, $scfl );
-}
+};
 
 sub collapse {
     my ( $scfref, $samples ) = @_;
@@ -570,14 +597,14 @@ sub get_sample_blocks {
     }
 }
 
-sub merge {
+our $merge = sub {
     my ( $part, $all ) = @_;
     foreach my $scf ( keys %{$part} ) {
         $all->{scf}{$scf}++;
     }
-}
+};
 
-sub output {
+our $output = sub {
     my ( $data, $samples, $genome, $outfix ) = @_;
     print STDERR "Outputting...\n";
 
@@ -601,7 +628,7 @@ sub output {
     }
     close $outfile{'markers'};
     close $outfile{'blocks'};
-}
+};
 
 sub output_markers_to_file {
     my ( $scf, $data ) = @_;
