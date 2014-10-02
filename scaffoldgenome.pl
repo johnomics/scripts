@@ -3,6 +3,7 @@ use POSIX qw/ceil/;
 use Term::ExtendedColor qw/:all/;
 use Memoize;
 use Getopt::Long qw/GetOptionsFromString/;
+use DBD::SQLite;
 
 use strict;
 use warnings;
@@ -10,8 +11,8 @@ use warnings;
 use constant MASKLEN      => 4;
 use constant ERRORBLOCK   => 2000;
 use constant ERRORSNPS    => 5;
-use constant FS_THRESHOLD => 35;
-use constant MQ_THRESHOLD => 57;
+use constant FS_THRESHOLD => 15;
+use constant MQ_THRESHOLD => 80;
 use constant GAPSIZE      => 5000;
 
 my %swapphase = (
@@ -27,29 +28,31 @@ my %nullcall = ( 'GT' => './.', 'GQ' => 0, 'DP' => 0 );
 my @mask;
 
 our $setup = sub {
-    my ( $vcf_filename, $extraargs ) = @_;
+    my $args = shift;
 
     my $genetics_filename = "";
     my $rms_filename      = "";
     my $options_okay      = GetOptionsFromString(
-        $extraargs,
+        $args->{extraargs},
         'genetics=s'    => \$genetics_filename,
         'rmsfilename=s' => \$rms_filename,
     );
     croak "Can't process user options: $OS_ERROR\n" if !$options_okay;
-    
+
     croak "No genetics file! Please specify -g to define parents, poor quality individuals and marker types\n"
       if ( $genetics_filename eq "" );
 
     my $genetics = load_genetics( $genetics_filename, $rms_filename );
 
-    my $samples = get_samples( $vcf_filename, $genetics );
+    my $samples = get_samples( $args->{vcf_filename}, $genetics );
 
-    { genetics => $genetics, samples => $samples };
+    my $dbfilename = create_output_database( $args->{output_prefix}, $genetics );
+
+    { genetics => $genetics, samples => $samples, dbfilename => $dbfilename };
 };
 
 sub load_genetics {
-    my ($geneticsfilename, $rmsfilename) = @_;
+    my ( $geneticsfilename, $rmsfilename ) = @_;
 
     my %genetics;
 
@@ -192,13 +195,45 @@ sub get_samples {
     \%samples;
 }
 
+sub create_output_database {
+    my ( $output_prefix, $genetics ) = @_;
+    
+    my $dbfilename = "$output_prefix.db";
+    unlink $dbfilename if ( -e $dbfilename );
+
+    my $dbh = DBI->connect( "dbi:SQLite:dbname=$dbfilename", "", "" );
+
+    my $sth = $dbh->prepare(
+        "CREATE TABLE markers
+                 (scaffold text, position integer, marker_type text,
+                  parent_gt text, parent_gqs text, parent_dps text,
+                  mq real, fs real,
+                  p real, rms_obs real, rms_pattern real,
+                  pattern text, edge text, consensus text, corrected text,
+                  error text)"
+    );
+    $sth->execute;
+
+    my $statement = "CREATE TABLE blocks (scaffold text, start integer, end integer, length integer";
+    map {$statement .= ", \"$_\" text"} sort keys $genetics->{masks};
+    $statement .= ")";
+    
+    $sth = $dbh->prepare($statement);
+    $sth->execute;
+    
+    $dbh->disconnect;
+
+    return $dbfilename;
+}
+
 our $process = sub {
     my ( $scf, $scfref, $data, $userdata, $scfl ) = @_;
     $data->{$scf} = get_markers( $scfref, $userdata->{samples}, $userdata->{genetics} );
     find_edges( $data->{$scf}, $userdata->{samples}, $userdata->{genetics} );
     collapse( $data->{$scf}, $userdata->{samples} );
-    output_markers_to_file( $scf, $data->{$scf} );
-    output_blocks_to_file( $scf, $data->{$scf}, $userdata->{samples}, $userdata->{genetics}, $scfl );
+    output_markers_to_db( $scf, $data->{$scf}, $userdata );
+    output_blocks_to_db( $scf, $data->{$scf}, $userdata, $scfl );
+    delete $data->{$scf};
 };
 
 sub collapse {
@@ -211,7 +246,7 @@ sub collapse {
             my @edge;
             my $cons      = "";
             my $corrected = "";
-            
+
             foreach my $sample ( @{ $samples->{offspring}{order} } ) {
                 my $ref = $scfref->{$type}{$pos}{marker}{$sample};
 
@@ -719,110 +754,94 @@ our $merge = sub {
 
 our $output = sub {
     my ( $data, $genome, $outfix ) = @_;
-    print STDERR "Outputting...\n";
-
-    my %outfile;
-    open $outfile{'markers'}, '>', "$outfix.markers.out"
-      or croak "Can't open $outfix.markers.out: $OS_ERROR\n";
-    open $outfile{'blocks'}, '>', "$outfix.blocks.out"
-      or croak "Can't open $outfix.blocks.out: $OS_ERROR\n";
-
-    foreach my $scf ( sort keys %{ $data->{scf} } ) {
-        foreach my $filetype ( 'markers', 'blocks' ) {
-            open my $scffile, '<', "$scf.$filetype.tmp.out"
-              or croak "Can't open scaffold $filetype output for $scf: $OS_ERROR\n";
-            while ( my $scfline = <$scffile> ) {
-                print { $outfile{$filetype} } $scfline;
-            }
-            close $scffile;
-            system("rm $scf.$filetype.tmp.out");
-        }
-    }
-    close $outfile{'markers'};
-    close $outfile{'blocks'};
+    print STDERR "Output\n";
 };
 
-sub output_markers_to_file {
-    my ( $scf, $data ) = @_;
-    open my $markerhandle, '>', "$scf.markers.tmp.out"
-      or croak "Can't open markers output file for $scf: $OS_ERROR\n";
-    output_scf_markers( $scf, $data, $markerhandle );
-    close $markerhandle;
-}
+sub output_markers_to_db {
+    my ( $scf, $data, $userdata ) = @_;
 
-sub output_scf_markers {
-    my ( $scf, $data, $handle ) = @_;
-    foreach my $type ( sort keys %{$data} ) {
-        foreach my $pos ( sort { $a <=> $b } keys %{ $data->{$type} } ) {
+    my $dbh = DBI->connect( "dbi:SQLite:dbname=$userdata->{dbfilename}", "", "", { AutoCommit => 0 } );
 
-            print $handle
-"$scf\t$pos\t$type\t$data->{$type}{$pos}{parent}\t$data->{$type}{$pos}{pgqs}\t$data->{$type}{$pos}{pdps}\t$data->{$type}{$pos}{mq}\t$data->{$type}{$pos}{fs}\t";
+    my $insert_handle = $dbh->prepare_cached(
+        'INSERT INTO markers VALUES (?,?,?,?,
+                                     ?,?,?,?,
+                                     ?,?,?,?,
+                                     ?,?,?,?
+                                     )'
+    );
 
-            if ( $type ne "Reject" ) {
-                printf $handle "%.2f\t%.2f\t%.2f\t",
-                  $data->{$type}{$pos}{p},
-                  $data->{$type}{$pos}{rmsobs},
-                  $data->{$type}{$pos}{rmspattern};
-            }
+    foreach my $type ( keys %{$data} ) {
+        foreach my $pos ( keys %{ $data->{$type} } ) {
+            my $stp = $data->{$type}{$pos};
 
-            my @gt = split //, $data->{$type}{$pos}{marker}{gt};
+            my @gt = split //, $stp->{marker}{gt};
+            my $pattern;
             foreach my $i ( 0 .. $#gt ) {
                 my $col =
                   ceil( 255 - $data->{$type}{$pos}{marker}{gq}[$i] / 4.2 );
-                print $handle fg $col, $gt[$i];
+                $pattern .= fg $col, $gt[$i];
             }
-            print $handle "\t";
+            $stp->{pattern} = $pattern;
+
+            $stp->{edge}      = "";
+            $stp->{cons}      = "";
+            $stp->{corrected} = "";
 
             if ( $type eq "Reject" ) {
-                print $handle "$data->{$type}{$pos}{error}\n";
+                $stp->{p}          = -1;
+                $stp->{rmsobs}     = -1;
+                $stp->{rmspattern} = -1;
                 next;
             }
 
-            my @edge      = @{ $data->{$type}{$pos}{marker}{edge} };
-            my @cons      = split //, $data->{$type}{$pos}{marker}{cons};
-            my @corrected = split //, $data->{$type}{$pos}{marker}{corrected};
+            my @cons = split //, $stp->{marker}{cons};
+            next if @cons == 0;
 
-            if ( @cons == 0 or @corrected == 0 ) {
-                print $handle "\n";
-                next;
-            }
-            my $cons      = "";
-            my $corrected = "";
+            my @corrected = split //, $stp->{marker}{corrected};
+            next if @corrected == 0;
+
+            my @edge = @{ $stp->{marker}{edge} };
+
             foreach my $e ( 0 .. $#edge ) {
                 my $col = $edge[$e] ne '.'
                   && $edge[$e] > MASKLEN ? 'red1' : 'black';
-                print $handle fg $col, $edge[$e];
-                $cons      .= fg $col, $cons[$e];
-                $corrected .= fg $col, $corrected[$e];
+                $stp->{edge}      .= fg $col, $edge[$e];
+                $stp->{cons}      .= fg $col, $cons[$e];
+                $stp->{corrected} .= fg $col, $corrected[$e];
             }
-            print $handle "\t$cons\t$corrected\n";
         }
-        print $handle '-' x 253, "\n";
+
+        foreach my $pos ( keys %{ $data->{$type} } ) {
+            my $stp = $data->{$type}{$pos};
+
+            $insert_handle->execute(
+                $scf,         $pos,
+                $type,        $stp->{parent},
+                $stp->{pgqs}, $stp->{pdps},
+                $stp->{mq},   $stp->{fs},
+                sprintf( "%4.2f", $stp->{p} ),          sprintf( "%4.2f", $stp->{rmsobs} ),
+                sprintf( "%4.2f", $stp->{rmspattern} ), $stp->{pattern},
+                $stp->{edge},      $stp->{cons},
+                $stp->{corrected}, $stp->{error}
+            );
+        }
+        $dbh->commit;
     }
-    print $handle '-' x 253, "\n";
-
+    $dbh->disconnect;
+    return;
 }
 
-sub output_blocks_to_file {
-    my ( $scf, $data, $samples, $genetics, $scfl ) = @_;
-    open my $blockhandle, '>', "$scf.blocks.tmp.out"
-      or croak "Can't open blocks output file for $scf: $OS_ERROR\n";
-    output_scf_blocks( $scf, $data, $blockhandle, $genetics, $samples, $scfl );
-    close $blockhandle;
-}
+sub output_blocks_to_db {
+    my ( $scf, $data, $userdata, $scfl ) = @_;
 
-sub output_scf_blocks {
-    my ( $scf, $data, $blockhandle, $genetics, $samples, $scfl ) = @_;
+    my @types     = sort keys %{ $userdata->{genetics}{masks} };
 
-    my $samplenum = @{ $samples->{offspring}{order} };
-    my @types     = sort keys %{ $genetics->{masks} };
-
-    printf $blockhandle "%8s\t%8s\t%8s\t%8s", 'Scaffold', 'Start', 'End', 'Length';
-
-    map { printf $blockhandle "\t%-${samplenum}s", $_; } @types;
-    print $blockhandle "\n";
-
-    my $empty = ' ' x $samplenum;
+    my $dbh = DBI->connect( "dbi:SQLite:dbname=$userdata->{dbfilename}", "", "", { AutoCommit => 0 } );
+    
+    my $insert_statement = "INSERT INTO blocks VALUES (?,?,?,?";
+    map {$insert_statement .= ',?'} @types;
+    $insert_statement .= ')';
+    my $insert_handle = $dbh->prepare_cached($insert_statement);
 
     my %scfpos;
     foreach my $type ( keys %{$data} ) {
@@ -836,51 +855,39 @@ sub output_scf_blocks {
             if (   $prevpos eq 0
                 or $scfpos{$prevpos}{types}{$type} ne $scfpos{$pos}{types}{$type} )
             {
-                $scfpos{ $prevpos + 1 }{types}{$type} = $empty;
+                $scfpos{ $prevpos + 1 }{types}{$type} = "";
             }
             $prevpos = $pos;
         }
-        $scfpos{ $prevpos + 1 }{types}{$type} = $empty;
+        $scfpos{ $prevpos + 1 }{types}{$type} = "";
     }
 
+    
     my %curpat;
-    map { $curpat{$_} = $empty } @types;
+    map { $curpat{$_} = "" } @types;
     my $blockpos = 1;
-    my $lastpos;
     for my $p ( sort { $a <=> $b } keys %scfpos ) {
         for my $t (@types) {
             if ( defined $scfpos{$p}{types}{$t}
                 and $scfpos{$p}{types}{$t} ne $curpat{$t} )
             {
-                output_block( $scf, $blockpos, $p - 1, $blockhandle, \@types, \%curpat, $empty );
+                my $start = $blockpos;
+                my $end = $p-1;
+                my $len = $end - $start + 1;
+
+                my @out_patterns = map {$curpat{$_}} @types;
+                $insert_handle->execute($scf, $start, $end, $len, @out_patterns);
                 $curpat{$t} = $scfpos{$p}{types}{$t};
                 $blockpos = $p;
             }
         }
-        $lastpos = $p;
+        $dbh->commit;
     }
-    output_block( $scf, $blockpos, $scfl->{$scf}, $blockhandle, \@types, \%curpat, $empty );
-}
-
-sub output_block {
-    my ( $scf, $start, $end, $blockhandle, $types, $curpat, $empty ) = @_;
-    my $length = $end - $start + 1;
-    printf $blockhandle "%8s\t%8d\t%8d\t%8d", $scf, $start, $end, $length;
-    for my $type ( @{$types} ) {
-        print $blockhandle "\t";
-        print $blockhandle $curpat->{$type} // $empty;
-    }
-    print $blockhandle "\n";
-}
-
-sub get_next_pat {
-    my ( $i, $type, $scfpos, $pos ) = @_;
-    while ( $i < @{$pos} ) {
-        return $scfpos->{ $pos->[$i] }{types}{$type}
-          if defined $scfpos->{ $pos->[$i] }{types}{$type};
-        $i++;
-    }
-    return "";
+    my @out_patterns = map {$curpat{$_}} @types;
+    my $len = $scfl->{$scf} - $blockpos + 1;
+    $insert_handle->execute($scf, $blockpos, $scfl->{$scf}, $len, @out_patterns);
+    $dbh->commit;
+    $dbh->disconnect;
 }
 
 1;
