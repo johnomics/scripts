@@ -51,10 +51,10 @@ if ( $args{vcf_subs} eq "" ) {
     print STDERR "No script file given with -s, so will count lines in file\n";
 
     $setup = sub {
-        my ( $vcf_filename, $extraargs ) = @_;
+        my $args = shift;
 
-        open my $vcf_file, '<', $vcf_filename
-          or croak "Can't open VCF file $vcf_filename! $OS_ERROR\n";
+        open my $vcf_file, '<', $args->{vcf_filename}
+          or croak "Can't open VCF file $args->{vcf_filename}! $OS_ERROR\n";
 
         my %samples;
 
@@ -111,9 +111,9 @@ $args{threads} = keys %{ $genome->{scfp} };    # last thread may not be used;
 
 print_partitions( $genome->{scfp}, $genome->{scfl} );
 
-my $userdata = $setup->( $args{vcf_filename}, $args{extraargs} );
+my $userdata = $setup->( \%args );
 
-$output->( parse_vcf( $genome, $userdata, \%args ), $genome, $args{output_prefix} );
+$output->( parse_vcf( $genome, $userdata, \%args ), $genome, $args{output_prefix}, $userdata );
 
 sub parse_vcf {
     my ( $genome, $userdata, $argref ) = @_;
