@@ -25,12 +25,10 @@ our $setup = sub {
     my $args = shift;
 
     my $genetics_filename = "";
-    my $agp_filename      = "";
     my $rms_filename      = "";
     my $options_okay      = GetOptionsFromString(
         $args->{extraargs},
         'genetics=s'    => \$genetics_filename,
-        'agp=s'         => \$agp_filename,
         'rmsfilename=s' => \$rms_filename,
     );
     croak "Can't process user options: $OS_ERROR\n" if !$options_okay;
@@ -38,18 +36,13 @@ our $setup = sub {
     croak "No genetics file! Please specify -g to define parents, poor quality individuals and marker types\n"
       if ( $genetics_filename eq "" );
 
-    croak "No AGP file! Please specify -a\n"
-      if ( $agp_filename eq "" );
-
     my $genetics = load_genetics( $genetics_filename, $rms_filename );
 
     my $samples = get_samples( $args->{vcf_filename}, $genetics );
 
-    my $agp = load_agp($agp_filename);
-
     my $dbfilename = create_output_database( $args->{output_prefix}, $genetics );
 
-    { genetics => $genetics, samples => $samples, agp => $agp, dbfilename => $dbfilename };
+    { genetics => $genetics, samples => $samples, dbfilename => $dbfilename };
 };
 
 sub load_genetics {
@@ -87,17 +80,12 @@ sub load_genetics {
     my %f2patterns;
     while ( my $marker_type = <$geneticsfile> ) {
         chomp $marker_type;
-        my ( $parents, $males, $females, $type, $corrections, $recombination ) = split /\t/, $marker_type;
+        my ( $parents, $males, $females, $type, $corrections ) = split /\t/, $marker_type;
         $genetics{types}{$parents}{$type}{'Male'}   = $males;
         $genetics{types}{$parents}{$type}{'Female'} = $females;
 
-        croak "Recombination value for $type $parents should be Y or N, got $recombination!"
-          if $recombination ne 'Y' and $recombination ne 'N';
-        if ( $recombination ne "" ) {
-            $genetics{types}{$parents}{$type}{recombination} = $recombination;
-        }
-        $genetics{hmm}{$type}{'Male'}   = $genetics{hmm}{$type}{'Male'}   // make_hmm( $males,   $recombination );
-        $genetics{hmm}{$type}{'Female'} = $genetics{hmm}{$type}{'Female'} // make_hmm( $females, $recombination );
+        $genetics{gts}{$type}{'Male'}   = $genetics{gts}{$type}{'Male'}   // get_gts( $males );
+        $genetics{gts}{$type}{'Female'} = $genetics{gts}{$type}{'Female'} // get_gts( $females );
 
         if ( $corrections ne "" ) {
             my ( $orig, $fix ) = split '->', $corrections;
@@ -141,10 +129,8 @@ sub load_genetics {
     \%genetics;
 }
 
-sub make_hmm {
-    my ( $gtstr, $recombination ) = @_;
-
-    my %hmm;
+sub get_gts {
+    my $gtstr = shift;
 
     my %gt_shares;
     my $total_shares = 0;
@@ -162,55 +148,9 @@ sub make_hmm {
 
     for my $gt ( 'A', 'B', 'H', '.' ) {
         $gt_shares{$gt} = 0 if !defined $gt_shares{$gt};
-        $hmm{initial}{$gt} = $gt_shares{$gt} / $total_shares;
-
-        for my $gt2 ( 'A', 'B', 'H', '.' ) {
-            $hmm{transition}{$gt}{$gt2} = $gt eq $gt2 ? 1 : 0;
-            $hmm{emit}{$gt}{$gt2} = 0;
-        }
+        $gt_shares{$gt} = $gt_shares{$gt} / $total_shares;
     }
-
-    my $transprob = 0.0001;
-    my $emitprob  = 0.0001;
-    if ( $recombination eq 'Y' ) {
-        for my $i ( 0 .. $#valid_gts - 1 ) {
-            my $gt1 = $valid_gts[$i];
-            my $gt2 = $valid_gts[ $i + 1 ];
-            $hmm{transition}{$gt1}{$gt2} = $transprob;
-            $hmm{transition}{$gt2}{$gt1} = $transprob;
-            $hmm{transition}{$gt1}{$gt2} -= $transprob;
-            $hmm{transition}{$gt2}{$gt1} -= $transprob;
-        }
-    }
-
-    for my $gt (@valid_gts) {
-        my $totalemit = 1;
-        for my $gt2 ( 'A', 'B', 'H', '.' ) {
-            if ( $gt ne $gt2 ) {
-                $hmm{emit}{$gt}{$gt2} = $emitprob;
-                $totalemit -= $emitprob;
-            }
-        }
-        $hmm{emit}{$gt}{$gt} = $totalemit;
-    }
-
-    return \%hmm;
-}
-
-sub load_agp {
-    my $agp_filename = shift;
-
-    open my $agp_file, "<", $agp_filename or croak "Can't open AGP file $agp_filename!\n";
-    my %agp;
-    while ( my $agp_line = <$agp_file> ) {
-        my ( $scf, $start, $end, $part, $type, @f ) = split /\t/, $agp_line;
-        $agp{$scf}{$part}{start} = $start;
-        $agp{$scf}{$part}{end}   = $end;
-        $agp{$scf}{$part}{type}  = $type;
-    }
-    close $agp_file;
-
-    return \%agp;
+    return \%gt_shares;
 }
 
 sub get_samples {
@@ -271,7 +211,7 @@ sub create_output_database {
     $sth->execute;
 
     my $statement = "CREATE TABLE blocks (scaffold text, start integer, end integer, length integer";
-    map { $statement .= ", \"$_\" text" } sort keys $genetics->{hmm};
+    map { $statement .= ", \"$_\" text" } sort keys $genetics->{gts};
     $statement .= ")";
 
     $sth = $dbh->prepare($statement);
@@ -652,8 +592,6 @@ sub find_blocks {
         for my $block (@blocks) {
             for my $sample ( @{ $userdata->{samples}{offspring}{order} } ) {
                 get_sample_consensus( $markers->{$type}, $sample, \@pos, $block, $type, $userdata->{genetics} );
-
-#                get_sample_consensus_viterbi( $markers->{$type}, $sample, \@pos, $block, $type, $userdata->{genetics} );
             }
         }
     }
@@ -696,9 +634,8 @@ sub get_sample_consensus {
     my ( $marker, $sample, $pos, $block, $type, $genetics ) = @_;
 
     my $sex = $genetics->{samplesex}{$sample};
-    my $hmm = $genetics->{hmm}{$type}{$sex};
 
-    my $seqblocks = get_sample_blocks( $marker, $sample, $pos, $block, $hmm );
+    my $seqblocks = get_sample_blocks( $marker, $sample, $pos, $block, $genetics->{gts}{$type}{$sex} );
 
     if ( @{$seqblocks} <= 1 ) {
         for my $p ( @{$pos} ) {
@@ -774,14 +711,14 @@ sub get_max_seq {
 }
 
 sub get_sample_blocks {
-    my ( $marker, $sample, $pos, $block, $hmm ) = @_;
+    my ( $marker, $sample, $pos, $block, $gts ) = @_;
 
     my @seqblocks;
     my $curgt = "";
     for my $p ( @{$pos} ) {
         next if ( $p < $block->{start} or $block->{end} < $p );
         my $gt = $marker->{$p}{marker}{$sample}{gt};
-        next if $hmm->{initial}{$gt} == 0;
+        next if !defined($gts->{$gt}) or $gts->{$gt} == 0;
         if ( $gt eq $curgt ) {
             $seqblocks[-1]{end} = $p;
         }
@@ -823,78 +760,6 @@ sub get_sample_blocks {
     \@cleanblocks;
 }
 
-sub get_sample_consensus_viterbi {
-    my ( $marker, $sample, $pos, $block, $type, $genetics ) = @_;
-    my $sex    = $genetics->{samplesex}{$sample};
-    my $hmm    = $genetics->{hmm}{$type}{$sex};
-    my @states = keys %{ $hmm->{initial} };
-
-    my @scores;
-    my @paths;
-
-    my $initgt = $marker->{ $block->{start} }{marker}{$sample}{gt};
-    my $t      = 0;
-    for my $state (@states) {
-        $scores[$t]{$state} = $hmm->{initial}{$state} * $hmm->{emit}{$state}{$initgt};
-        $paths[$t]{$state}  = $state;
-    }
-
-    for my $p ( @{$pos} ) {
-        next if ( $p <= $block->{start} or $block->{end} < $p );
-        $t++;
-        my $total_delta_prob = 0;                                    # For scaling
-        my $gt               = $marker->{$p}{marker}{$sample}{gt};
-
-        for my $j (@states) {
-            my $delta_prob_j = 0;
-            my $psi_prob_j   = 0;
-            my $psi_argmax_j = '';
-
-            for my $i (@states) {
-                my $psi_prob_ij = $scores[ $t - 1 ]{$i} * $hmm->{transition}{$i}{$j};
-                if ( $psi_prob_ij > $psi_prob_j ) {
-                    $psi_prob_j   = $psi_prob_ij;
-                    $psi_argmax_j = $i;
-                }
-
-                my $delta_prob_ij = $psi_prob_ij * $hmm->{emit}{$i}{$gt};
-                if ( $delta_prob_ij > $delta_prob_j ) {
-                    $delta_prob_j = $delta_prob_ij;
-                }
-                $total_delta_prob += $delta_prob_ij;
-            }
-            $scores[$t]{$j} = $delta_prob_j;
-            $paths[$t]{$j}  = $psi_argmax_j;
-        }
-
-        # Scale probabilities
-        map { $scores[$t]{$_} = $scores[$t]{$_} / $total_delta_prob } keys %{ $scores[$t] };
-    }
-    my $prob = 0;
-    my $qT   = "";
-    for my $i (@states) {
-        if ( $scores[-1]{$i} > $prob ) {
-            $prob = $scores[-1]{$i};
-            $qT   = $i;
-        }
-    }
-
-    $marker->{ $block->{end} }{marker}{$sample}{cons} = $qT;
-
-    my $qtplus1 = $qT;
-    $t = $#paths - 1;
-    for my $p ( reverse @{$pos} ) {
-        next if ( $p < $block->{start} or $block->{end} <= $p );
-        $marker->{$p}{marker}{$sample}{cons} = $paths[$t]{$qtplus1};
-        $qtplus1 = $paths[$t]{$qtplus1};
-        $t--;
-    }
-
-    for my $p ( @{$pos} ) {
-        next if ( $p < $block->{start} or $block->{end} < $p );
-    }
-    return;
-}
 
 sub collapse {
     my ( $scfref, $samples ) = @_;
@@ -1002,7 +867,7 @@ sub output_markers_to_db {
 sub output_blocks_to_db {
     my ( $scf, $data, $userdata, $scfl, $dbh ) = @_;
 
-    my @types = sort keys %{ $userdata->{genetics}{hmm} };
+    my @types = sort keys %{ $userdata->{genetics}{gts} };
 
     my $insert_statement = "INSERT INTO blocks VALUES (?,?,?,?";
     map { $insert_statement .= ',?' } @types;
