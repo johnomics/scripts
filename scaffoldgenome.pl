@@ -248,13 +248,15 @@ sub get_markers {
             $info->{error} = "Fails MQ threshold: Type $type";
             $type = "Reject";
         }
-
-        $markers{$type}{$pos}{phase} = 0;
-        $markers{$type}{$pos}{phase} = check_phase( $marker, $markers{$type}{ $prevpos{$type} }{marker}, $type )
+        
+        my $phase = 0;
+        $phase = check_phase( $marker, $markers{$type}{ $prevpos{$type} }{marker}, $type )
           if ( $type ne "Reject" && $prevpos{$type} );
+        $pattern = invert_pattern($pattern, $type) if $phase;
         $markers{$type}{$pos}{marker}     = $marker;
         $markers{$type}{$pos}{parent}     = $parentcall;
         $markers{$type}{$pos}{pattern}    = $pattern;
+        $markers{$type}{$pos}{phase}      = $phase;
         $markers{$type}{$pos}{mq}         = $info->{'MQ'};
         $markers{$type}{$pos}{fs}         = $info->{'FS'};
         $markers{$type}{$pos}{error}      = $info->{error} // "";
@@ -289,6 +291,14 @@ sub check_phase {
         }
     }
     return $phase;
+}
+
+sub invert_pattern {
+    my ($pattern, $type) = @_;
+    $type =~ s/\-(.+)//;
+    my @gts = split //, $pattern;
+    @gts = map {$swapphase{$type}{$_} // $_} @gts;
+    join '', @gts;
 }
 
 sub parse_snp {
@@ -666,7 +676,6 @@ sub get_sample_consensus {
 
     my $maxseq = get_max_seq($seqblocks);
     my @maxgts = split //, $maxseq;
-
     for my $p ( keys %posblocks ) {
         $marker->{$p}{marker}{$sample}{cons} =
             defined($posblocks{$p}{block}) ? $maxgts[ $posblocks{$p}{block} ]
