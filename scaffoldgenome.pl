@@ -6,12 +6,8 @@ use DBD::SQLite;
 use strict;
 use warnings;
 
-use constant MASKLEN      => 4;
-use constant ERRORBLOCK   => 2000;
-use constant ERRORSNPS    => 5;
 use constant FS_THRESHOLD => 5;
 use constant MQ_THRESHOLD => 90;
-use constant GAPSIZE      => 5000;
 
 my %swapphase = (
     "Intercross" => { "A" => "B", "B" => "A" },
@@ -91,14 +87,17 @@ sub load_genetics {
     my %f2patterns;
     while ( my $marker_type = <$geneticsfile> ) {
         chomp $marker_type;
-        my ( $parents, $males, $females, $type, $corrections ) = split /\t/, $marker_type;
+        my ( $parents, $males, $females, $type, $corrections, $recombination ) = split /\t/, $marker_type;
         $genetics{types}{$parents}{$type}{'Male'}   = $males;
         $genetics{types}{$parents}{$type}{'Female'} = $females;
 
-        $genetics{masks}{$type}{'Male'} = $genetics{masks}{$type}{'Male'}
-          // generate_masks( $genetics{types}{$parents}{$type}{'Male'} );
-        $genetics{masks}{$type}{'Female'} = $genetics{masks}{$type}{'Female'}
-          // generate_masks( $genetics{types}{$parents}{$type}{'Female'} );
+        croak "Recombination value for $type $parents should be Y or N, got $recombination!"
+          if $recombination ne 'Y' and $recombination ne 'N';
+        if ( $recombination ne "" ) {
+            $genetics{types}{$parents}{$type}{recombination} = $recombination;
+        }
+        $genetics{hmm}{$type}{'Male'}   = $genetics{hmm}{$type}{'Male'}   // make_hmm( $males,   $recombination );
+        $genetics{hmm}{$type}{'Female'} = $genetics{hmm}{$type}{'Female'} // make_hmm( $females, $recombination );
 
         if ( $corrections ne "" ) {
             my ( $orig, $fix ) = split '->', $corrections;
@@ -142,6 +141,62 @@ sub load_genetics {
     \%genetics;
 }
 
+sub make_hmm {
+    my ( $gtstr, $recombination ) = @_;
+
+    my %hmm;
+
+    my %gt_shares;
+    my $total_shares = 0;
+    my @valid_gts;
+
+    # Get occurrence of gt (eg 'A', '2B' etc) or set share to 0
+    for my $gt ( split /,/, $gtstr ) {
+        if ( $gt =~ /^(\d)?([ABH.])$/ ) {
+            my $share = $1 // 1;
+            $gt_shares{$2} = $share;
+            $total_shares += $share;
+            push @valid_gts, $2;
+        }
+    }
+
+    for my $gt ( 'A', 'B', 'H', '.' ) {
+        $gt_shares{$gt} = 0 if !defined $gt_shares{$gt};
+        $hmm{initial}{$gt} = $gt_shares{$gt} / $total_shares;
+
+        for my $gt2 ( 'A', 'B', 'H', '.' ) {
+            $hmm{transition}{$gt}{$gt2} = $gt eq $gt2 ? 1 : 0;
+            $hmm{emit}{$gt}{$gt2} = 0;
+        }
+    }
+
+    my $transprob = 0.0001;
+    my $emitprob  = 0.0001;
+    if ( $recombination eq 'Y' ) {
+        for my $i ( 0 .. $#valid_gts - 1 ) {
+            my $gt1 = $valid_gts[$i];
+            my $gt2 = $valid_gts[ $i + 1 ];
+            $hmm{transition}{$gt1}{$gt2} = $transprob;
+            $hmm{transition}{$gt2}{$gt1} = $transprob;
+            $hmm{transition}{$gt1}{$gt2} -= $transprob;
+            $hmm{transition}{$gt2}{$gt1} -= $transprob;
+        }
+    }
+
+    for my $gt (@valid_gts) {
+        my $totalemit = 1;
+        for my $gt2 ( 'A', 'B', 'H', '.' ) {
+            if ( $gt ne $gt2 ) {
+                $hmm{emit}{$gt}{$gt2} = $emitprob;
+                $totalemit -= $emitprob;
+            }
+        }
+        $hmm{emit}{$gt}{$gt} = $totalemit;
+    }
+
+    return \%hmm;
+}
+
 sub load_agp {
     my $agp_filename = shift;
 
@@ -156,26 +211,6 @@ sub load_agp {
     close $agp_file;
 
     return \%agp;
-}
-
-sub generate_masks {
-    my ($gtstr) = @_;
-    my @gts = split /,/, $gtstr;
-    map { $_ = substr $_, -1; } @gts;
-
-    my %mask;
-    if ( @gts == 2 ) {
-        $mask{ $gts[0] }{ $gts[1] }++;
-    }
-    else {
-        for my $i ( 0 .. $#gts ) {
-            for my $j ( 0 .. $#gts ) {
-                next if $i eq $j;
-                $mask{ $gts[$i] }{ $gts[$j] }++;
-            }
-        }
-    }
-    \%mask;
 }
 
 sub get_samples {
@@ -230,13 +265,13 @@ sub create_output_database {
                   parent_gt text, parent_gqs text, parent_dps text,
                   mq real, fs real,
                   p real, rms_obs real, rms_pattern real, phase integer,
-                  pattern text, edge text, consensus text, corrected text,
+                  pattern text, consensus text,
                   error text)"
     );
     $sth->execute;
 
     my $statement = "CREATE TABLE blocks (scaffold text, start integer, end integer, length integer";
-    map { $statement .= ", \"$_\" text" } sort keys $genetics->{masks};
+    map { $statement .= ", \"$_\" text" } sort keys $genetics->{hmm};
     $statement .= ")";
 
     $sth = $dbh->prepare($statement);
@@ -250,13 +285,12 @@ sub create_output_database {
 our $process = sub {
     my ( $scf, $scfref, $data, $userdata, $scfl ) = @_;
     $data->{$scf} = get_markers( $scfref, $userdata->{samples}, $userdata->{genetics} );
-    find_edges( $data->{$scf}, $scf, $userdata );
+    find_blocks( $data->{$scf}, $scf, $userdata );
     collapse( $data->{$scf}, $userdata->{samples} );
     output_to_db( $scf, $data->{$scf}, $userdata, $scfl );
     $data->{$scf} = "";
     return;
 };
-
 
 sub get_markers {
     my ( $scfref, $samples, $genetics ) = @_;
@@ -265,7 +299,7 @@ sub get_markers {
     my %prevpos;
     foreach my $snp ( @{$scfref} ) {
         chomp $snp;
-        my ( $marker, $type, $parentcall, $pos, $info ) = parse_snp( $snp, $samples, $genetics );
+        my ( $marker, $type, $parentcall, $pos, $pattern, $info ) = parse_snp( $snp, $samples, $genetics );
         if ( $type ne "Reject" && $info->{'FS'} > FS_THRESHOLD ) {
             $info->{error} = "Fails FS threshold: Type $type";
             $type = "Reject";
@@ -280,6 +314,7 @@ sub get_markers {
           if ( $type ne "Reject" && $prevpos{$type} );
         $markers{$type}{$pos}{marker}     = $marker;
         $markers{$type}{$pos}{parent}     = $parentcall;
+        $markers{$type}{$pos}{pattern}    = $pattern;
         $markers{$type}{$pos}{mq}         = $info->{'MQ'};
         $markers{$type}{$pos}{fs}         = $info->{'FS'};
         $markers{$type}{$pos}{error}      = $info->{error} // "";
@@ -326,7 +361,7 @@ sub parse_snp {
     my $calls = get_calls( \@f, $samples, $genetics );
 
     my @parentcalls = map { $calls->{$_}{'GT'} } @{ $genetics->{parents} };
-
+    
     my ( $parentcall, $vgt ) = get_parent_call( \@parentcalls );
 
     my @info = split /;/, $f[7];
@@ -342,26 +377,29 @@ sub parse_snp {
 
     if ( !defined $genetics->{types}{$parentcall} ) {
         $info{error} = "Not a valid parent call: @parentcalls";
-
+        my $pattern = "";
         foreach my $sample ( @{ $samples->{offspring}{order} } ) {
             my $call = $calls->{$sample}{'GT'};
             my $a    = substr $call, 0, 1;
             my $b    = substr $call, -1;
             $marker{$sample}{gt} = $a eq '.' && $b eq '.' ? '.' : $a eq $b ? $a : 'H';
             $marker{$sample}{gq} = $calls->{$sample}{'GQ'};
+            $pattern .= $marker{$sample}{gt};
         }
-        return ( \%marker, "Reject", $parentcall, $pos, \%info );
+        return ( \%marker, "Reject", $parentcall, $pos, $pattern, \%info );
     }
 
     my %gtsbysex;
     my %invalid_samples;
 
+    my $pattern;
     foreach my $sample ( @{ $samples->{offspring}{order} } ) {
         my $call = $calls->{$sample}{'GT'};
         my $gt = $vgt->{$call} // "X";
         $invalid_samples{$sample} = $call if $gt eq "X";
         push @{ $gtsbysex{ $genetics->{samplesex}{$sample} } }, $gt;
         $marker{$sample}{gt} = $gt;
+        $pattern .= $gt;
         $marker{$sample}{gq} = $calls->{$sample}{'GQ'};
     }
 
@@ -369,7 +407,7 @@ sub parse_snp {
         $info{error} = "Invalid calls: ";
         map { $info{error} .= "$_:$invalid_samples{$_} " }
           sort keys %invalid_samples;
-        return ( \%marker, "Reject", $parentcall, $pos, \%info );
+        return ( \%marker, "Reject", $parentcall, $pos, $pattern, \%info );
     }
 
     my ( %types, %rms_obs, %rms_pattern );
@@ -398,13 +436,13 @@ sub parse_snp {
           : @valid_types > 1  ? "Too many valid types: "
           :                     "";
         $info{error} .= $typestring;
-        return ( \%marker, "Reject", $parentcall, $pos, \%info );
+        return ( \%marker, "Reject", $parentcall, $pos, $pattern, \%info );
     }
 
     my $type = (@valid_types)[0];
     if ( $type eq "Reject" ) {
         $info{error} = "No valid type found";
-        return ( \%marker, "Reject", $parentcall, $pos, \%info );
+        return ( \%marker, "Reject", $parentcall, $pos, $pattern, \%info );
     }
 
     my @pgqs = split /:/, $info{pgqs};
@@ -420,12 +458,12 @@ sub parse_snp {
 
     if ($poorqual) {
         $info{error} = "Poor quality parental calls";
-        return ( \%marker, "Reject", $parentcall, $pos, \%info );
+        return ( \%marker, "Reject", $parentcall, $pos, $pattern, \%info );
     }
 
     if ($highdp) {
         $info{error} = "Depth>100 for at least one parent";
-        return ( \%marker, "Reject", $parentcall, $pos, \%info );
+        return ( \%marker, "Reject", $parentcall, $pos, $pattern, \%info );
     }
 
     $info{rmsobs}     = $rms_obs{$type};
@@ -440,7 +478,7 @@ sub parse_snp {
         }
     }
 
-    return ( \%marker, $type, $parentcall, $pos, \%info );
+    return ( \%marker, $type, $parentcall, $pos, $pattern, \%info );
 }
 
 sub get_calls {
@@ -517,7 +555,7 @@ sub get_rms {
 
 sub get_expected_classes {
     my ( $exp_ref, $sex, $calls, $valid, $p ) = @_;
-    my @exp = split /,/, $valid;
+    my @exp = split ',', $valid;
     my $shares = 0;
     for my $e (@exp) {
         if ( $e =~ /^(\d)?([ABH.])$/ ) {
@@ -603,202 +641,282 @@ sub get_parent_call {
     return ( $parentcall, \%vgt );
 }
 
-sub find_edges {
+sub find_blocks {
     my ( $markers, $scf, $userdata ) = @_;
 
     for my $type ( keys %{$markers} ) {
         next if ( $type eq "Reject" );
         my @pos = sort { $a <=> $b } keys %{ $markers->{$type} };
-        for my $sample ( @{ $userdata->{samples}{offspring}{order} } ) {
 
-            for my $gt ( 'A', 'B', 'H', '.' ) {
-                my %maskcall = ( 'A' => -1, 'B' => -1, 'H' => -1, '.' => -1 );
-                $maskcall{$gt} = 1;
-                get_sample_blocks( $markers->{$type}, $sample, \@pos, \%maskcall, MASKLEN, $userdata->{agp}{$scf} );
+        my @blocks = find_edges( $markers->{$type}, \@pos, $type );
+        for my $block (@blocks) {
+            for my $sample ( @{ $userdata->{samples}{offspring}{order} } ) {
+                get_sample_consensus( $markers->{$type}, $sample, \@pos, $block, $type, $userdata->{genetics} );
+
+#                get_sample_consensus_viterbi( $markers->{$type}, $sample, \@pos, $block, $type, $userdata->{genetics} );
             }
-
-            call_blocks( $markers->{$type}, $sample, \@pos, MASKLEN, $type, $userdata->{genetics} );
-            clean_blocks( $markers->{$type}, $sample, \@pos, $type );
         }
     }
 }
 
-sub call_blocks {
-    my ( $marker, $sample, $pos, $masklen, $type, $genetics ) = @_;
+sub find_edges {
+    my ( $markertype, $pos, $type ) = @_;
 
-    my $blocknum = 0;
-    my @blocks   = ();
-    my $validgts;
-    my $prevpos = -100;
-    for my $p ( @{$pos} ) {
-        $validgts = $genetics->{types}{ $marker->{$p}{parent} }{$type}{ $genetics->{samplesex}{$sample} };
-
-        my $mref = $marker->{$p}{marker}{$sample};
-
-        # Create a new block if the edge value is greater than
-        # the mask length
-        $blocknum++
-          if ( defined $mref->{edge}
-            && abs( $mref->{edge} ) > $masklen );
-        push @{ $blocks[$blocknum]{pos} }, $p;
-        if (
-            $validgts =~ /$mref->{gt}/
-            && (   $p - $prevpos > 100
-                || $marker->{$prevpos}{marker}{$sample}{gt} ne $mref->{gt} )
-          )
-        {
-            my $numgts = scalar( split ',', $validgts );
-            my $het_weight =
-                ($numgts > 2 and $mref->{gt} eq 'H') ? 2
-              : ($numgts == 2 and $mref->{gt} eq 'H' and $marker->{$p}{phase} == 0) ? 2
-              : ($numgts == 2 and $mref->{gt} ne 'H' and $marker->{$p}{phase} == 1) ? 2
-              :                                                                     1;
-            $blocks[$blocknum]{gt}{ $mref->{gt} } += $het_weight;
-            $prevpos = $p;
-        }
-    }
-
-    my @blocksbysize =
-      sort { @{ $blocks[$b]{pos} } <=> @{ $blocks[$a]{pos} } } 0 .. $#blocks;
-
-    for my $i (@blocksbysize) {
-
-        my %gts;
-        my $size;
-
-        my @sortgt =
-          sort { $blocks[$i]{gt}{$b} <=> $blocks[$i]{gt}{$a} }
-          keys %{ $blocks[$i]{gt} };
-
-        my $maxgt =
-            @sortgt == 0                                                      ? '~'
-          : @sortgt == 1                                                      ? $sortgt[0]
-          : $blocks[$i]{gt}{ $sortgt[0] } / $blocks[$i]{gt}{ $sortgt[1] } > 2 ? $sortgt[0]
-          :                                                                     '~';
-        map { $marker->{$_}{marker}{$sample}{cons} = $maxgt } @{ $blocks[$i]{pos} };
-    }
-
-}
-
-sub clean_blocks {
-    my ( $marker, $sample, $pos, $type ) = @_;
-
-    my $blocknum = 0;
     my @blocks;
-    my $prev_cons;
-    for my $p ( @{$pos} ) {
-        $blocknum++
-          if ( defined $prev_cons
-            && $prev_cons ne $marker->{$p}{marker}{$sample}{cons} );
-        push @{ $blocks[$blocknum]{pos} }, $p;
-        $blocks[$blocknum]{cons} = $marker->{$p}{marker}{$sample}{cons};
-        $prev_cons = $marker->{$p}{marker}{$sample}{cons};
+    my $block_start = $pos->[0];
+    my $this        = $markertype->{ $pos->[0] };
+    my $length      = length( $this->{pattern} );
+
+    for my $i ( 1 .. $#{$pos} ) {
+        my $next = $markertype->{ $pos->[$i] };
+        my $distance = hamming( $this->{pattern}, $next->{pattern} );
+        if ( $distance > $length * 0.25 ) {
+            push @blocks, { start => $block_start, end => $pos->[ $i - 1 ] };
+            $block_start = $pos->[$i];
+        }
+        $this = $next;
+    }
+    push @blocks, { start => $block_start, end => $pos->[-1] };
+
+    @blocks;
+}
+
+sub hamming {
+    my ( $a, $b ) = @_;
+    my @a = split //, $a;
+    my @b = split //, $b;
+    my $distance = 0;
+    for my $i ( 0 .. length($a) - 1 ) {
+        $distance++ if $a[$i] ne '.' and $b[$i] ne '.' and $a[$i] ne $b[$i];
+    }
+    $distance;
+}
+
+sub get_sample_consensus {
+    my ( $marker, $sample, $pos, $block, $type, $genetics ) = @_;
+
+    my $sex = $genetics->{samplesex}{$sample};
+    my $hmm = $genetics->{hmm}{$type}{$sex};
+
+    my $seqblocks = get_sample_blocks( $marker, $sample, $pos, $block, $hmm );
+
+    if ( @{$seqblocks} <= 1 ) {
+        for my $p ( @{$pos} ) {
+            next if ( $p < $block->{start} or $block->{end} < $p );
+            $marker->{$p}{marker}{$sample}{cons} = $seqblocks->[0]{gt} // '.';
+        }
+        return;
     }
 
-    for my $b ( 0 .. $#blocks ) {
-        if (
-               @blocks >= 3
-            && $b >= 1
-            && $b <= $#blocks - 1
-            && $blocks[ $b - 1 ]{cons} eq $blocks[ $b + 1 ]{cons}
-            && $blocks[ $b - 1 ]{cons} ne $blocks[$b]{cons}
-            && (   ( ( max( @{ $blocks[$b]{pos} } ) - min( @{ $blocks[$b]{pos} } ) ) < ERRORBLOCK )
-                || ( @{ $blocks[$b]{pos} } <= ERRORSNPS ) )
-          )
-        {
-            for my $p ( @{ $blocks[$b]{pos} } ) {
-                $marker->{$p}{marker}{$sample}{corrected} =
-                  $blocks[ $b - 1 ]{cons};
+    # Get block for each position, or neighbouring blocks
+    my %posblocks;
+    for my $p ( @{$pos} ) {
+        next if $p < $block->{start} or $block->{end} < $p;
+        for my $i ( 0 .. $#{$seqblocks} ) {
+            if ( $p >= $seqblocks->[$i]{start} and $p <= $seqblocks->[$i]{end} ) {
+                $posblocks{$p}{block} = $i;
+                delete $posblocks{$p}{left} if defined $posblocks{$p}{left};
             }
-            $blocks[$b]{cons} = $blocks[ $b - 1 ]{cons};
-        }
-        else {
-            for my $p ( @{ $blocks[$b]{pos} } ) {
-                $marker->{$p}{marker}{$sample}{corrected} =
-                  $marker->{$p}{marker}{$sample}{cons};
+            else {
+                $posblocks{$p}{left} = $i if $p > $seqblocks->[$i]{end};
+                $posblocks{$p}{right} = $i
+                  if !defined( $posblocks{$p}{block} )
+                  and !defined( $posblocks{$p}{right} )
+                  and $p < $seqblocks->[$i]{start};
             }
         }
+    }
+
+    my $maxseq = get_max_seq($seqblocks);
+    my @maxgts = split //, $maxseq;
+
+    for my $p ( keys %posblocks ) {
+        $marker->{$p}{marker}{$sample}{cons} =
+            defined($posblocks{$p}{block}) ? $maxgts[ $posblocks{$p}{block} ]
+          : (defined($posblocks{$p}{left})
+          and defined($posblocks{$p}{right})
+          and $maxgts[ $posblocks{$p}{left} ] eq $maxgts[ $posblocks{$p}{right} ]) ? $maxgts[ $posblocks{$p}{left} ]
+          : '.';
     }
 }
 
-sub get_part {
-    my ( $pos, $agp ) = @_;
+sub get_max_seq {
+    my $seqblocks = shift;
 
-    map { return $_ if $pos >= $agp->{$_}{start} && $pos <= $agp->{$_}{end} } keys %{$agp};
+    my %gts;
+    map { $gts{ $_->{gt} } += $_->{length} } @{$seqblocks};
+    my ( $gtmax1, $gtmax2 ) = ( reverse sort { $gts{$a} <=> $gts{$b} } keys %gts )[ 0, 1 ];
+
+    my %stateseq;
+    for my $breakpoint ( 0 .. $#{$seqblocks} ) {
+        my $gt1    = $gtmax1;
+        my $gt2    = $gtmax2;
+        my $seq1   = "";
+        my $seq2   = "";
+        my $score1 = 0;
+        my $score2 = 0;
+        for my $i ( 0 .. $#{$seqblocks} ) {
+            if ( $i == $breakpoint ) {
+                $gt1 = $gtmax2;
+                $gt2 = $gtmax1;
+            }
+            $seq1 .= $gt1;
+            $seq2 .= $gt2;
+            $score1 += $seqblocks->[$i]{length} if $seqblocks->[$i]{gt} eq $gt1;
+            $score2 += $seqblocks->[$i]{length} if $seqblocks->[$i]{gt} eq $gt2;
+        }
+        $stateseq{$seq1} = $score1;
+        $stateseq{$seq2} = $score2;
+    }
+
+    my $maxseq = ( sort { $stateseq{$b} <=> $stateseq{$a} } keys %stateseq )[0];
+    return $maxseq;
 }
 
 sub get_sample_blocks {
-    my ( $marker, $sample, $pos, $maskcall, $masklen, $scf_agp ) = @_;
+    my ( $marker, $sample, $pos, $block, $hmm ) = @_;
 
-    @mask = ( (-1) x $masklen, 0, (1) x $masklen ) if ( !@mask );
-    my @called;
-    my $prevpos = -100;
-    foreach my $p ( @{$pos} ) {
-        my $mref = $marker->{$p}{marker}{$sample};
-
-        # Check if previous and current SNP are separated by a large gap
-        if ( $prevpos > -100
-            and ( get_part( $prevpos, $scf_agp ) != get_part( $p, $scf_agp ) or $p - $prevpos >= GAPSIZE ) )
-        {
-            $mref->{edge} = $masklen + 1;
+    my @seqblocks;
+    my $curgt = "";
+    for my $p ( @{$pos} ) {
+        next if ( $p < $block->{start} or $block->{end} < $p );
+        my $gt = $marker->{$p}{marker}{$sample}{gt};
+        next if $hmm->{initial}{$gt} == 0;
+        if ( $gt eq $curgt ) {
+            $seqblocks[-1]{end} = $p;
         }
-        next if !defined $mref->{gt} or $maskcall->{ $mref->{gt} } == 0;
+        else {
+            if ( $curgt ne "" ) {
+                $seqblocks[-1]{length} = $seqblocks[-1]{end} - $seqblocks[-1]{start} + 1;
+                pop @seqblocks if $seqblocks[-1]{length} < 100;
+            }
+            $curgt = $gt;
+            push @seqblocks, { gt => $curgt, start => $p, end => $p };
+        }
+    }
+    if (@seqblocks) {
+        $seqblocks[-1]{length} = $seqblocks[-1]{end} - $seqblocks[-1]{start} + 1;
+        pop @seqblocks if $seqblocks[-1]{length} < 100;
+    }
 
-        if (   $p - $prevpos > 100
-            || $mref->{gt} ne $marker->{$prevpos}{marker}{$sample}{gt} )
-        {
-            push @called, $p;
-            $prevpos = $p;
+    return \@seqblocks if @seqblocks == 0;
+    
+    my @cleanblocks;
+    push @cleanblocks, $seqblocks[0];
+    my $i = 0;
+    my $j = 1;
+    my %gtlens;
+    $gtlens{ $seqblocks[$i]{gt} } += $seqblocks[$i]{length};
+    while ( $j <= $#seqblocks ) {
+        $gtlens{ $seqblocks[$j]{gt} } += $seqblocks[$j]{length};
+        if ( $seqblocks[$i]{gt} eq $seqblocks[$j]{gt} ) {
+            $cleanblocks[-1]{end} = $seqblocks[$j]{end};
+            $cleanblocks[-1]{length} += $seqblocks[$j]{length};
+            $j++;
+        }
+        else {
+            $i = $j;
+            $j++;
+            push @cleanblocks, $seqblocks[$i];
+        }
+    }
+    \@cleanblocks;
+}
+
+sub get_sample_consensus_viterbi {
+    my ( $marker, $sample, $pos, $block, $type, $genetics ) = @_;
+    my $sex    = $genetics->{samplesex}{$sample};
+    my $hmm    = $genetics->{hmm}{$type}{$sex};
+    my @states = keys %{ $hmm->{initial} };
+
+    my @scores;
+    my @paths;
+
+    my $initgt = $marker->{ $block->{start} }{marker}{$sample}{gt};
+    my $t      = 0;
+    for my $state (@states) {
+        $scores[$t]{$state} = $hmm->{initial}{$state} * $hmm->{emit}{$state}{$initgt};
+        $paths[$t]{$state}  = $state;
+    }
+
+    for my $p ( @{$pos} ) {
+        next if ( $p <= $block->{start} or $block->{end} < $p );
+        $t++;
+        my $total_delta_prob = 0;                                    # For scaling
+        my $gt               = $marker->{$p}{marker}{$sample}{gt};
+
+        for my $j (@states) {
+            my $delta_prob_j = 0;
+            my $psi_prob_j   = 0;
+            my $psi_argmax_j = '';
+
+            for my $i (@states) {
+                my $psi_prob_ij = $scores[ $t - 1 ]{$i} * $hmm->{transition}{$i}{$j};
+                if ( $psi_prob_ij > $psi_prob_j ) {
+                    $psi_prob_j   = $psi_prob_ij;
+                    $psi_argmax_j = $i;
+                }
+
+                my $delta_prob_ij = $psi_prob_ij * $hmm->{emit}{$i}{$gt};
+                if ( $delta_prob_ij > $delta_prob_j ) {
+                    $delta_prob_j = $delta_prob_ij;
+                }
+                $total_delta_prob += $delta_prob_ij;
+            }
+            $scores[$t]{$j} = $delta_prob_j;
+            $paths[$t]{$j}  = $psi_argmax_j;
+        }
+
+        # Scale probabilities
+        map { $scores[$t]{$_} = $scores[$t]{$_} / $total_delta_prob } keys %{ $scores[$t] };
+    }
+    my $prob = 0;
+    my $qT   = "";
+    for my $i (@states) {
+        if ( $scores[-1]{$i} > $prob ) {
+            $prob = $scores[-1]{$i};
+            $qT   = $i;
         }
     }
 
-    foreach my $i ( $masklen .. $#called - $masklen ) {
+    $marker->{ $block->{end} }{marker}{$sample}{cons} = $qT;
 
-        my @maskcallpos = @called[ $i - $masklen .. $i + $masklen ];
-
-        my $edgesum = 0;
-
-        my $edge =
-          int sum map { $maskcall->{ $marker->{ $maskcallpos[$_] }{marker}{$sample}{gt} } * $mask[$_] } 0 .. $#mask;
-
-        $marker->{ $called[$i] }{marker}{$sample}{edge} = $edge
-          if !defined $marker->{ $called[$i] }{marker}{$sample}{edge}
-          or $edge > $marker->{ $called[$i] }{marker}{$sample}{edge};
+    my $qtplus1 = $qT;
+    $t = $#paths - 1;
+    for my $p ( reverse @{$pos} ) {
+        next if ( $p < $block->{start} or $block->{end} <= $p );
+        $marker->{$p}{marker}{$sample}{cons} = $paths[$t]{$qtplus1};
+        $qtplus1 = $paths[$t]{$qtplus1};
+        $t--;
     }
+
+    for my $p ( @{$pos} ) {
+        next if ( $p < $block->{start} or $block->{end} < $p );
+    }
+    return;
 }
 
 sub collapse {
     my ( $scfref, $samples ) = @_;
     foreach my $type ( keys %{$scfref} ) {
         foreach my $pos ( keys %{ $scfref->{$type} } ) {
-            my $gt = "";
-            my @gq;
-
-            my @edge;
-            my $cons      = "";
-            my $corrected = "";
+            my $gt   = "";
+            my $cons = "";
 
             foreach my $sample ( @{ $samples->{offspring}{order} } ) {
                 my $ref = $scfref->{$type}{$pos}{marker}{$sample};
 
                 $gt .= $ref->{gt} // '-';
-                push @gq, $ref->{gq};
 
                 if ( $type ne "Reject" ) {
-                    push @edge, defined $ref->{edge}
-                      && $ref->{edge} != 0 ? abs( $ref->{edge} ) : '.';
-                    $cons      .= $ref->{cons}      // '-';
-                    $corrected .= $ref->{corrected} // '-';
+                    $cons .= $ref->{cons} // '-';
                 }
             }
             delete $scfref->{$type}{$pos}{marker};
             $scfref->{$type}{$pos}{marker}{gt} = $gt;
-            $scfref->{$type}{$pos}{marker}{gq} = \@gq;
 
             if ( $type ne "Reject" ) {
-                $scfref->{$type}{$pos}{marker}{edge}      = \@edge;
-                $scfref->{$type}{$pos}{marker}{cons}      = $cons;
-                $scfref->{$type}{$pos}{marker}{corrected} = $corrected;
+                $scfref->{$type}{$pos}{marker}{cons} = $cons;
             }
         }
     }
@@ -846,17 +964,14 @@ sub output_markers_to_db {
         'INSERT INTO markers VALUES (?,?,?,?,
                                      ?,?,?,?,
                                      ?,?,?,?,
-                                     ?,?,?,?,?
+                                     ?,?,?
                                      )'
     );
 
     foreach my $type ( keys %{$data} ) {
         foreach my $pos ( keys %{ $data->{$type} } ) {
             my $stp = $data->{$type}{$pos};
-
-            $stp->{edge} = defined $stp->{marker}{edge} ? join '', @{ $stp->{marker}{edge} } : "";
-            $stp->{cons}      = $stp->{marker}{cons}      // "";
-            $stp->{corrected} = $stp->{marker}{corrected} // "";
+            $stp->{cons} = $stp->{marker}{cons} // "";
 
             if ( $type eq "Reject" ) {
                 $stp->{p}          = -1;
@@ -875,8 +990,7 @@ sub output_markers_to_db {
                 $stp->{mq},   $stp->{fs},
                 sprintf( "%4.2f", $stp->{p} ),          sprintf( "%4.2f", $stp->{rmsobs} ),
                 sprintf( "%4.2f", $stp->{rmspattern} ), $stp->{phase},
-                $stp->{marker}{gt}, $stp->{edge},
-                $stp->{cons},       $stp->{corrected},
+                $stp->{marker}{gt}, $stp->{cons},
                 $stp->{error}
             );
         }
@@ -888,7 +1002,7 @@ sub output_markers_to_db {
 sub output_blocks_to_db {
     my ( $scf, $data, $userdata, $scfl, $dbh ) = @_;
 
-    my @types = sort keys %{ $userdata->{genetics}{masks} };
+    my @types = sort keys %{ $userdata->{genetics}{hmm} };
 
     my $insert_statement = "INSERT INTO blocks VALUES (?,?,?,?";
     map { $insert_statement .= ',?' } @types;
@@ -901,9 +1015,8 @@ sub output_blocks_to_db {
         my $prevpos = 0;
         foreach my $pos ( sort { $a <=> $b } keys %{ $data->{$type} } ) {
             $scfpos{$pos}{types}{$type} =
-              $data->{$type}{$pos}{marker}{corrected};
+              $data->{$type}{$pos}{marker}{cons};
             $scfpos{$pos}{end} = $pos;
-
             if (   $prevpos eq 0
                 or $scfpos{$prevpos}{types}{$type} ne $scfpos{$pos}{types}{$type} )
             {
