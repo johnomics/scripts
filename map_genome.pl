@@ -16,6 +16,7 @@ use List::Util qw/min max/;
 $OUTPUT_AUTOFLUSH = 1;
 
 memoize "mirror";
+memoize "phase";
 
 my %mstheader = (
     population_type              => "RIL2",
@@ -43,11 +44,11 @@ my %chroms = (
     "AABBAABBABBBAAABBBBBBBBABAAABBAAABAAAAAAABBAAABAAAABAABBBBABABABAABBB" => "7",
     "AABBABBAABBBAAABAABABAAAAABBABBAAAABBABAABABABBBAABAABAAABABAAAAAAAAB" => "8",
     "AABBBABBABAABBABBABBBAABABBBABBABAAAAAABABABAAAAABBBBBAABBABBAABABBAA" => "9",
-    "ABAAABABAAAABAABBBABABABABBABABABBABABBBBABBABBBBBBBBABAAAAABBBABBBBB" => "10",
+    "BAHHBABHBBBHABBAABBABHBABAABABABAHBABAAAABAABAAAAAAAABHBBHBBHAABHBAAA" => "10",
     "ABAABBBABBAABAABBAAAAAABABBAABAAAAABBAAAAAAABABBABAAABBABAAAABABABBAB" => "11",
     "AAABBAABBBBABBBABABABBABBAAAAABAAABBABAABBBABAABAAABAAABBBBBBAABBBBAA" => "12",
     "ABAABBBBAAAABABAABBBAAAAAABBBBBBBBAAAAABAAABABABBBABABAABAAABBAABBBAA" => "13",
-    "AAABABBBABBAABBABABABBBAAAABBAAAAABBAABBAAABAABBBBBAABBABBAABBAABBAAB" => "14",
+    "AAABAHHBABHBAHHABBHHBBHAAAABBABBAHBBAAHBAAHBAHBBBHBAABHABBHBBBAABHAHB" => "14",
     "ABBBBBABBAAAABBBBBBABBABBBAAABAABBABAAAAAAAABBABAABABBABBAAAAABAABBAA" => "15",
     "ABBAABBABBBABBBBBBAAAABABBAAABBBBAABABAABBAAABAAABBBBBBBBBABBBAAABABB" => "16",
     "ABBBAABAABBABAABABABABBAABAABBABBAABBAAAABAAABBBAAAABAABBBAAABBBAABAB" => "17",
@@ -68,10 +69,10 @@ my $options_okay =
 my $metadata = { verbose => $args{verbose} };
 
 print STDERR "INFER MARKERS\n";
-my ( $blocklist, $matpat, $pattern_block ) = infer_markers( $args{input}, $metadata );
+my ( $blocklist, $linkage_groups, $marker_blocks ) = infer_markers( $args{input}, $metadata );
 
 print STDERR "MAKING LINKAGE MAPS\n";
-my ( $scfmap, $genome, $markerscf ) = make_linkage_maps( $blocklist, $args{output}, $matpat, $pattern_block );
+my ( $scfmap, $genome, $markerscf ) = make_linkage_maps( $blocklist, $args{output}, $linkage_groups, $marker_blocks );
 
 print STDERR "MAPPING GENOME\n";
 map_genome( $blocklist, $scfmap, $genome, $markerscf, $args{output} );
@@ -92,15 +93,15 @@ sub infer_markers {
 
     collapse( $blocklist, $metadata );
 
-    my ( $matpat, $patmat, $pattern_block ) = combine_maternal_and_paternal_patterns( $blocklist, $metadata );
+    my ( $linkage_groups, $patmat, $pattern_blocks ) = build_linkage_groups( $blocklist, $metadata );
 
-#    print STDERR "Processing Intercross patterns...\n";
-#    clean_intercross_patterns( $matpat, $patmat, $pattern_block, $metadata );
+    #    print STDERR "Processing Intercross patterns...\n";
+    #    clean_intercross_patterns( $matpat, $patmat, $pattern_block, $metadata );
 
     print STDERR "Writing clean blocks...\n";
     output_blocks( $input, $blocklist );
 
-    ( $blocklist, $matpat, $pattern_block );
+    ( $blocklist, $linkage_groups, $pattern_blocks );
 }
 
 sub load_blocks {
@@ -110,19 +111,22 @@ sub load_blocks {
     my $header;
     my $types;
 
+    print STDERR "Load blocks from database...\n" if $metadata->{verbose};
     my @inputfiles = split ',', $input;
     for my $inputfile (@inputfiles) {
         my $dbh = DBI->connect( "dbi:SQLite:dbname=$inputfile", "", "" );
 
         ( $header, $types ) = get_header_types($dbh);
 
-        my $sth = $dbh->prepare_cached("SELECT * FROM blocks");
+        my $sth = $dbh->prepare("SELECT * FROM blocks");
         my $fileblocklist = $dbh->selectall_arrayref( $sth, { Slice => {} } );
         push @{$blocklist}, @{$fileblocklist};
         $sth->finish;
 
         $dbh->disconnect;
     }
+
+    print STDERR "Phasing blocks...\n" if $metadata->{verbose};
 
     # Make empty pattern
     my $empty;
@@ -160,11 +164,247 @@ sub convert_sex {
     $pat;
 }
 
+sub correct_maternal {
+    my ( $maternal_type, $blocklist, $metadata ) = @_;
+
+    my $empty = ' ' x $metadata->{samples};
+
+    fill_maternal( $blocklist, $metadata );
+    update_block_stats( "After first maternal fill", $blocklist, $metadata );
+
+    my ( $maternal, $maternal_patterns ) = get_type_blocks( $maternal_type, $blocklist, $metadata );
+
+    my %merged;
+    for my $a ( @{$maternal_patterns} ) {
+        next if defined( $merged{$a} ) or $a eq $empty or $a =~ /\-/;
+        for my $b ( @{$maternal_patterns} ) {
+            next
+              if $b eq $empty
+              or defined( $merged{$b} )
+              or $a eq $b
+              or $maternal->{$a}{length} < $maternal->{$b}{length};
+
+            if ( hamming( $a, $b ) <= 6 or hamming( mirror($a), $b ) <= 6 ) {
+                $merged{$b} = $a;
+                for my $i ( @{ $maternal->{$b}{blocks} } ) {
+                    $blocklist->[$i]{$maternal_type} = $a;
+                }
+            }
+        }
+    }
+
+    ( $maternal, $maternal_patterns ) = get_type_blocks( $maternal_type, $blocklist, $metadata );
+
+    for my $a ( @{$maternal_patterns} ) {
+        if ( $maternal->{$a}{length} < 10000 ) {
+            for my $i ( @{ $maternal->{$a}{blocks} } ) {
+                $blocklist->[$i]{$maternal_type} = $empty;
+            }
+        }
+    }
+
+    update_block_stats( "After correcting maternal patterns", $blocklist, $metadata );
+
+    fill_maternal( $blocklist, $metadata );
+    update_block_stats( "After second maternal fill", $blocklist, $metadata );
+
+    ( $maternal, $maternal_patterns ) = get_type_blocks( $maternal_type, $blocklist, $metadata );
+
+    infer_intercross_maternal( $maternal, $maternal_patterns, $blocklist, $metadata );
+
+    update_block_stats( "After inferring intercross maternal patterns", $blocklist, $metadata );
+
+    return;
+}
+
+sub infer_intercross_maternal {
+    my ( $maternal, $maternal_patterns, $blocklist, $metadata ) = @_;
+
+    my $empty = ' ' x $metadata->{samples};
+
+    my ( $intercross_blocks, $intercross_patterns ) = get_type_blocks( "Intercross", $blocklist, $metadata );
+
+    my %maternal_candidates;
+    for my $intercross ( @{$intercross_patterns} ) {
+        next if $intercross eq $empty;
+
+        # Check to see if Maternal patterns are empty for this Intercross pattern and skip if not
+        my %maternal_filled;
+        for my $block ( @{ $intercross_blocks->{$intercross}{blocks} } ) {
+            if ( $blocklist->[$block]{"Maternal-AHAH"} ne $empty ) {
+                $maternal_filled{ $blocklist->[$block]{"Maternal-AHAH"} }++;
+            }
+        }
+        next if ( keys %maternal_filled );
+
+        # Get any matching Maternal patterns for this Intercross marker
+        my @matching_maternal;
+        for my $maternal ( @{$maternal_patterns} ) {
+            next if $maternal eq $empty;
+            if ( int_hamming( $intercross, $maternal ) <= 6 or int_hamming( mirror($intercross), $maternal ) <= 6 ) {
+                push @matching_maternal, $maternal;
+            }
+        }
+
+        # If only one Maternal pattern found, set Intercross blocks to this Maternal pattern
+        if ( @matching_maternal == 1 ) {
+            for my $block ( @{ $intercross_blocks->{$intercross}{blocks} } ) {
+                next if $blocklist->[$block]{"Maternal-AHAH"} ne $empty;
+                $blocklist->[$block]{"Maternal-AHAH"} = $matching_maternal[0];
+            }
+        }
+
+        # If no Maternal patterns found, they need to be inferred from the Intercross pattern
+        elsif ( @matching_maternal == 0 ) {
+            push @{ $maternal_candidates{$intercross}{patterns} }, $intercross;
+            $maternal_candidates{$intercross}{length} = $intercross_blocks->{$intercross}{length};
+        }
+        else {
+            # More than one matching Maternal pattern found
+        }
+    }
+
+    update_block_stats( "After matching intercross to existing maternals", $blocklist, $metadata );
+
+    my $merged = merge_maternal_candidates( \%maternal_candidates );
+
+    # Update maternal patterns for inferred intercross chromosomes
+    for my $m ( keys %{$merged} ) {
+        for my $i ( @{ $merged->{$m}{patterns} } ) {
+            my $pattern = $i->{original};
+            for my $block ( @{ $intercross_blocks->{$pattern}{blocks} } ) {
+                next if $blocklist->[$block]{"Maternal-AHAH"} ne $empty;
+                $blocklist->[$block]{"Maternal-AHAH"} = $m;
+            }
+        }
+    }
+
+    return;
+}
+
+sub merge_maternal_candidates {
+    my ($candidates) = @_;
+
+    my @candidates = sort { $candidates->{$b}{length} <=> $candidates->{$a}{length} }
+      keys %{$candidates};
+
+    my $longest_candidate = shift @candidates;
+    my %merged            = (
+        $longest_candidate => {
+            patterns => [
+                {
+                    pattern  => $longest_candidate,
+                    original => $longest_candidate,
+                    length   => $candidates->{$longest_candidate}{length}
+                }
+            ],
+            length => $candidates->{$longest_candidate}{length}
+        }
+    );
+
+    for my $c (@candidates) {
+        my $patterns = @{ $candidates->{$c}{patterns} };
+
+        my $update_pattern = $c;
+        my $out_c          = $c;
+
+        my @merged = sort { $merged{$b}{length} <=> $merged{$a}{length} } keys %merged;
+        for my $m (@merged) {
+            my $new_pattern = "";
+            if ( int_hamming( $c, $m ) <= 6 ) {
+                $new_pattern = get_intercross_consensus( $c, $candidates->{$c}{length}, $merged{$m}{patterns} );
+            }
+
+            if ( int_hamming( mirror($c), $m ) <= 6 ) {
+                $new_pattern = get_intercross_consensus( mirror($c), $candidates->{$c}{length}, $merged{$m}{patterns} );
+                $out_c = mirror($c);
+            }
+
+            # Update merged pattern
+            if ( $new_pattern ne "" ) {
+                $update_pattern = $new_pattern;
+                if ( $m ne $update_pattern ) {
+                    push @{ $merged{$update_pattern}{patterns} }, @{ $merged{$m}{patterns} };
+                    $merged{$update_pattern}{length} +=
+                      $merged{$m}{length};
+                    delete $merged{$m};
+                }
+                last;
+            }
+        }
+
+        # Add candidate to merged patterns
+        push @{ $merged{$update_pattern}{patterns} },
+          { original => $c, pattern => $out_c, length => $candidates->{$c}{length} };
+        $merged{$update_pattern}{length} += $candidates->{$c}{length};
+        $patterns = @{ $merged{$update_pattern}{patterns} };
+    }
+    \%merged;
+}
+
+sub get_intercross_consensus {
+    my ( $c, $c_length, $merged ) = @_;
+    my $cm = { pattern => $c, length => $c_length };
+    my @consensus_calls;
+
+    for my $m ( $cm, @{$merged} ) {
+        my @m = split //, $m->{pattern};
+        for my $i ( 0 .. $#m ) {
+            $consensus_calls[$i]{ $m[$i] } += $m->{length};
+        }
+    }
+
+    my $consensus = "";
+    for my $con (@consensus_calls) {
+        if ( keys %{$con} == 1 ) {
+            $consensus .= ( keys %{$con} )[0];
+        }
+        else {
+            map { $con->{$_} = 0 if !defined $con->{$_} } ( 'A', 'B', 'H' );
+            my $max = ( $con->{'A'} > $con->{'B'} ) ? 'A' : 'B';
+            $consensus .= ( $con->{$max} > ( $con->{'H'} * 0.1 ) ) ? $max : 'H';
+        }
+    }
+    $consensus;
+}
+
+sub get_type_blocks {
+    my ( $typename, $blocklist, $metadata ) = @_;
+
+    my @types;
+    for my $type ( keys %{ $metadata->{types} } ) {
+        push @types, $type if $type =~ /$typename/;
+    }
+    my %type_blocks;
+    for my $i ( 0 .. $#{$blocklist} ) {
+        for my $type (@types) {
+            my $block = $blocklist->[$i];
+            $type_blocks{ $block->{$type} }{type} = $type;
+            $type_blocks{ $block->{$type} }{length} += $block->{length};
+            push @{ $type_blocks{ $block->{$type} }{blocks} }, $i;
+        }
+    }
+
+    my @type_patterns = sort { $type_blocks{$b}{length} <=> $type_blocks{$a}{length} } keys %type_blocks;
+
+    ( \%type_blocks, \@type_patterns );
+}
+
+sub fill_maternal {
+    my ( $blocklist, $metadata ) = @_;
+
+    for my $type ( keys %{ $metadata->{types} } ) {
+        next if $type eq "Maternal-AHAH";
+        fill_type_pair( $type, "Maternal-AHAH", $blocklist, $metadata );
+    }
+    return;
+}
+
 sub fill_blocks {
     my ( $blocklist, $metadata ) = @_;
 
     # Get all Paternal and Intercross types
-    my %ordertypes = ( "Paternal" => '', "Intercross" => '' );
+    my %ordertypes = ( "Intercross" => '' );
 
     my @ordering;
     for my $type ( keys %{ $metadata->{types} } ) {
@@ -176,30 +416,27 @@ sub fill_blocks {
             push @ordering, $type;
         }
     }
+    push @ordering, "Paternal-AHAH";
+    my %done;
+    for my $a (@ordering) {
+        for my $b (@ordering) {
+            next if $a eq $b;
+            next if defined $done{$a}{$b};
+            fill_type_pair( $a, $b, $blocklist, $metadata );
+            $done{$a}{$b}++;
+            fill_type_pair( $b, $a, $blocklist, $metadata );
+            $done{$b}{$a}++;
 
-    fill_type_pair( "Intercross-ABHABH_HHA",  "Intercross-ABHABH_HHH",  $blocklist, $metadata );
-    fill_type_pair( "Intercross-ABHABH_HHH",  "Intercross-ABHABH_HHA",  $blocklist, $metadata );
-    fill_type_pair( "Intercross-A2BHABH_HHA", "Intercross-A2BHABH_HHH", $blocklist, $metadata );
-    fill_type_pair( "Intercross-A2BHABH_HHH", "Intercross-A2BHABH_HHA", $blocklist, $metadata );
-    fill_type_pair( "Intercross-ABHABH_HHA",  "Paternal-AHAH",          $blocklist, $metadata );
-    fill_type_pair( "Intercross-ABHABH_HHH",  "Paternal-AHAH",          $blocklist, $metadata );
-    fill_type_pair( "Paternal-AHAH",          "Intercross-ABHABH_HHA",  $blocklist, $metadata );
-    fill_type_pair( "Paternal-AHAH",          "Intercross-ABHABH_HHH",  $blocklist, $metadata );
-    fill_type_pair( "Intercross-A2BHABH_HHA", "Paternal-AHAH",          $blocklist, $metadata );
-    fill_type_pair( "Intercross-A2BHABH_HHH", "Paternal-AHAH",          $blocklist, $metadata );
-    fill_type_pair( "Paternal-AHAH",          "Intercross-A2BHABH_HHA", $blocklist, $metadata );
-    fill_type_pair( "Paternal-AHAH",          "Intercross-A2BHABH_HHH", $blocklist, $metadata );
-    fill_type_pair( "Maternal-ABHABH",        "Maternal-AHAH",          $blocklist, $metadata );
-    fill_type_pair( "Intercross-ABHABH_HHA",  "Maternal-AHAH",          $blocklist, $metadata );
-    fill_type_pair( "Intercross-ABHABH_HHH",  "Maternal-AHAH",          $blocklist, $metadata );
-    fill_type_pair( "Intercross-A2BHABH_HHA", "Maternal-AHAH",          $blocklist, $metadata );
-    fill_type_pair( "Intercross-A2BHABH_HHH", "Maternal-AHAH",          $blocklist, $metadata );
-    fill_type_pair( "Paternal-AHAH",          "Maternal-AHAH",          $blocklist, $metadata );
-    fill_type_pair( "Paternal-AHAB_AHB",      "Paternal-AHAB_AHA",      $blocklist, $metadata );
-    fill_type_pair( "Paternal-AHAB_AHA",      "Paternal-AHAB_AHB",      $blocklist, $metadata );
-    fill_type_pair( "Paternal-AHAB_AHB",      "Sex-HB",                 $blocklist, $metadata );
-    fill_type_pair( "Paternal-AHAB_AHA",      "Sex-HB",                 $blocklist, $metadata );
-    
+        }
+    }
+
+    fill_type_pair( "Paternal-AHAB_AHB", "Paternal-AHAB_AHA", $blocklist, $metadata );
+    fill_type_pair( "Paternal-AHAB_AHA", "Paternal-AHAB_AHB", $blocklist, $metadata );
+    fill_type_pair( "Paternal-AHAB_AHB", "Sex-HB",            $blocklist, $metadata );
+    fill_type_pair( "Paternal-AHAB_AHA", "Sex-HB",            $blocklist, $metadata );
+
+    update_block_stats( "After filling blocks", $blocklist, $metadata );
+
     return;
 }
 
@@ -216,128 +453,41 @@ sub fill_type_pair {
         push @{ $ab{ $blocklist->[$b]{$typea} }{ $blocklist->[$b]{$typeb} }{blocks} }, $b;
     }
 
-    for my $apat ( keys %ab ) {
+    for my $a ( keys %ab ) {
 
-        next if $apat eq $empty;
-        next if $apat =~ /\-/;
-        next if keys %{ $ab{$apat} } == 1;
+        next if $a eq $empty or $a =~ /\-/ or keys %{ $ab{$a} } == 1;
 
         # Find type b pattern most found with this type a pattern
-        my $maxbpat    = "";
-        my $maxblength = 0;
-        for my $bpat ( keys %{ $ab{$apat} } ) {
-            if ( $ab{$apat}{$bpat}{length} > $maxblength ) {
-                $maxbpat    = $bpat;
-                $maxblength = $ab{$apat}{$bpat}{length};
+        my $maxb        = "";
+        my $maxb_length = 0;
+        for my $b ( keys %{ $ab{$a} } ) {
+            if ( $ab{$a}{$b}{length} > $maxb_length ) {
+                $maxb        = $b;
+                $maxb_length = $ab{$a}{$b}{length};
             }
         }
-        next if $maxbpat eq $empty;
-        next if $maxbpat =~ /\-/;
+        next if $maxb eq $empty;
+        next if $maxb =~ /\-/;
 
         # Correct all b patterns associated with this a pattern
         # to the most often found b pattern,
         # assuming the distance between patterns is less than 6bp
-        for my $bpat ( keys %{ $ab{$apat} } ) {
-            next if $bpat eq $maxbpat;
+        for my $b ( keys %{ $ab{$a} } ) {
+            next if $b eq $maxb;
 
             my $fix = 0;
-            $fix = 1 if $bpat eq $empty;
-            $fix = 1 if hamming( $maxbpat, $bpat ) <= 6;
-            $fix = 1 if hamming( mirror($maxbpat), $bpat ) <= 6;
+            $fix = 1 if $b eq $empty;
+            $fix = 1 if hamming( $maxb, $b ) <= 6;
+            $fix = 1 if hamming( mirror($maxb), $b ) <= 6;
 
             if ($fix) {
-                for my $b ( @{ $ab{$apat}{$bpat}{blocks} } ) {
-                    $blocklist->[$b]{$typeb} = $maxbpat;
+                for my $i ( @{ $ab{$a}{$b}{blocks} } ) {
+                    $blocklist->[$i]{$typeb} = $maxb;
                 }
             }
         }
     }
 
-    update_block_stats( "After fill $typea\-\>$typeb", $blocklist, $metadata );
-    
-    return;
-}
-
-sub correct_maternal {
-    my ( $mattype, $blocklist, $metadata ) = @_;
-
-    my $empty = ' ' x $metadata->{samples};
-
-    fix_maternal_errors( $mattype, $blocklist, $metadata );
-
-    # Extract maternal patterns and calculate lengths covered
-    my %mat;
-    for my $i ( 0 .. $#{$blocklist} ) {
-        $mat{ $blocklist->[$i]{$mattype} }{length} +=
-          $blocklist->[$i]{'length'};
-        push @{ $mat{ $blocklist->[$i]{$mattype} }{blocks} }, $i;
-    }
-
-    my @matl = sort { $mat{$b}{length} <=> $mat{$a}{length} } keys %mat;
-    my %merged;
-    for my $mata (@matl) {
-        next if defined $merged{$mata};
-        next if $mata eq $empty;
-        next if $mata =~ /\-/;
-        for my $matb (@matl) {
-            next if $matb eq $empty;
-            next if defined $merged{$matb};
-            next if $mata eq $matb;
-            next if $mat{$mata}{length} < $mat{$matb}{length};
-            my $fix = 0;
-            $fix = 1 if hamming( $mata,         $matb ) <= 6;
-            $fix = 1 if hamming( mirror($mata), $matb ) <= 6;
-
-            if ($fix) {
-                $merged{$matb} = $mata;
-                for my $b ( @{ $mat{$matb}{blocks} } ) {
-                    $blocklist->[$b]{$mattype} = $mata;
-                }
-            }
-        }
-    }
-
-    update_block_stats( "After correcting maternal patterns", $blocklist, $metadata );
-    
-    return;
-}
-
-sub fix_maternal_errors {
-    my ( $mattype, $blocklist, $metadata ) = @_;
-
-    my $empty = ' ' x $metadata->{samples};
-
-    # Extract just maternal patterns from blocks and index by scaffold and start position
-    my %mat;
-    for my $i ( 0 .. $#{$blocklist} ) {
-        next if $blocklist->[$i]{$mattype} eq $empty;
-        $mat{ $blocklist->[$i]{'scaffold'} }{ $blocklist->[$i]{'start'} }{pattern} = $blocklist->[$i]{$mattype};
-        $mat{ $blocklist->[$i]{'scaffold'} }{ $blocklist->[$i]{'start'} }{block}   = $i;
-    }
-
-    # Correct changes in maternal patterns
-    for my $scf ( keys %mat ) {
-        next if keys %{ $mat{$scf} } < 3;
-        my @starts = sort { $a <=> $b } keys %{ $mat{$scf} };
-        for my $i ( 1 .. $#starts - 1 ) {
-            next if $mat{$scf}{ $starts[ $i - 1 ] }{pattern} eq $mat{$scf}{ $starts[$i] }{pattern};
-            next if $mat{$scf}{ $starts[ $i - 1 ] }{pattern} ne $mat{$scf}{ $starts[ $i + 1 ] }{pattern};
-            my @prev = split //, $mat{$scf}{ $starts[ $i - 1 ] }{pattern};
-            my @cur  = split //, $mat{$scf}{ $starts[$i] }{pattern};
-            my @next = split //, $mat{$scf}{ $starts[ $i + 1 ] }{pattern};
-            for my $c ( 0 .. $#prev ) {
-                $cur[$c] = $prev[$c]
-                  if $prev[$c] =~ /[ABH]/
-                  && $prev[$c] eq $next[$c]
-                  && $cur[$c] ne $prev[$c];
-            }
-            my $newcur = join '', @cur;
-            $blocklist->[ $mat{$scf}{ $starts[$i] }{block} ]{$mattype} =
-              $newcur;
-            $mat{$scf}{ $starts[$i] }{pattern} = $newcur;
-        }
-    }
-    
     return;
 }
 
@@ -367,17 +517,18 @@ sub collapse {
     }
 
     update_block_stats( "After collapse", $blocklist, $metadata );
-    
+
     return;
 }
 
-sub combine_maternal_and_paternal_patterns {
+sub build_linkage_groups {
     my ( $blocklist, $metadata ) = @_;
 
-    my %matpat;
+    my %linkage_groups;
     my %patmat;
-    my %pattern_block;
+    my %pattern_blocks;
     my $sexmat;
+
     my $empty = ' ' x $metadata->{samples};
     for my $block ( @{$blocklist} ) {
 
@@ -398,7 +549,7 @@ sub combine_maternal_and_paternal_patterns {
         # try to convert intercross patterns to paternal
         next if ( $mat =~ /\-/ );
         if ( $pat =~ /^( +)$/ ) {
-            ( $mat, $pat ) = convert_intercross_block($block);
+            ( $mat, $pat ) = convert_intercross_block( $block, $metadata );
         }
         next if $mat =~ /[ \-]/;
         next if $pat =~ /[ \-]/;
@@ -408,40 +559,45 @@ sub combine_maternal_and_paternal_patterns {
           if ( $block->{'Maternal-AHAH'} eq $empty );
         $block->{'Paternal-AHAH'} = $pat
           if ( $block->{'Paternal-AHAH'} eq $empty );
-        $matpat{$mat}{$pat}{length} += $block->{'length'};
-        $matpat{$mat}{$pat}{blocks}++;
+        $linkage_groups{$mat}{$pat}{length} += $block->{'length'};
+        $linkage_groups{$mat}{$pat}{blocks}++;
         $patmat{$pat}{$mat}{length} += $block->{'length'};
         $patmat{$pat}{$mat}{blocks}++;
-        $pattern_block{$pat}{ $block->{'scaffold'} }{ $block->{'start'} } =
+        $pattern_blocks{$pat}{ $block->{'scaffold'} }{ $block->{'start'} } =
           $block->{'end'};
     }
 
-    for my $mat ( keys %matpat ) {
+    for my $mat ( keys %linkage_groups ) {
         if ( $mat =~ /^(S+)$/ ) {
-            for my $sexpat ( keys %{ $matpat{$mat} } ) {
+            for my $sexpat ( keys %{ $linkage_groups{$mat} } ) {
                 $patmat{$sexpat}{$sexmat}{length} +=
                   $patmat{$sexpat}{$mat}{length};
                 $patmat{$sexpat}{$sexmat}{blocks} +=
                   $patmat{$sexpat}{$mat}{blocks};
                 delete $patmat{$sexpat}{$mat};
-                $matpat{$sexmat}{$sexpat}{length} +=
-                  $matpat{$mat}{$sexpat}{length};
-                $matpat{$sexmat}{$sexpat}{blocks} +=
-                  $matpat{$mat}{$sexpat}{blocks};
+                $linkage_groups{$sexmat}{$sexpat}{length} +=
+                  $linkage_groups{$mat}{$sexpat}{length};
+                $linkage_groups{$sexmat}{$sexpat}{blocks} +=
+                  $linkage_groups{$mat}{$sexpat}{blocks};
             }
-            delete $matpat{$mat};
+            delete $linkage_groups{$mat};
         }
     }
 
     update_block_stats( "After filling maternal and paternal patterns", $blocklist, $metadata );
 
-    ( \%matpat, \%patmat, \%pattern_block );
+    ( \%linkage_groups, \%patmat, \%pattern_blocks );
 }
 
 sub convert_intercross_block {
-    my ($block) = @_;
+    my ( $block, $metadata ) = @_;
 
-    for my $ic ( "Intercross-ABHABH_HHA", "Intercross-ABHABH_HHH" ) {
+    my @intercross_types;
+    for my $type ( keys %{ $metadata->{types} } ) {
+        push @intercross_types, $type if $type =~ /Intercross/;
+    }
+
+    for my $ic (@intercross_types) {
         next if $block->{$ic} =~ /[ \-]/;
         my $mat = $block->{'Maternal-AHAH'};
         if ( $mat =~ /^( +)$/ ) {
@@ -450,7 +606,7 @@ sub convert_intercross_block {
         my $pat = convert_intercross( $mat, $block->{$ic} );
         return ( $mat, $pat );
     }
-    
+
     ( " ", " " );
 }
 
@@ -478,13 +634,14 @@ sub clean_intercross_patterns {
 
     for my $int ( sort { $int_lengths{$a} <=> $int_lengths{$b} } keys %int_lengths ) {
         my $imat         = "I" x length $int;
-        my @i            = split //, $int;
         my $int_pmatched = 0;
         for my $pat (@pat) {
-            if ( int_match( \@i, $pat ) ) {
+            if ( int_match( $int, $pat ) ) {
                 $int_pmatched++;
-                my $pmat =
-                  ( sort { $patmat->{$pat}{$b}{length} <=> $patmat->{$pat}{$a}{length} } keys %{ $patmat->{$pat} } )[0];
+                my $pmat = (
+                    sort { $patmat->{$pat}{$b}{length} <=> $patmat->{$pat}{$a}{length} }
+                      keys %{ $patmat->{$pat} }
+                )[0];
                 $patmat->{$int}{$pmat}{length} = $patmat->{$int}{$imat}{length};
                 $patmat->{$int}{$pmat}{blocks} = $patmat->{$int}{$imat}{blocks};
                 delete $patmat->{$int}{$imat};
@@ -498,30 +655,31 @@ sub clean_intercross_patterns {
         if ( !$int_pmatched ) {
             my $minh     = 2;
             my $minh_mat = $empty;
-#            for my $mat ( keys %{$matpat} ) {
-#                if ( int_match( \@i, $mat ) ) {
-#                    $minh     = 0;
-#                    $minh_mat = $mat;
-#                    last;
-#                }
 
-#                my $forh = int_hamming( \@i, $mat );
-#                my $revh = int_hamming( \@i, mirror($mat) );
-#                my $math = $forh < $revh ? $forh : $revh;
-#                if ( $math < $minh ) {
-#                    $minh     = $math;
-#                    $minh_mat = $mat;
-#                }
-#            }
+            #            for my $mat ( keys %{$matpat} ) {
+            #                if ( int_match( $int, $mat ) ) {
+            #                    $minh     = 0;
+            #                    $minh_mat = $mat;
+            #                    last;
+            #                }
 
-#            print "$int\t$int_lengths{$int}\t$minh";
-#            if ( defined $chroms{$minh_mat} ) {
-#                print "\t$chroms{$minh_mat}";
-#            }
-#            else {
-#                print "\t-";
-#            }
-#            print "\n";
+            #                my $forh = int_hamming( $int, $mat );
+            #                my $revh = int_hamming( $int, mirror($mat) );
+            #                my $math = $forh < $revh ? $forh : $revh;
+            #                if ( $math < $minh ) {
+            #                    $minh     = $math;
+            #                    $minh_mat = $mat;
+            #                }
+            #            }
+
+            #            print "$int\t$int_lengths{$int}\t$minh";
+            #            if ( defined $chroms{$minh_mat} ) {
+            #                print "\t$chroms{$minh_mat}";
+            #            }
+            #            else {
+            #                print "\t-";
+            #            }
+            #            print "\n";
             if ( $minh_mat ne $empty ) {
                 $patmat->{$int}{$minh_mat}{length} = $patmat->{$int}{$imat}{length};
                 $patmat->{$int}{$minh_mat}{blocks} = $patmat->{$int}{$imat}{blocks};
@@ -542,12 +700,13 @@ sub int_hamming {
     # Calculate hamming distance between intercross and paternal pattern
     my ( $int, $pat ) = @_;
     my $hamming = 0;
-    my @p = split //, $pat;
-    for my $b ( 0 .. $#{$int} ) {
-        next if $int->[$b] eq 'H' or $int->[$b] eq '-';
-        $hamming++ if $int->[$b] ne $p[$b];
+    my @i       = split //, $int;
+    my @p       = split //, $pat;
+    for my $b ( 0 .. $#i ) {
+        next if $i[$b] eq 'H' or $i[$b] eq '-' or $p[$b] eq 'H' or $p[$b] eq '-';
+        $hamming++ if $i[$b] ne $p[$b];
     }
-    
+
     $hamming;
 }
 
@@ -555,14 +714,15 @@ sub int_match {
 
     # Check for complete match between intercross and other pattern,
     # ignoring missing bases in intercross pattern
-    my ( $inta, $pat ) = @_;
-    my @p = split //, $pat;
+    my ( $intercross, $pattern ) = @_;
+    my @i = split //, $intercross;
+    my @p = split //, $pattern;
     my $match = 1;
-    for my $a ( 0 .. $#{$inta} ) {
-        next if $inta->[$a] eq 'H' or $inta->[$a] eq '-';
-        if ( $inta->[$a] ne $p[$a] ) { $match = 0; last; }
+    for my $a ( 0 .. $#i ) {
+        next if $i[$a] =~ /[H\-]/ or $p[$a] =~ /[H\-]/;
+        if ( $i[$a] ne $p[$a] ) { $match = 0; last; }
     }
-    
+
     $match;
 }
 
@@ -598,7 +758,7 @@ sub output_blocks {
     }
     $dbh->commit;
     $dbh->disconnect;
-    
+
     return;
 }
 
@@ -614,7 +774,8 @@ sub make_linkage_maps {
 
         my $paternal_patterns = keys %{ $matpat->{$mat} };
         my $chromosome = $chroms{$mat} // '-';
-        print "Building map for maternal pattern $mat chromosome $chromosome with $paternal_patterns paternal patterns";
+        printf STDERR "Building map for maternal pattern $mat chromosome %3s with %4d paternal patterns",
+          $chromosome, $paternal_patterns;
 
         # Delete paternal patterns less than 1kb long or occurring in only 1 or 2 blocks
         for my $pat ( keys %{ $matpat->{$mat} } ) {
@@ -625,7 +786,7 @@ sub make_linkage_maps {
 
         # Skip maternal pattern if no paternal patterns left
         if ( keys %{ $matpat->{$mat} } == 0 ) {
-            print "\tNo paternal patterns with more than 2 blocks or longer than 1 kb: skipping\n";
+            print STDERR "\tSkipping\n";
             next;
         }
 
@@ -634,7 +795,7 @@ sub make_linkage_maps {
         $genome{$mat} = load_map( $output, $mat );
 
         my $linkage_groups = keys %{ $genome{$mat} };
-        print "\tBuilt $linkage_groups linkage groups";
+        print STDERR "\tBuilt $linkage_groups linkage groups";
 
         # If more than one linkage map returned for this chromosome,
         # attempt to rephase markers and remake the map
@@ -653,10 +814,10 @@ sub make_linkage_maps {
             $markercode = run_mstmap( $mat, \%phased, $output );
             $genome{$mat} = load_map( $output, $mat );
             my $linkage_groups = keys %{ $genome{$mat} };
-            print "\tAfter phasing, have $linkage_groups linkage groups";
+            print STDERR "\tAfter phasing, have $linkage_groups linkage groups";
         }
 
-        print "\n";
+        print STDERR "\n";
 
         # Assign scaffolds to map position
         for my $lg ( sort keys %{ $genome{$mat} } ) {
@@ -718,7 +879,7 @@ sub load_map {
     # Delete linkage groups with a single marker
     map { delete $lg{$_} if keys %{ $lg{$_} } == 1 } keys %lg;
     close $mstout;
-    
+
     \%lg;
 }
 
@@ -774,7 +935,7 @@ sub check_mirror {
     my @markerlist = keys %{$markers};
     my $markerh    = sum_hamming( $marker, \@markerlist );
     my $mirrorh    = sum_hamming( $mirror, \@markerlist );
-    
+
     $markerh < $mirrorh ? $marker : $mirror;
 }
 
@@ -785,7 +946,7 @@ sub sum_hamming {
         next if $l eq $marker;
         $h += hamming( $l, $marker );
     }
-    
+
     $h;
 }
 
@@ -800,7 +961,7 @@ sub output_marker {
     $marker_lookup->{$id}{out}  = $outmarker;
     $marker_lookup->{$id}{orig} = $origmarker;
     $id++;
-    
+
     $id;
 }
 
@@ -1026,7 +1187,7 @@ sub order_scfs {
     push @ordered_scfs, $first if $first ne "";
     map { push @ordered_scfs, $_ if ( ( $_ ne $first ) and ( $_ ne $last ) ); } @scfs;
     push @ordered_scfs, $last if $last ne "" and $first ne $last;
-    
+
     @ordered_scfs;
 }
 
@@ -1064,7 +1225,7 @@ sub check_unassigned {
             %scfsnps = ();
         }
     }
-    
+
     $snps;
 }
 
@@ -1087,8 +1248,8 @@ sub output_genome_stats {
                 $markers{"$scfmap->{$scf}{$pos}{mat}:$scfmap->{$scf}{$pos}{lg}:$scfmap->{$scf}{$pos}{cm}"}++;
             }
 
-            #            croak "Should only be one marker at non-oriented scaffold $scf!"
-            #              if ( keys %markers != 1 );
+#            croak "Should only be one marker at non-oriented scaffold $scf!"
+#              if ( keys %markers != 1 );
             my $marker                 = ( keys %markers )[0];
             my $unoriented_marker_scfs = 0;
             for my $markerscf ( keys %{ $markerscf->{$marker} } ) {
@@ -1175,7 +1336,7 @@ sub output_genome_stats {
     #    for my $scfnum ( sort { $a <=> $b } keys %lam_block_scfs ) {
     #        print "$scfnum\t$lam_block_scfs{$scfnum}\n";
     #    }
-    
+
     return;
 }
 
@@ -1193,7 +1354,7 @@ sub get_block_stats {
         next if !defined $metadata->{types}{$type};
         output_type_stats( $step, $type, $stats ) if $metadata->{verbose};
     }
-    
+
     return;
 }
 
@@ -1216,11 +1377,11 @@ sub update_block_stats {
 
     if ( $all_equal and $metadata->{verbose} ) {
         printf STDERR "%-60s", $step;
-        print "No change\n";
+        print STDERR "No change\n";
     }
 
     $metadata->{stats} = $stats;
-    
+
     return;
 }
 
@@ -1235,7 +1396,7 @@ sub output_type_stats {
         printf STDERR "%12d", $stats->{$type}{$full}{bases};
     }
     print STDERR "\n";
-    
+
     return;
 }
 
@@ -1263,7 +1424,7 @@ sub get_stats {
               defined $stats{$type}{$full}{patterns} ? scalar keys %{ $stats{$type}{$full}{patterns} } : 0;
         }
     }
-    
+
     \%stats;
 }
 
@@ -1282,6 +1443,16 @@ sub stats_equal {
 
 ## LIBRARY FUNCTIONS
 
+sub create_intercross {
+    my ($maternal, $paternal) = @_;
+    my @m = split //, $maternal;
+    my @p = split //, $paternal;
+    
+    my @i = map {($m[$_] eq $p[$_]) ? $m[$_] : 'H'} 0..$#m;
+    
+    join '', @i;
+}
+
 sub convert_intercross {
     my ( $mat, $int ) = @_;
     return $int if $mat =~ /I/;
@@ -1290,15 +1461,12 @@ sub convert_intercross {
     my @pat =
       map { $int[$_] eq '-' ? '-' : $int[$_] eq 'H' ? ( $mat[$_] eq 'A' ? 'B' : 'A' ) : $mat[$_] } 0 .. $#int;
     my $pat = join '', @pat;
-    
+
     $pat;
 }
 
 sub phase {
-    my ($pat) = @_;
-    my @p = split //, $pat;
-    my $out = "";
-    my %trans;
+    my $pat = shift;
     my @checkbases;
     if ( $pat =~ 'A' && $pat =~ 'B' && $pat =~ 'H' ) {
         @checkbases = ( 'A', 'B' );
@@ -1310,6 +1478,11 @@ sub phase {
         @checkbases = ( 'B', 'H' );
     }
     return " " x length($pat) if !@checkbases;
+
+    my @p = split //, $pat;
+    my $out = "";
+    my %trans;
+
     for my $gt (@p) {
         my $added = 0;
         for my $bi ( 0, 1 ) {
@@ -1325,7 +1498,7 @@ sub phase {
         }
         $out .= $gt =~ /[ ~\.]/ ? '-' : $gt if !$added;
     }
-    
+
     $out;
 }
 
@@ -1342,14 +1515,14 @@ sub mirror {
     if ( $pat =~ 'B' and $pat =~ 'H' and $pat !~ 'A' ) {
         $pat =~ tr /HB/BH/;
     }
-    
+
     $pat;
 }
 
 sub hamming {
     my ( $a, $b ) = @_;
     my $hamming = ( $a ^ $b ) =~ tr/\001-\255//;
-    
+
     $hamming;
 }
 
