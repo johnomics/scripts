@@ -10,9 +10,9 @@ use constant FS_THRESHOLD => 5;
 use constant MQ_THRESHOLD => 90;
 
 my %swapphase = (
-    "Intercross" => { "A" => "B", "B" => "A" },
-    "Maternal"   => { "A" => "H", "H" => "A" },
-    "Paternal"   => { "A" => "H", "H" => "A" }
+    "IntercrossHet" => { "A" => "B", "B" => "A" },
+    "Maternal"      => { "A" => "H", "H" => "A" },
+    "Paternal"      => { "A" => "H", "H" => "A" }
 );
 
 my %callorder;
@@ -80,18 +80,12 @@ sub load_genetics {
     my %f2patterns;
     while ( my $marker_type = <$geneticsfile> ) {
         chomp $marker_type;
-        my ( $parents, $males, $females, $type, $corrections ) = split /\t/, $marker_type;
+        my ( $parents, $males, $females, $type ) = split /\t/, $marker_type;
         $genetics{types}{$parents}{$type}{'Male'}   = $males;
         $genetics{types}{$parents}{$type}{'Female'} = $females;
 
-        $genetics{gts}{$type}{'Male'}   = $genetics{gts}{$type}{'Male'}   // get_gts( $males );
-        $genetics{gts}{$type}{'Female'} = $genetics{gts}{$type}{'Female'} // get_gts( $females );
-
-        if ( $corrections ne "" ) {
-            my ( $orig, $fix ) = split '->', $corrections;
-            $genetics{types}{$parents}{$type}{corrections}{$orig} =
-              $fix;
-        }
+        $genetics{gts}{$type}{'Male'}   = $genetics{gts}{$type}{'Male'}   // get_gts($males);
+        $genetics{gts}{$type}{'Female'} = $genetics{gts}{$type}{'Female'} // get_gts($females);
 
         $f2patterns{"$males:$females"}++;
     }
@@ -211,7 +205,12 @@ sub create_output_database {
     $sth->execute;
 
     my $statement = "CREATE TABLE blocks (scaffold text, start integer, end integer, length integer";
-    map { $statement .= ", \"$_\" text" } sort keys $genetics->{gts};
+    my %short_types;
+    for my $type ( keys $genetics->{gts} ) {
+        my $short_type = ( split '-', $type )[0];
+        $short_types{$short_type}++;
+    }
+    map { $statement .= ", \"$_\" text" } sort keys %short_types;
     $statement .= ")";
 
     $sth = $dbh->prepare($statement);
@@ -248,11 +247,11 @@ sub get_markers {
             $info->{error} = "Fails MQ threshold: Type $type";
             $type = "Reject";
         }
-        
+
         my $phase = 0;
         $phase = check_phase( $marker, $markers{$type}{ $prevpos{$type} }{marker}, $type )
           if ( $type ne "Reject" && $prevpos{$type} );
-        $pattern = invert_pattern($pattern, $type) if $phase;
+        $pattern = invert_pattern( $pattern, $type ) if $phase;
         $markers{$type}{$pos}{marker}     = $marker;
         $markers{$type}{$pos}{parent}     = $parentcall;
         $markers{$type}{$pos}{pattern}    = $pattern;
@@ -294,10 +293,10 @@ sub check_phase {
 }
 
 sub invert_pattern {
-    my ($pattern, $type) = @_;
+    my ( $pattern, $type ) = @_;
     $type =~ s/\-(.+)//;
     my @gts = split //, $pattern;
-    @gts = map {$swapphase{$type}{$_} // $_} @gts;
+    @gts = map { $swapphase{$type}{$_} // $_ } @gts;
     join '', @gts;
 }
 
@@ -311,7 +310,7 @@ sub parse_snp {
     my $calls = get_calls( \@f, $samples, $genetics );
 
     my @parentcalls = map { $calls->{$_}{'GT'} } @{ $genetics->{parents} };
-    
+
     my ( $parentcall, $vgt ) = get_parent_call( \@parentcalls );
 
     my @info = split /;/, $f[7];
@@ -370,7 +369,7 @@ sub parse_snp {
             $genetics->{types}{$parentcall}{$type}{'Female'},
             $genetics->{rms}
         );
-        push @valid_types, $type if $types{$type} >= 0.05;
+        push @valid_types, $type if $types{$type} >= 0.2;
     }
 
     if ( @valid_types ne 1 ) {
@@ -389,7 +388,7 @@ sub parse_snp {
         return ( \%marker, "Reject", $parentcall, $pos, $pattern, \%info );
     }
 
-    my $type = (@valid_types)[0];
+    my $type = $valid_types[0];
     if ( $type eq "Reject" ) {
         $info{error} = "No valid type found";
         return ( \%marker, "Reject", $parentcall, $pos, $pattern, \%info );
@@ -412,21 +411,13 @@ sub parse_snp {
     }
 
     if ($highdp) {
-        $info{error} = "Depth>100 for at least one parent";
+        $info{error} = "Depth>85 for at least one parent";
         return ( \%marker, "Reject", $parentcall, $pos, $pattern, \%info );
     }
 
     $info{rmsobs}     = $rms_obs{$type};
     $info{rmspattern} = $rms_pattern{$type};
     $info{p}          = $types{$type};
-
-    # Correct eg B/- to H
-    if ( defined $genetics->{types}{$parentcall}{$type}{corrections} ) {
-        foreach my $sample ( @{ $samples->{offspring}{order} } ) {
-            $marker{$sample}{gt} =
-              $genetics->{types}{$parentcall}{$type}{corrections}{ $marker{$sample}{gt} } // $marker{$sample}{gt};
-        }
-    }
 
     return ( \%marker, $type, $parentcall, $pos, $pattern, \%info );
 }
@@ -678,10 +669,11 @@ sub get_sample_consensus {
     my @maxgts = split //, $maxseq;
     for my $p ( keys %posblocks ) {
         $marker->{$p}{marker}{$sample}{cons} =
-            defined($posblocks{$p}{block}) ? $maxgts[ $posblocks{$p}{block} ]
-          : (defined($posblocks{$p}{left})
-          and defined($posblocks{$p}{right})
-          and $maxgts[ $posblocks{$p}{left} ] eq $maxgts[ $posblocks{$p}{right} ]) ? $maxgts[ $posblocks{$p}{left} ]
+          defined( $posblocks{$p}{block} ) ? $maxgts[ $posblocks{$p}{block} ]
+          : (     defined( $posblocks{$p}{left} )
+              and defined( $posblocks{$p}{right} )
+              and $maxgts[ $posblocks{$p}{left} ] eq $maxgts[ $posblocks{$p}{right} ] )
+          ? $maxgts[ $posblocks{$p}{left} ]
           : '.';
     }
 }
@@ -727,7 +719,7 @@ sub get_sample_blocks {
     for my $p ( @{$pos} ) {
         next if ( $p < $block->{start} or $block->{end} < $p );
         my $gt = $marker->{$p}{marker}{$sample}{gt};
-        next if !defined($gts->{$gt}) or $gts->{$gt} == 0;
+        next if !defined( $gts->{$gt} ) or $gts->{$gt} == 0;
         if ( $gt eq $curgt ) {
             $seqblocks[-1]{end} = $p;
         }
@@ -746,7 +738,7 @@ sub get_sample_blocks {
     }
 
     return \@seqblocks if @seqblocks == 0;
-    
+
     my @cleanblocks;
     push @cleanblocks, $seqblocks[0];
     my $i = 0;
@@ -769,29 +761,19 @@ sub get_sample_blocks {
     \@cleanblocks;
 }
 
-
 sub collapse {
     my ( $scfref, $samples ) = @_;
     foreach my $type ( keys %{$scfref} ) {
-        foreach my $pos ( keys %{ $scfref->{$type} } ) {
-            my $gt   = "";
-            my $cons = "";
+        next if $type eq "Reject";
+        foreach my $pos ( sort { $a <=> $b } keys %{ $scfref->{$type} } ) {
+
+            # Generate consensus pattern
+            my $consensus = "";
 
             foreach my $sample ( @{ $samples->{offspring}{order} } ) {
-                my $ref = $scfref->{$type}{$pos}{marker}{$sample};
-
-                $gt .= $ref->{gt} // '-';
-
-                if ( $type ne "Reject" ) {
-                    $cons .= $ref->{cons} // '-';
-                }
+                $consensus .= $scfref->{$type}{$pos}{marker}{$sample}{cons} // '-';
             }
-            delete $scfref->{$type}{$pos}{marker};
-            $scfref->{$type}{$pos}{marker}{gt} = $gt;
-
-            if ( $type ne "Reject" ) {
-                $scfref->{$type}{$pos}{marker}{cons} = $cons;
-            }
+            $scfref->{$type}{$pos}{consensus} = $consensus;
         }
     }
 }
@@ -845,7 +827,8 @@ sub output_markers_to_db {
     foreach my $type ( keys %{$data} ) {
         foreach my $pos ( keys %{ $data->{$type} } ) {
             my $stp = $data->{$type}{$pos};
-            $stp->{cons} = $stp->{marker}{cons} // "";
+
+            #            $stp->{cons} = $stp->{marker}{cons} // "";
 
             if ( $type eq "Reject" ) {
                 $stp->{p}          = -1;
@@ -864,7 +847,7 @@ sub output_markers_to_db {
                 $stp->{mq},   $stp->{fs},
                 sprintf( "%4.2f", $stp->{p} ),          sprintf( "%4.2f", $stp->{rmsobs} ),
                 sprintf( "%4.2f", $stp->{rmspattern} ), $stp->{phase},
-                $stp->{marker}{gt}, $stp->{cons},
+                $stp->{pattern}, $stp->{consensus},
                 $stp->{error}
             );
         }
@@ -876,36 +859,53 @@ sub output_markers_to_db {
 sub output_blocks_to_db {
     my ( $scf, $data, $userdata, $scfl, $dbh ) = @_;
 
-    my @types = sort keys %{ $userdata->{genetics}{gts} };
+    my @types     = sort keys %{ $userdata->{genetics}{gts} };
+    my $samplenum = @{ $userdata->{samples}{offspring}{order} };
+    my $empty     = ' ' x $samplenum;
+
+    my %merged_data;
+    my %short_types;
+    foreach my $type (@types) {
+        next if ( $type eq "Reject" );
+        my $short_type = ( split '-', $type )[0];
+        $short_types{$short_type}++;
+        for my $pos ( keys %{ $data->{$type} } ) {
+            $merged_data{$short_type}{$pos} = phase( $data->{$type}{$pos}{consensus}, $type );
+        }
+    }
+
+    my @short_types = sort keys %short_types;
+
+    combine_patterns( $merged_data{"Paternal"} );
 
     my $insert_statement = "INSERT INTO blocks VALUES (?,?,?,?";
-    map { $insert_statement .= ',?' } @types;
+    map { $insert_statement .= ',?' } @short_types;
     $insert_statement .= ')';
     my $insert_handle = $dbh->prepare_cached($insert_statement);
 
     my %scfpos;
-    foreach my $type ( keys %{$data} ) {
-        next if ( $type eq "Reject" );
+    foreach my $short_type ( keys %merged_data ) {
         my $prevpos = 0;
-        foreach my $pos ( sort { $a <=> $b } keys %{ $data->{$type} } ) {
-            $scfpos{$pos}{types}{$type} =
-              $data->{$type}{$pos}{marker}{cons};
-            $scfpos{$pos}{end} = $pos;
+        foreach my $pos ( sort { $a <=> $b } keys %{ $merged_data{$short_type} } ) {
+            next if $merged_data{$short_type}{$pos} =~ /\./;
+
+            $scfpos{$pos}{types}{$short_type} =
+              $merged_data{$short_type}{$pos};
             if (   $prevpos eq 0
-                or $scfpos{$prevpos}{types}{$type} ne $scfpos{$pos}{types}{$type} )
+                or $scfpos{$prevpos}{types}{$short_type} ne $scfpos{$pos}{types}{$short_type} )
             {
-                $scfpos{ $prevpos + 1 }{types}{$type} = "";
+                $scfpos{ $prevpos + 1 }{types}{$short_type} = "";
             }
             $prevpos = $pos;
         }
-        $scfpos{ $prevpos + 1 }{types}{$type} = "";
+        $scfpos{ $prevpos + 1 }{types}{$short_type} = "";
     }
 
     my %curpat;
-    map { $curpat{$_} = "" } @types;
+    map { $curpat{$_} = "" } @short_types;
     my $blockpos = 1;
     for my $p ( sort { $a <=> $b } keys %scfpos ) {
-        for my $t (@types) {
+        for my $t (@short_types) {
             if ( defined $scfpos{$p}{types}{$t}
                 and $scfpos{$p}{types}{$t} ne $curpat{$t} )
             {
@@ -913,7 +913,7 @@ sub output_blocks_to_db {
                 my $end   = $p - 1;
                 my $len   = $end - $start + 1;
 
-                my @out_patterns = map { $curpat{$_} } @types;
+                my @out_patterns = map { $curpat{$_} eq '' ? $empty : $curpat{$_} } @short_types;
                 $insert_handle->execute( $scf, $start, $end, $len, @out_patterns );
                 $curpat{$t} = $scfpos{$p}{types}{$t};
                 $blockpos = $p;
@@ -921,10 +921,66 @@ sub output_blocks_to_db {
         }
         $dbh->commit;
     }
-    my @out_patterns = map { $curpat{$_} } @types;
+
+    my @out_patterns = map { $curpat{$_} eq '' ? $empty : $curpat{$_} } @short_types;
     my $len = $scfl->{$scf} - $blockpos + 1;
     $insert_handle->execute( $scf, $blockpos, $scfl->{$scf}, $len, @out_patterns );
     $dbh->commit;
 }
 
+sub phase {
+    my ( $pattern, $type ) = @_;
+    if ( $type eq 'Paternal-AHAB_AHA' ) {
+        $pattern =~ tr/AB/BA/;
+    }
+    if ( $pattern =~ /^[AH]+$/ ) {
+        $pattern =~ tr/H/B/;
+    }
+    $pattern;
+}
+
+sub combine_patterns {
+    my ($patterns) = @_;
+
+    my @positions;
+    for my $pos ( sort { $a <=> $b } keys %{$patterns} ) {
+        push @positions, $pos if $patterns->{$pos} !~ /[ \.]/;
+    }
+
+    my $samples = length $patterns->{ $positions[0] };
+
+    smooth_patterns( $patterns, \@positions, $samples );
+    @positions = reverse @positions;
+    smooth_patterns( $patterns, \@positions, $samples );
+}
+
+sub smooth_patterns {
+    my ( $patterns, $positions, $samples ) = @_;
+    for my $pos ( 0 .. $#{$positions} - 1 ) {
+        my $this = $patterns->{ $positions->[$pos] };
+        my $next = $patterns->{ $positions->[ $pos + 1 ] };
+
+        my @this = split '', $this;
+        my @next = split '', $next;
+
+        my @new_this;
+        my @new_next;
+        for my $i ( 0 .. $samples - 1 ) {
+            if ( $this[$i] eq 'H' and $next[$i] ne 'H' ) {
+                push @new_this, $next[$i];
+                push @new_next, $next[$i];
+            }
+            elsif ( $this[$i] ne 'H' and $next[$i] eq 'H' ) {
+                push @new_this, $this[$i];
+                push @new_next, $this[$i];
+            }
+            else {
+                push @new_this, $this[$i];
+                push @new_next, $next[$i];
+            }
+        }
+        $patterns->{ $positions->[$pos] } = join '', @new_this;
+        $patterns->{ $positions->[ $pos + 1 ] } = join '', @new_next;
+    }
+}
 1;
