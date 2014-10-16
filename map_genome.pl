@@ -57,12 +57,10 @@ print STDERR "INFER MARKERS\n";
 my ( $blocklist, $linkage_groups, $marker_blocks ) = infer_markers( $args{input}, $metadata );
 
 print STDERR "MAKING LINKAGE MAPS\n";
-my ( $scaffold_map, $genome, $marker_scaffolds ) =
-  make_linkage_maps( $blocklist, $args{output}, $linkage_groups, $marker_blocks );
+my $genome = make_linkage_maps( $blocklist, $args{output}, $linkage_groups, $marker_blocks );
 
-print STDERR "MAPPING GENOME\n";
+output_marker_blocks( $genome, $marker_blocks, $args{output} );
 
-map_genome( $scaffold_map, $genome, $marker_scaffolds, $blocklist, $args{output} );
 print STDERR "Done\n";
 
 exit;
@@ -639,8 +637,6 @@ sub make_linkage_maps {
     my ( $blocklist, $output, $linkage_groups, $marker_block ) = @_;
 
     my %genome;
-    my %scaffold_map;
-    my %marker_scaffolds;
 
     for my $chromosome_print ( keys %{$linkage_groups} ) {
         my $chromosome = $chromosomes{$chromosome_print} // '-';
@@ -653,10 +649,9 @@ sub make_linkage_maps {
         $genome{$chromosome_print} =
           make_linkage_map( $chromosome_print, $linkage_groups->{$chromosome_print}, $output );
 
-        assign_scaffolds_to_map( $chromosome_print, \%genome, \%scaffold_map, \%marker_scaffolds, $marker_block );
     }
 
-    ( \%scaffold_map, \%genome, \%marker_scaffolds );
+    \%genome;
 }
 
 sub clean_print {
@@ -726,6 +721,43 @@ sub run_mstmap {
     );
 
     \%marker_id;
+}
+
+sub write_mstmap_header {
+    my ( $output, $chromosome_print, $markers ) = @_;
+
+    my %mst_header = (
+        population_type              => "RIL2",
+        population_name              => "HeliconiusWGS",
+        distance_function            => "kosambi",
+        cut_off_p_value              => "0.000001",
+        no_map_dist                  => "15",
+        no_map_size                  => "2",
+        missing_threshold            => "0.75",
+        estimation_before_clustering => "yes",
+        detect_bad_data              => "yes",
+        objective_function           => "ML",
+    );
+
+    my @mst_header = (
+        "population_type", "population_name",    "distance_function", "cut_off_p_value",
+        "no_map_dist",     "no_map_size",        "missing_threshold", "estimation_before_clustering",
+        "detect_bad_data", "objective_function", "number_of_loci",    "number_of_individual",
+    );
+
+    open my $mstmap_input, ">", "$output.$chromosome_print.mstmap.input"
+      or croak "Can't open $output.$chromosome_print.mstmap.input: $OS_ERROR\n";
+
+    my $samples = split //, ( keys %{$markers} )[0];
+    $mst_header{"number_of_loci"}       = keys %{$markers};
+    $mst_header{"number_of_individual"} = $samples;
+    map { print $mstmap_input "$_ $mst_header{$_}\n"; } @mst_header;
+
+    print $mstmap_input "locus_name";
+    map { print $mstmap_input "\t$_" } ( 1 .. $samples );
+    print $mstmap_input "\n";
+
+    $mstmap_input;
 }
 
 sub write_marker {
@@ -854,42 +886,6 @@ sub smooth_markers {
     map { $markers->{ $_->{original} }{output} = join '', @{ $output{ $_->{pattern} } }; } @markerlist;
 }
 
-sub write_mstmap_header {
-    my ( $output, $chromosome_print, $markers ) = @_;
-
-    my %mst_header = (
-        population_type              => "RIL2",
-        population_name              => "HeliconiusWGS",
-        distance_function            => "kosambi",
-        cut_off_p_value              => "0.000001",
-        no_map_dist                  => "15",
-        no_map_size                  => "2",
-        missing_threshold            => "0.75",
-        estimation_before_clustering => "yes",
-        detect_bad_data              => "yes",
-        objective_function           => "ML",
-    );
-
-    my @mst_header = (
-        "population_type", "population_name",    "distance_function", "cut_off_p_value",
-        "no_map_dist",     "no_map_size",        "missing_threshold", "estimation_before_clustering",
-        "detect_bad_data", "objective_function", "number_of_loci",    "number_of_individual",
-    );
-
-    open my $mstmap_input, ">", "$output.$chromosome_print.mstmap.input"
-      or croak "Can't open $output.$chromosome_print.mstmap.input: $OS_ERROR\n";
-
-    my $samples = split //, ( keys %{$markers} )[0];
-    $mst_header{"number_of_loci"}       = keys %{$markers};
-    $mst_header{"number_of_individual"} = $samples;
-    map { print $mstmap_input "$_ $mst_header{$_}\n"; } @mst_header;
-
-    print $mstmap_input "locus_name";
-    map { print $mstmap_input "\t$_" } ( 1 .. $samples );
-    print $mstmap_input "\n";
-
-    $mstmap_input;
-}
 
 sub write_map_markers {
     my ( $map, $markers, $marker_id, $output, $chromosome_print ) = @_;
@@ -917,360 +913,63 @@ sub write_map_markers {
     \%chromosome;
 }
 
-sub assign_scaffolds_to_map {
-    my ( $chromosome_print, $genome, $scaffold_map, $marker_scaffolds, $marker_block ) = @_;
-
-    # Assign scaffolds to map position
-    for my $lg ( sort keys %{ $genome->{$chromosome_print} } ) {
-        for my $cM ( sort { $a <=> $b } keys %{ $genome->{$chromosome_print}{$lg} } ) {
-            for my $marker ( keys %{ $genome->{$chromosome_print}{$lg}{$cM} } ) {
-                for my $scaffold ( sort keys %{ $marker_block->{$marker} } ) {
-                    for my $start (
-                        sort { $a <=> $b }
-                        keys %{ $marker_block->{$marker}{$scaffold} }
-                      )
-                    {
-                        my $end = $marker_block->{$marker}{$scaffold}{$start};
-                        $scaffold_map->{$scaffold}{$start}{print} = $chromosome_print;
-                        $scaffold_map->{$scaffold}{$start}{lg}    = $lg;
-                        $scaffold_map->{$scaffold}{$start}{cM}    = $cM;
-                        $scaffold_map->{$scaffold}{$start}{end}   = $end;
-                        $marker_scaffolds->{"$chromosome_print:$lg:$cM"}{$scaffold}++;
-                    }
-                }
-            }
-        }
-    }
-}
 
 ## MAP GENOME
 
-sub map_genome {
-    my ( $scaffold_map, $genome, $marker_scaffolds, $blocklist, $output ) = @_;
+sub output_marker_blocks {
+    my ( $genome, $marker_blocks, $output ) = @_;
 
-    my $scaffold_stats = validate_scaffolds( $scaffold_map, $genome, $blocklist );
+    open my $chromosome_map_file, '>', "$output.chromosome.map.tsv"
+      or croak "Can't open chromosome map file! $OS_ERROR\n";
+    print $chromosome_map_file "Chromosome\tPrint\tcM\tOriginalMarker\tCleanMarker\tLength\n";
+    open my $scaffold_map_file, '>', "$output.scaffold.map.tsv" or croak "Can't open scaffold map file! $OS_ERROR\n";
+    print $scaffold_map_file "Chromosome\tcM\tScaffold\tStart\tEnd\tLength\n";
 
-    print STDERR "Writing maps and stats...\n";
-    output_genome_maps( $blocklist, $output, $genome, $scaffold_stats );
-
-    output_genome_stats( $scaffold_stats, $scaffold_map, $marker_scaffolds );
-
-    return;
-}
-
-sub validate_scaffolds {
-    my ( $scaffold_map, $genome, $blocklist ) = @_;
-
-    my $current_scaffold = "";
-    my @scaffold_blocks;
-    my %scaffold_stats;
-    for my $block ( @{$blocklist} ) {
-        if ( $block->{'scaffold'} ne $current_scaffold ) {
-            if ( $current_scaffold ne "" ) {
-                validate_scaffold( \@scaffold_blocks, $scaffold_map, $genome, \%scaffold_stats );
-            }
-            $current_scaffold = $block->{'scaffold'};
-            @scaffold_blocks  = ();
-        }
-        push @scaffold_blocks, $block;
-    }
-    validate_scaffold( \@scaffold_blocks, $scaffold_map, $genome, \%scaffold_stats );
-
-    \%scaffold_stats;
-}
-
-sub validate_scaffold {
-    my ( $scaffold_blocks, $scaffold_map, $genome, $stats ) = @_;
-    my $blocks_with_marker = 0;
-    my $scaffold           = $scaffold_blocks->[0]{'scaffold'};
-    my %scaffold_cMs;
-    my $scaffold_length = 0;
-    my %scaffold_markers;
-    for my $block ( @{$scaffold_blocks} ) {
-        $scaffold_length += $block->{'length'};
-        if ( defined $scaffold_map->{ $block->{'scaffold'} }{ $block->{'start'} } ) {
-            my $map_location = $scaffold_map->{$scaffold}{ $block->{'start'} };
-            $blocks_with_marker++;
-            $scaffold_cMs{ $map_location->{print} }{ $map_location->{lg} }{ $map_location->{cM} }{blocks}++;
-            $scaffold_cMs{ $map_location->{print} }{ $map_location->{lg} }{ $map_location->{cM} }{length} +=
-              $block->{'length'};
-            my $cM = $scaffold_cMs{ $map_location->{print} }{ $map_location->{lg} }{ $map_location->{cM} };
-            if (  !( defined $cM->{start} )
-                or ( $block->{'start'} < $cM->{start} ) )
-            {
-                $cM->{start} = $block->{'start'};
-            }
-
-            if (  !( defined $cM->{end} )
-                or ( $block->{'end'} > $cM->{end} ) )
-            {
-                $cM->{end} = $block->{'end'};
-            }
-
-            $scaffold_markers{"$map_location->{print}:$map_location->{lg}:$map_location->{cM}"}
-              { $block->{'scaffold'} }++;
-        }
-    }
-
-    my $scaffold_chromosomes    = keys %scaffold_cMs // 0;
-    my $scaffold_linkage_groups = 0;
-    my $scaffold_gaps           = 0;
-    $stats->{$scaffold}{oriented} = 0;
-
-    for my $print ( sort keys %scaffold_cMs ) {
-        for my $lg ( sort keys %{ $scaffold_cMs{$print} } ) {
-            $scaffold_linkage_groups++;
-            my @scaffold_cM = sort { $a <=> $b } keys %{ $scaffold_cMs{$print}{$lg} };
-            $stats->{$scaffold}{oriented}++ if @scaffold_cM > 1;
-            my $start_check = 0;
-            my $gap_cMs     = 0;
-            for my $lg_cM ( sort { $a <=> $b } keys %{ $genome->{$print}{$lg} } ) {
-                last if @scaffold_cM == 0;
-                if ($start_check) {
-                    if ( $scaffold_cM[0] ne $lg_cM ) {
-                        $gap_cMs++;
-                    }
-                }
-                if ( $scaffold_cM[0] eq $lg_cM ) {
-                    $start_check = 1;
-                    shift @scaffold_cM;
-                    $genome->{$print}{$lg}{$lg_cM}{scaffolds}{$scaffold}{start} =
-                      $scaffold_cMs{$print}{$lg}{$lg_cM}{start};
-                    $genome->{$print}{$lg}{$lg_cM}{scaffolds}{$scaffold}{end} =
-                      $scaffold_cMs{$print}{$lg}{$lg_cM}{end};
-                    $genome->{$print}{$lg}{$lg_cM}{scaffolds}{$scaffold}{length} =
-                      $scaffold_cMs{$print}{$lg}{$lg_cM}{length};
-                    $genome->{$print}{$lg}{$lg_cM}{length} +=
-                      $scaffold_cMs{$print}{$lg}{$lg_cM}{length};
-                }
-            }
-            $scaffold_gaps++ if $gap_cMs > 0;
-        }
-    }
-    $stats->{$scaffold}{markerblocks} = $blocks_with_marker;
-    $stats->{$scaffold}{allblocks}    = scalar @{$scaffold_blocks};
-    $stats->{$scaffold}{length}       = $scaffold_length;
-    $stats->{$scaffold}{chromosomes}  = $scaffold_chromosomes;
-    $stats->{$scaffold}{lgs}          = $scaffold_linkage_groups;
-    $stats->{$scaffold}{gaps}         = $scaffold_gaps;
-
-    return;
-}
-
-sub output_genome_maps {
-    my ( $blocklist, $output, $genome, $stats ) = @_;
-
-    open my $chromosome_map_fh, ">", "$output.chrommap.tsv"
-      or croak "Can't open chromosome map!\n";
-    open my $scaffold_map_fh, ">", "$output.scfmap.tsv"
-      or croak "Can't open scaffold map!\n";
-
-    print $chromosome_map_fh "Chromosome\tcM\tStart\tLength\n";
-
-    print $scaffold_map_fh
-      "Chromosome\tScaffold\tScfStart\tScfEnd\tChrStart\tLength\tScfChroms\tScfGaps\tScfOriented\n";
-
-    # Match inferred chromosomes to real chromosomes
     my %chromosome_numbers;
     my $new_chromosome_number = 100;
     for my $print ( keys %{$genome} ) {
-        if ( defined $chromosomes{$print} ) {
-            $chromosome_numbers{$print} = $chromosomes{$print};
-        }
-        else {
-            $chromosome_numbers{$print} = $new_chromosome_number;
-            $new_chromosome_number++;
-        }
+        my $chromosome = $chromosomes{$print} // $new_chromosome_number;
+        $new_chromosome_number++ if $chromosome == $new_chromosome_number;
+        $chromosome_numbers{$chromosome} = $print;
     }
-
-    foreach my $print ( sort { $chromosome_numbers{$a} <=> $chromosome_numbers{$b} } keys %{$genome} ) {
-
-        croak "More than one linkage group found for $chromosomes{$print}!\n"
-          if ( keys %{ $genome->{$print} } > 1 );
-
-        foreach my $lg ( keys %{ $genome->{$print} } ) {
-            my $current_cM_position       = 1;
-            my $current_scaffold_position = 1;
-
-            my @cMs = sort { $a <=> $b } keys %{ $genome->{$print}{$lg} };
-            my @chromosome_scaffolds;
-            foreach my $cM_i ( 0 .. $#cMs ) {
-                my $cM = $cMs[$cM_i];
-                print $chromosome_map_fh "$chromosome_numbers{$print}\t$cM";
-
-                print $chromosome_map_fh "\t$current_cM_position\t$genome->{$print}{$lg}{$cM}{length}\n";
-
-                my @ordered_scaffolds =
-                  order_scaffolds_at_cM( $genome->{$print}{$lg}{$cM}{scaffolds}, $genome->{$print}{$lg}, \@cMs, $cM_i );
-
-                foreach my $scaffold (@ordered_scaffolds) {
-                    my $genome_scaffold = $genome->{$print}{$lg}{$cM}{scaffolds}{$scaffold};
-
-                    if ( defined( $chromosome_scaffolds[-1] )
-                        and $chromosome_scaffolds[-1]{scaffold} eq $scaffold )
-                    {
-                        my $start = $genome_scaffold->{start};
-                        my $end   = $genome_scaffold->{end};
-                        $chromosome_scaffolds[-1]{scaffold_start} = $start
-                          if ( $start < $chromosome_scaffolds[-1]{scaffold_start} );
-                        $chromosome_scaffolds[-1]{scaffold_end} = $end
-                          if ( $chromosome_scaffolds[-1]{scaffold_end} < $end );
-                        $chromosome_scaffolds[-1]{length} += $genome_scaffold->{length};
-                        $chromosome_scaffolds[-1]{oriented}++;
-                    }
-                    else {
-                        push @chromosome_scaffolds,
-                          {
-                            scaffold         => $scaffold,
-                            scaffold_start   => $genome_scaffold->{start},
-                            scaffold_end     => $genome_scaffold->{end},
-                            chromosome_start => $current_scaffold_position,
-                            length           => $genome_scaffold->{length},
-                            oriented         => 0
-                          };
-                    }
-
-                    $current_scaffold_position += $genome_scaffold->{length};
-                }
-
-                $current_cM_position += $genome->{$print}{$lg}{$cM}{length};
-            }
-
-            foreach my $i ( 0 .. $#chromosome_scaffolds ) {
-                my $scaffold_i = $chromosome_scaffolds[$i]{scaffold};
-                print $scaffold_map_fh "$chromosome_numbers{$print}\t$scaffold_i";
-                print $scaffold_map_fh "\t$chromosome_scaffolds[$i]{scaffold_start}";
-                print $scaffold_map_fh "\t$chromosome_scaffolds[$i]{scaffold_end}";
-                print $scaffold_map_fh "\t$chromosome_scaffolds[$i]{chromosome_start}";
-                print $scaffold_map_fh "\t$chromosome_scaffolds[$i]{length}";
-                print $scaffold_map_fh "\t$stats->{$scaffold_i}{chromosomes}";
-                print $scaffold_map_fh "\t$stats->{$scaffold_i}{gaps}";
-                print $scaffold_map_fh "\t$chromosome_scaffolds[$i]{oriented}";
-                print $scaffold_map_fh "\n";
-            }
-        }
-    }
-
-    close $scaffold_map_fh;
-    close $chromosome_map_fh;
-
-    return;
-}
-
-sub order_scaffolds_at_cM {
-    my ( $scaffolds, $linkage_group, $cMs, $cM_i ) = @_;
-
-    my @ordered_scaffolds;
-
-    my @scaffolds = keys %{$scaffolds};
-    my $first     = "";
-    my $last      = "";
-    for my $scaffold (@scaffolds) {
-        $first = $scaffold
-          if (  ( $cM_i > 0 )
-            and ( defined $linkage_group->{ $cMs->[ $cM_i - 1 ] }{scaffolds}{$scaffold} ) );
-        $last = $scaffold
-          if (  ( $cM_i < $#{$cMs} )
-            and ( defined $linkage_group->{ $cMs->[ $cM_i + 1 ] }{scaffolds}{$scaffold} ) );
-    }
-
-    push @ordered_scaffolds, $first if $first ne "";
-    map { push @ordered_scaffolds, $_ if ( ( $_ ne $first ) and ( $_ ne $last ) ); } @scaffolds;
-    push @ordered_scaffolds, $last if $last ne "" and $first ne $last;
-
-    @ordered_scaffolds;
-}
-
-sub output_genome_stats {
-    my ( $scaffold_stats, $scaffold_map, $marker_scaffolds ) = @_;
-
-    my %genome_stats;
-    my %local_assembly_markers;
-    foreach my $scaffold ( sort keys %{$scaffold_stats} ) {
-
-        my $stat = $scaffold_stats->{$scaffold};
-        $stat->{ordered} = 0;
-        if (    $stat->{chromosomes} == 1
-            and $stat->{lgs} == 1
-            and $stat->{gaps} == 0
-            and !$stat->{oriented} )
-        {
-            my %markers;
-            for my $position ( keys %{ $scaffold_map->{$scaffold} } ) {
-                my $map_location = $scaffold_map->{$scaffold}{$position};
-                $markers{ "$map_location->{print}:$map_location->{lg}:$map_location->{cM}" }++;
-            }
-
-#            croak "Should only be one marker at non-oriented scaffold $scaffold!"
-#              if ( keys %markers != 1 );
-
-            my $marker                 = ( keys %markers )[0];
-            my $unoriented_marker_scaffolds = 0;
-            for my $marker_scaffold ( keys %{ $marker_scaffolds->{$marker} } ) {
-                next if $marker_scaffolds eq $marker_scaffold;
-                if (   $scaffold_stats->{$marker_scaffold}{chromosomes} != 1
-                    or $scaffold_stats->{$marker_scaffold}{lgs} != 1
-                    or $scaffold_stats->{$marker_scaffold}{gaps} > 0
-                    or !$scaffold_stats->{$marker_scaffold}{oriented} )
-                {
-                    $unoriented_marker_scaffolds++;
-                }
-            }
-            if ( !$unoriented_marker_scaffolds ) {
-                $stat->{ordered}++;
-            }
-
-            $local_assembly_markers{$marker}++ if !$stat->{ordered};
-        }
-
-        if ( $stat->{chromosomes} == 0 ) {
-            if ( $stat->{lgs} == 0 and $stat->{gaps} == 0 ) {
-                $genome_stats{"Unassigned"}{scaffold}++;
-                $genome_stats{"Unassigned"}{len} += $stat->{length};
-            }
-        }
-        elsif ( $stat->{chromosomes} == 1 ) {
-            if ( $stat->{lgs} == 1 ) {
-                if ( $stat->{gaps} == 0 ) {
-                    $genome_stats{"Assigned"}{scaffold}++;
-                    $genome_stats{"Assigned"}{len} += $stat->{length};
-                    if ( $stat->{oriented} ) {
-                        $genome_stats{"Oriented"}{scaffold}++;
-                        $genome_stats{"Oriented"}{len} += $stat->{length};
-                    }
-                    if ( $stat->{ordered} ) {
-                        $genome_stats{"Ordered"}{scaffold}++;
-                        $genome_stats{"Ordered"}{len} += $stat->{length};
+    for my $chromosome ( sort { $a <=> $b } keys %chromosome_numbers ) {
+        my $chromosome_print = $chromosome_numbers{$chromosome};
+        croak "More than one linkage group found for chromosome print $chromosome_print"
+          if keys %{ $genome->{$chromosome_print} } > 1;
+        for my $lg ( sort keys %{ $genome->{$chromosome_print} } ) {
+            for my $cM ( sort { $a <=> $b } keys %{ $genome->{$chromosome_print}{$lg} } ) {
+                for my $marker ( keys %{ $genome->{$chromosome_print}{$lg}{$cM} } ) {
+                    print $chromosome_map_file "$chromosome\t$chromosome_print\t$cM\t$marker";
+                    print $chromosome_map_file "\t$genome->{$chromosome_print}{$lg}{$cM}{$marker}{output}";
+                    print $chromosome_map_file "\t$genome->{$chromosome_print}{$lg}{$cM}{$marker}{length}";
+                    print $chromosome_map_file "\n";
+                    
+                    for my $scaffold ( sort keys %{ $marker_blocks->{$marker} } ) {
+                        my $block_start = -1;
+                        my $last_end    = -1;
+                        for my $start (
+                            sort { $a <=> $b }
+                            keys %{ $marker_blocks->{$marker}{$scaffold} }
+                          )
+                        {
+                            $block_start = $start if $block_start == -1;
+                            if ( $last_end != -1 and $start > $last_end + 1 ) {
+                                my $length = $last_end - $block_start + 1;
+                                print $scaffold_map_file
+                                  "$chromosome\t$cM\t$scaffold\t$block_start\t$last_end\t$length\n";
+                                $block_start = $start;
+                            }
+                            $last_end = $marker_blocks->{$marker}{$scaffold}{$start};
+                        }
+                        my $length = $last_end - $block_start + 1;
+                        print $scaffold_map_file "$chromosome\t$cM\t$scaffold\t$block_start\t$last_end\t$length\n";
                     }
                 }
-                else {
-                    $genome_stats{"Gaps"}{scaffold}++;
-                    $genome_stats{"Gaps"}{len} += $stat->{length};
-                }
-            }
-            else {
-                $genome_stats{"Multiple LGs"}{scaffold}++;
-                $genome_stats{"Multiple LGs"}{len} += $stat->{length};
             }
         }
-        else {
-            $genome_stats{"Multiple Chrs"}{scaffold}++;
-            $genome_stats{"Multiple Chrs"}{len} += $stat->{length};
-        }
     }
-    my $genome_size = 0;
-    my $genome_scaffolds  = 0;
-    for my $stat ( sort keys %genome_stats ) {
-        printf STDERR "%16s\t%4d\t%9d\n", $stat, $genome_stats{$stat}{scaffold}, $genome_stats{$stat}{len};
-        next if $stat =~ /Oriented/ or $stat =~ /Ordered/;
-        $genome_size += $genome_stats{$stat}{len};
-        $genome_scaffolds  += $genome_stats{$stat}{scaffold};
-    }
-    printf STDERR "%16s\t%4d\t%9d\n", 'Genome', $genome_scaffolds, $genome_size;
-
-    print STDERR "Marker blocks requiring local assembly: ", scalar keys %local_assembly_markers, "\n";
-
-    return;
+    close $chromosome_map_file;
+    close $scaffold_map_file;
 }
 
 ## STATISTICS
