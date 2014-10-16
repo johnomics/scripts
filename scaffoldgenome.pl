@@ -946,7 +946,8 @@ sub combine_patterns {
     for my $pos ( sort { $a <=> $b } keys %{$patterns} ) {
         push @positions, $pos if $patterns->{$pos} !~ /[ \.]/;
     }
-
+    return if @positions == 0;
+    
     my $samples = length $patterns->{ $positions[0] };
 
     smooth_patterns( $patterns, \@positions, $samples );

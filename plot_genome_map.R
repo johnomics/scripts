@@ -33,7 +33,7 @@ chr.colours<-rep(genetic.colours, colour.rows)
 if (colour.rows != floor(colour.rows)) chr.colours<-c(chr.colours, genetic.colours[1])
 chrmap.col<-data.frame(chrmap,Colour=chr.colours)
 
-chrnum<-max(chrmap$Chromosome)
+chrnum<-max(chrmap[chrmap$Chromosome<100,]$Chromosome)
 chrcol<-rainbow(chrnum)
 
 maxcm<-max(chrmap$cM)
