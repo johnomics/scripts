@@ -80,12 +80,14 @@ sub load_genetics {
     my %f2patterns;
     while ( my $marker_type = <$geneticsfile> ) {
         chomp $marker_type;
-        my ( $parents, $males, $females, $type ) = split /\t/, $marker_type;
+        my ( $parents, $males, $females, $type, $recombination ) = split /\t/, $marker_type;
         $genetics{types}{$parents}{$type}{'Male'}   = $males;
         $genetics{types}{$parents}{$type}{'Female'} = $females;
 
+
         $genetics{gts}{$type}{'Male'}   = $genetics{gts}{$type}{'Male'}   // get_gts($males);
         $genetics{gts}{$type}{'Female'} = $genetics{gts}{$type}{'Female'} // get_gts($females);
+        $genetics{recombination}{$type} = $recombination;
 
         $f2patterns{"$males:$females"}++;
     }
@@ -369,7 +371,7 @@ sub parse_snp {
             $genetics->{types}{$parentcall}{$type}{'Female'},
             $genetics->{rms}
         );
-        push @valid_types, $type if $types{$type} >= 0.2;
+        push @valid_types, $type if $types{$type} >= 0.05;
     }
 
     if ( @valid_types ne 1 ) {
@@ -588,7 +590,6 @@ sub find_blocks {
     for my $type ( keys %{$markers} ) {
         next if ( $type eq "Reject" );
         my @pos = sort { $a <=> $b } keys %{ $markers->{$type} };
-
         my @blocks = find_edges( $markers->{$type}, \@pos, $type );
         for my $block (@blocks) {
             for my $sample ( @{ $userdata->{samples}{offspring}{order} } ) {
@@ -646,6 +647,9 @@ sub get_sample_consensus {
         return;
     }
 
+    my $maxseq = get_max_seq($seqblocks, $genetics->{recombination}{$type});
+    my @maxgts = split //, $maxseq;
+
     # Get block for each position, or neighbouring blocks
     my %posblocks;
     for my $p ( @{$pos} ) {
@@ -665,8 +669,6 @@ sub get_sample_consensus {
         }
     }
 
-    my $maxseq = get_max_seq($seqblocks);
-    my @maxgts = split //, $maxseq;
     for my $p ( keys %posblocks ) {
         $marker->{$p}{marker}{$sample}{cons} =
           defined( $posblocks{$p}{block} ) ? $maxgts[ $posblocks{$p}{block} ]
@@ -679,14 +681,17 @@ sub get_sample_consensus {
 }
 
 sub get_max_seq {
-    my $seqblocks = shift;
+    my ($seqblocks, $recombination) = @_;
 
     my %gts;
     map { $gts{ $_->{gt} } += $_->{length} } @{$seqblocks};
     my ( $gtmax1, $gtmax2 ) = ( reverse sort { $gts{$a} <=> $gts{$b} } keys %gts )[ 0, 1 ];
 
     my %stateseq;
-    for my $breakpoint ( 0 .. $#{$seqblocks} ) {
+    # If recombination allowed, check all breakpoints; if not, just check either genotype
+    my @breakpoints = $recombination eq 'Y' ? (0..$#{$seqblocks}) : (0);
+
+    for my $breakpoint ( @breakpoints ) {
         my $gt1    = $gtmax1;
         my $gt2    = $gtmax2;
         my $seq1   = "";
@@ -870,13 +875,11 @@ sub output_blocks_to_db {
         my $short_type = ( split '-', $type )[0];
         $short_types{$short_type}++;
         for my $pos ( keys %{ $data->{$type} } ) {
-            $merged_data{$short_type}{$pos} = phase( $data->{$type}{$pos}{consensus}, $type );
+            $merged_data{$short_type}{$pos} = phase( $data->{$type}{$pos}{consensus}, $type, $userdata );
         }
     }
 
     my @short_types = sort keys %short_types;
-
-    combine_patterns( $merged_data{"Paternal"} );
 
     my $insert_statement = "INSERT INTO blocks VALUES (?,?,?,?";
     map { $insert_statement .= ',?' } @short_types;
@@ -913,7 +916,23 @@ sub output_blocks_to_db {
                 my $end   = $p - 1;
                 my $len   = $end - $start + 1;
 
-                my @out_patterns = map { $curpat{$_} eq '' ? $empty : $curpat{$_} } @short_types;
+                my @out_patterns;
+                for my $out_type (@short_types) {
+                    if ( $curpat{$out_type} ne '' ) {
+                        my $curpat_present = 0;
+                        for my $block_p ( sort { $a <=> $b } keys %scfpos ) {
+                            if ( $block_p >= $start and defined $scfpos{$block_p}{types}{$out_type} ) {
+                                $curpat_present++;
+                            }
+                            last if $block_p > $end;
+                        }
+                        if ( !$curpat_present ) {
+                            $curpat{$out_type} = '';
+                        }
+                    }
+                    push @out_patterns, $curpat{$out_type} eq '' ? $empty : $curpat{$out_type};
+                }
+
                 $insert_handle->execute( $scf, $start, $end, $len, @out_patterns );
                 $curpat{$t} = $scfpos{$p}{types}{$t};
                 $blockpos = $p;
@@ -928,60 +947,32 @@ sub output_blocks_to_db {
     $dbh->commit;
 }
 
+
 sub phase {
-    my ( $pattern, $type ) = @_;
-    if ( $type eq 'Paternal-AHAB_AHA' ) {
-        $pattern =~ tr/AB/BA/;
+    my ( $pattern, $type, $userdata ) = @_;
+    if ( $type =~ /Paternal-AHAB/ ) {
+        my @samples     = @{ $userdata->{samples}{offspring}{order} };
+        my @gt          = split //, $pattern;
+        my $out_pattern = "";
+        for my $i ( 0 .. $#samples ) {
+            $gt[$i] = 'B' if $gt[$i] eq 'H';
+            if ( $type eq 'Paternal-AHAB_AHA' ) {
+                $out_pattern .= $gt[$i] eq 'A' ? 'B' : $gt[$i] eq 'B' ? 'A' : $gt[$i];
+            }
+            else {
+                $out_pattern .= $gt[$i];
+            }
+        }
+        $pattern = $out_pattern;
     }
     if ( $pattern =~ /^[AH]+$/ ) {
         $pattern =~ tr/H/B/;
     }
+    if ( $pattern =~ /^[BH]+$/ ) {
+        $pattern =~ tr/H/A/;
+    }
+
     $pattern;
 }
 
-sub combine_patterns {
-    my ($patterns) = @_;
-
-    my @positions;
-    for my $pos ( sort { $a <=> $b } keys %{$patterns} ) {
-        push @positions, $pos if $patterns->{$pos} !~ /[ \.]/;
-    }
-    return if @positions == 0;
-    
-    my $samples = length $patterns->{ $positions[0] };
-
-    smooth_patterns( $patterns, \@positions, $samples );
-    @positions = reverse @positions;
-    smooth_patterns( $patterns, \@positions, $samples );
-}
-
-sub smooth_patterns {
-    my ( $patterns, $positions, $samples ) = @_;
-    for my $pos ( 0 .. $#{$positions} - 1 ) {
-        my $this = $patterns->{ $positions->[$pos] };
-        my $next = $patterns->{ $positions->[ $pos + 1 ] };
-
-        my @this = split '', $this;
-        my @next = split '', $next;
-
-        my @new_this;
-        my @new_next;
-        for my $i ( 0 .. $samples - 1 ) {
-            if ( $this[$i] eq 'H' and $next[$i] ne 'H' ) {
-                push @new_this, $next[$i];
-                push @new_next, $next[$i];
-            }
-            elsif ( $this[$i] ne 'H' and $next[$i] eq 'H' ) {
-                push @new_this, $this[$i];
-                push @new_next, $this[$i];
-            }
-            else {
-                push @new_this, $this[$i];
-                push @new_next, $next[$i];
-            }
-        }
-        $patterns->{ $positions->[$pos] } = join '', @new_this;
-        $patterns->{ $positions->[ $pos + 1 ] } = join '', @new_next;
-    }
-}
 1;
