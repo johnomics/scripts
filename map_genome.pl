@@ -10,7 +10,6 @@ use Data::Dumper;
 use Memoize;
 use DBD::SQLite;
 
-use Parallel::ForkManager;
 use List::Util qw/min max/;
 
 $OUTPUT_AUTOFLUSH = 1;
@@ -19,6 +18,7 @@ memoize "mirror";
 memoize "phase";
 memoize "consistent";
 memoize "linked";
+memoize "calc_LR";
 
 my $sex = "ABBABABBBBAABBBBBBBAAAAABABAAABBBBABABABBBABBABABBAAAAAABABBAABBAABAB";
 
@@ -82,9 +82,9 @@ sub infer_markers {
 
     fill_valid_patterns( $blocklist, $valid_patterns, $metadata );
 
-    #    correct_maternal( "Maternal", $blocklist, $metadata );
+    complete_maternal_patterns( $blocklist, $valid_patterns, $metadata );
 
-    # collapse( $blocklist, $metadata );
+    collapse( $blocklist, $metadata );
 
     print STDERR "Writing clean blocks...\n";
     output_blocks( $input, $blocklist );
@@ -332,124 +332,6 @@ sub correct_maternal_patterns {
     return;
 }
 
-sub linked {
-    my ( $a, $b ) = @_;
-    ($a =~ /H/ and $b =~ /H/) ? linked_intercross( $a, $b ) : linked_backcross( $a, $b );
-}
-
-sub linked_backcross {
-    my ( $a, $b ) = @_;
-
-    # If either pattern is Intercross, remove individuals where Intercross is H
-    if ( $a =~ /H/ or $b =~ /H/ ) {
-        my @a = split //, $a;
-        my @b = split //, $b;
-        my @new_a;
-        my @new_b;
-        for my $i ( 0 .. $#a ) {
-            next if $a[$i] =~ /H/ or $b[$i] =~ /H/;
-            push @new_a, $a[$i];
-            push @new_b, $b[$i];
-        }
-        $a = join '', @new_a;
-        $b = join '', @new_b;
-    }
-    my $N = length $a;
-    my $R = hamming( $a, $b );
-    my $r = $R / $N;
-    my $LOD =
-      ( ( $N - $R ) * ( log( 1 - $r ) / log(10) ) ) + ( $R * ( log($r) / log(10) ) ) + ( $N * ( log(2) / log(10) ) );
-    return $LOD > 3;
-}
-
-sub linked_intercross {
-    my ( $a, $b ) = @_;
-
-    my $N      = length $a;
-    my $haps   = get_haps( $a, $b );
-    my $r      = f2_em( $haps, $N, 0.25 );
-    my $p_re   = calc_p_re($r);
-    my $R      = calc_R( $haps, $p_re );
-    my $LR_r   = calc_LR( $r, $R, $N );
-    my $LR_ind = calc_LR( 0.5, $R, $N );
-    my $LOD    = log( $LR_r / $LR_ind ) / log(10);
-    print Dumper $haps;
-    print "$a\t$R\t$N\t$r\t$p_re\n$b\t$LR_r\t$LR_ind\t$LOD\n";
-    return $LOD > 3;
-}
-
-sub f2_em {
-    my ( $haps, $N, $r ) = @_;
-    for my $i ( 1 .. 100 ) {
-        my $p_re  = calc_p_re($r);
-        my $R     = calc_R( $haps, $p_re );
-        my $S     = calc_S( $haps, $p_re );
-        my $new_r = $R / ( 2 * $N );
-        last if sprintf( "%.5f", $new_r ) eq sprintf( "%.5f", $r );
-        $r = $new_r;
-    }
-
-    $r;
-}
-
-sub get_haps {
-    my ( $a, $b ) = @_;
-
-    my @a = split //, $a;
-    my @b = split //, $b;
-
-    my %haps;
-    for my $i ( 'A', 'B', 'H' ) {
-        for my $j ( 'A', 'B', 'H' ) {
-            $haps{ $i . $j } = 0;
-        }
-    }
-    for my $i ( 0 .. $#a ) {
-        my $hap = $a[$i] . $b[$i];
-        $haps{$hap}++;
-    }
-    return \%haps;
-}
-
-sub calc_p_re {
-    my $r = shift;
-    ( $r**2 ) / ( ( ( 1 - $r )**2 ) + ( $r**2 ) )
-
-}
-
-sub calc_R {
-    my ( $haps, $p_re ) = @_;
-
-    0 * $haps->{'AA'} +
-      1 * $haps->{'AH'} +
-      2 * $haps->{'AB'} +
-      1 * $haps->{'HA'} +
-      2 * $haps->{'HH'} * $p_re +
-      1 * $haps->{'HB'} +
-      2 * $haps->{'BA'} +
-      1 * $haps->{'BH'} +
-      0 * $haps->{'BB'};
-}
-
-sub calc_S {
-    my ( $haps, $p_re ) = @_;
-
-    2 * $haps->{'AA'} +
-      1 * $haps->{'AH'} +
-      0 * $haps->{'AB'} +
-      1 * $haps->{'HA'} +
-      2 * $haps->{'HH'} * ( 1 - $p_re ) +
-      1 * $haps->{'HB'} +
-      0 * $haps->{'BA'} +
-      1 * $haps->{'BH'} +
-      2 * $haps->{'BB'};
-}
-
-sub calc_LR {
-    my ( $r, $R, $N ) = @_;
-    ( 1 - $r )**( $N - $R ) * ( $r**$R );
-}
-
 sub fill_valid_patterns {
     my ( $blocklist, $valid_patterns, $metadata ) = @_;
 
@@ -580,120 +462,45 @@ sub check_existing_valid_patterns {
     return 0;
 }
 
-sub correct_maternal {
-    my ( $maternal_type, $blocklist, $metadata ) = @_;
+sub complete_maternal_patterns {
+    my ( $blocklist, $valid_patterns, $metadata ) = @_;
 
-    my $empty = $metadata->{empty};
-
-    my ( $maternal, $maternal_patterns ) = get_type_blocks( $maternal_type, $blocklist, $metadata );
-
-    my %merged;
-    for my $a ( @{$maternal_patterns} ) {
-        next if defined( $merged{$a} ) or $a eq $empty or $a =~ /\-/;
-        for my $b ( @{$maternal_patterns} ) {
-            next
-              if $b eq $empty
-              or defined( $merged{$b} )
-              or $a eq $b
-              or $maternal->{$a}{length} < $maternal->{$b}{length};
-
-            if ( hamming( $a, $b ) <= 6 or hamming( mirror($a), $b ) <= 6 ) {
-                $merged{$b} = $a;
-                for my $i ( @{ $maternal->{$b}{blocks} } ) {
-                    $blocklist->[$i]{$maternal_type} = $a;
-                }
-            }
-        }
-    }
-
-    ( $maternal, $maternal_patterns ) = get_type_blocks( $maternal_type, $blocklist, $metadata );
-
-    for my $a ( @{$maternal_patterns} ) {
-        for my $i ( @{ $maternal->{$a}{blocks} } ) {
-            if ( $maternal->{$a}{length} < 10000 ) {
-                $blocklist->[$i]{$maternal_type} = $empty;
-            }
-            else {
-                $blocklist->[$i]{$maternal_type} = phase( $blocklist->[$i]{$maternal_type} );
-            }
-        }
-    }
-
-    update_block_stats( "After correcting maternal patterns", $blocklist, $metadata );
-
-    ( $maternal, $maternal_patterns ) = get_type_blocks( $maternal_type, $blocklist, $metadata );
-
-    infer_intercross_maternal( $maternal, $maternal_patterns, $blocklist, $metadata );
-
-    update_block_stats( "After inferring intercross maternal patterns", $blocklist, $metadata );
-
-    return;
+    infer_intercross_maternal( $blocklist, $valid_patterns );
+    fill_remaining_maternal_patterns( $blocklist, $valid_patterns, $metadata );
 }
 
 sub infer_intercross_maternal {
-    my ( $maternal, $maternal_patterns, $blocklist, $metadata ) = @_;
-
-    my $empty = $metadata->{empty};
-
-    my ( $intercross_blocks, $intercross_patterns ) = get_type_blocks( "Intercross", $blocklist, $metadata );
+    my ( $blocklist, $valid_patterns ) = @_;
 
     my %maternal_candidates;
-    for my $intercross ( @{$intercross_patterns} ) {
-        next if $intercross eq $empty;
-
-        # Check to see if Maternal patterns are empty for this Intercross pattern and skip if not
-        my %maternal_filled;
-        for my $block ( @{ $intercross_blocks->{$intercross}{blocks} } ) {
-            if ( $blocklist->[$block]{"Maternal"} ne $empty ) {
-                $maternal_filled{ $blocklist->[$block]{"Maternal"} }++;
-            }
-        }
-        next if ( keys %maternal_filled );
-
-        # Get any matching Maternal patterns for this Intercross marker
-        my @matching_maternal;
-        for my $maternal ( @{$maternal_patterns} ) {
-            next if $maternal eq $empty;
-            if ( int_hamming( $intercross, $maternal ) <= 6 or int_hamming( mirror($intercross), $maternal ) <= 6 ) {
-                push @matching_maternal, $maternal;
-            }
-        }
-
-        # If only one Maternal pattern found, set Intercross blocks to this Maternal pattern
-        if ( @matching_maternal == 1 ) {
-            for my $block ( @{ $intercross_blocks->{$intercross}{blocks} } ) {
-                next if $blocklist->[$block]{"Maternal"} ne $empty;
-                $blocklist->[$block]{"Maternal"} = $matching_maternal[0];
-                $blocklist->[$block]{"Paternal"} = separate_intercross( $blocklist->[$block]{"Maternal"}, $intercross )
-                  if $blocklist->[$block]{"Paternal"} eq $empty;
-            }
-        }
-
-        # If no Maternal patterns found, they need to be inferred from the Intercross pattern
-        elsif ( @matching_maternal == 0 ) {
-            push @{ $maternal_candidates{$intercross}{patterns} }, $intercross;
-            $maternal_candidates{$intercross}{length} = $intercross_blocks->{$intercross}{length};
-        }
-        else {
-            # More than one matching Maternal pattern found
+    my %intercross_blocks;
+    for my $b ( 0 .. $#{$blocklist} ) {
+        my $block = $blocklist->[$b];
+        if ( $block->{'validity'} =~ /IE m p / ) {
+            push @{ $maternal_candidates{ $block->{'IntercrossHom'} }{patterns} }, $block->{'IntercrossHom'};
+            $maternal_candidates{ $block->{'IntercrossHom'} }{length} += $block->{'length'};
+            push @{ $intercross_blocks{ $block->{'IntercrossHom'} } }, $b;
         }
     }
-
-    update_block_stats( "After matching intercross to existing maternals", $blocklist, $metadata );
 
     my $merged = merge_maternal_candidates( \%maternal_candidates );
 
     # Update maternal patterns for inferred intercross chromosomes
     for my $m ( keys %{$merged} ) {
+        $valid_patterns->{'Maternal'}{$m}{'Paternal'}      = undef;
+        $valid_patterns->{'Maternal'}{$m}{'IntercrossHom'} = undef;
+
         for my $i ( @{ $merged->{$m}{patterns} } ) {
             my $pattern = $i->{original};
-            for my $block ( @{ $intercross_blocks->{$pattern}{blocks} } ) {
-                $blocklist->[$block]{"Maternal"} = $m if $blocklist->[$block]{"Maternal"} eq $empty;
-                $blocklist->[$block]{"Paternal"} = separate_intercross( $m, $pattern )
-                  if $blocklist->[$block]{"Paternal"} eq $empty;
+            for my $b ( @{ $intercross_blocks{$pattern} } ) {
+                $blocklist->[$b]{'Maternal'} = $m;
+                $blocklist->[$b]{'Paternal'} = separate_intercross( $m, $pattern );
+                $blocklist->[$b]{'validity'} =~ s/I(.).M.P./I$1cMVPc/i;
             }
         }
     }
+
+    get_block_stats( "After inferring intercross maternals", $blocklist, $metadata );
 
     return;
 }
@@ -785,26 +592,54 @@ sub get_intercross_consensus {
     $consensus;
 }
 
-sub get_type_blocks {
-    my ( $typename, $blocklist, $metadata ) = @_;
+sub fill_remaining_maternal_patterns {
+    my ( $blocklist, $valid_patterns, $metadata ) = @_;
 
-    my @types;
-    for my $type ( keys %{ $metadata->{types} } ) {
-        push @types, $type if $type =~ /$typename/;
-    }
-    my %type_blocks;
-    for my $i ( 0 .. $#{$blocklist} ) {
-        for my $type (@types) {
-            my $block = $blocklist->[$i];
-            $type_blocks{ $block->{$type} }{type} = $type;
-            $type_blocks{ $block->{$type} }{length} += $block->{length};
-            push @{ $type_blocks{ $block->{$type} }{blocks} }, $i;
+    my %paternal;
+    for my $block ( @{$blocklist} ) {
+        if ( $block->{'validity'} =~ /I. m p / ) {
+            for my $print ( keys %{ $valid_patterns->{'Maternal'} } ) {
+                if (   linked( $print, $block->{'IntercrossHom'} )
+                    or linked( mirror($print), $block->{'IntercrossHom'} ) )
+                {
+                    $block->{'Maternal'} = $print;
+                    $block->{'Paternal'} = separate_intercross( $print, $block->{'IntercrossHom'} );
+                    $block->{'validity'} =~ s/I(.) m p /I$1cMVPc/i;
+                    last;
+                }
+            }
+        }
+        if ( $block->{'validity'} =~ /MVP[Vc]/ ) {
+            $paternal{ $block->{'Paternal'} }{ $block->{'Maternal'} } += $block->{'length'};
         }
     }
 
-    my @type_patterns = sort { $type_blocks{$b}{length} <=> $type_blocks{$a}{length} } keys %type_blocks;
+    for my $block ( @{$blocklist} ) {
+        if ( $block->{'validity'} =~ /m P/ ) {
+            if ( defined $paternal{ $block->{'Paternal'} } or defined $paternal{ mirror( $block->{'Paternal'} ) } ) {
+                $block->{'Maternal'} =
+                  defined $paternal{ $block->{'Paternal'} }
+                  ? ( keys %{ $paternal{ $block->{'Paternal'} } } )[0]
+                  : ( keys %{ $paternal{ mirror( $block->{'Paternal'} ) } } )[0];
+                $block->{'validity'} =~ s/m P./MVPc/i;
+            }
+            else {
+                for my $paternal ( keys %paternal ) {
+                    my $linked_paternal =
+                        linked( $paternal, $block->{'Paternal'} ) ? $paternal
+                      : linked( mirror($paternal), $block->{'Paternal'} ) ? mirror($paternal)
+                      :                                                     '';
+                    next if $linked_paternal eq '';
+                    $block->{'Maternal'} = ( keys %{ $paternal{$linked_paternal} } )[0];
+                    $paternal{ $block->{'Paternal'} }{ $block->{'Maternal'} } += $block->{'length'};
+                    $block->{'validity'} =~ s/m P./MVPc/i;
+                    last;
+                }
+            }
+        }
+    }
 
-    ( \%type_blocks, \@type_patterns );
+    get_block_stats( "After filling remaining maternals", $blocklist, $metadata );
 }
 
 sub collapse {
@@ -1574,4 +1409,122 @@ sub get_header_types {
     delete $types{"length"};
 
     ( \@header, \%types );
+}
+
+## Linkage tests
+
+sub linked {
+    my ( $a, $b ) = @_;
+    ( $a =~ /H/ and $b =~ /H/ ) ? linked_intercross( $a, $b ) : linked_backcross( $a, $b );
+}
+
+sub linked_backcross {
+    my ( $a, $b ) = @_;
+
+    # If either pattern is Intercross, remove individuals where Intercross is H
+    if ( $a =~ /H/ or $b =~ /H/ ) {
+        my @a = split //, $a;
+        my @b = split //, $b;
+        my @new_a;
+        my @new_b;
+        for my $i ( 0 .. $#a ) {
+            next if $a[$i] =~ /H/ or $b[$i] =~ /H/;
+            push @new_a, $a[$i];
+            push @new_b, $b[$i];
+        }
+        $a = join '', @new_a;
+        $b = join '', @new_b;
+    }
+    my $N = length $a;
+    my $R = hamming( $a, $b );
+    my $r = $R / $N;
+    my $LOD =
+      ( ( $N - $R ) * ( log( 1 - $r ) / log(10) ) ) + ( $R * ( log($r) / log(10) ) ) + ( $N * ( log(2) / log(10) ) );
+    return $LOD > 3;
+}
+
+sub linked_intercross {
+    my ( $a, $b ) = @_;
+
+    my $N      = length $a;
+    my $haps   = get_haps( $a, $b );
+    my $r      = f2_em( $haps, $N, 0.25 );
+    my $p_re   = calc_p_re($r);
+    my $R      = calc_R( $haps, $p_re );
+    my $LR_r   = calc_LR( $r, $R, $N );
+    my $LR_ind = calc_LR( 0.5, $R, $N );
+    my $LOD    = log( $LR_r / $LR_ind ) / log(10);
+    return $LOD > 3;
+}
+
+sub f2_em {
+    my ( $haps, $N, $r ) = @_;
+    for my $i ( 1 .. 100 ) {
+        my $p_re  = calc_p_re($r);
+        my $R     = calc_R( $haps, $p_re );
+        my $S     = calc_S( $haps, $p_re );
+        my $new_r = $R / ( 2 * $N );
+        last if sprintf( "%.5f", $new_r ) eq sprintf( "%.5f", $r );
+        $r = $new_r;
+    }
+
+    $r;
+}
+
+sub get_haps {
+    my ( $a, $b ) = @_;
+
+    my @a = split //, $a;
+    my @b = split //, $b;
+
+    my %haps;
+    for my $i ( 'A', 'B', 'H' ) {
+        for my $j ( 'A', 'B', 'H' ) {
+            $haps{ $i . $j } = 0;
+        }
+    }
+    for my $i ( 0 .. $#a ) {
+        my $hap = $a[$i] . $b[$i];
+        $haps{$hap}++;
+    }
+    return \%haps;
+}
+
+sub calc_p_re {
+    my $r = shift;
+    ( $r**2 ) / ( ( ( 1 - $r )**2 ) + ( $r**2 ) )
+
+}
+
+sub calc_R {
+    my ( $haps, $p_re ) = @_;
+
+    0 * $haps->{'AA'} +
+      1 * $haps->{'AH'} +
+      2 * $haps->{'AB'} +
+      1 * $haps->{'HA'} +
+      2 * $haps->{'HH'} * $p_re +
+      1 * $haps->{'HB'} +
+      2 * $haps->{'BA'} +
+      1 * $haps->{'BH'} +
+      0 * $haps->{'BB'};
+}
+
+sub calc_S {
+    my ( $haps, $p_re ) = @_;
+
+    2 * $haps->{'AA'} +
+      1 * $haps->{'AH'} +
+      0 * $haps->{'AB'} +
+      1 * $haps->{'HA'} +
+      2 * $haps->{'HH'} * ( 1 - $p_re ) +
+      1 * $haps->{'HB'} +
+      0 * $haps->{'BA'} +
+      1 * $haps->{'BH'} +
+      2 * $haps->{'BB'};
+}
+
+sub calc_LR {
+    my ( $r, $R, $N ) = @_;
+    ( 1 - $r )**( $N - $R ) * ( $r**$R );
 }
