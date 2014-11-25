@@ -48,24 +48,35 @@ my %chromosomes = (
 );
 
 my %args;
-$args{input}   = "";
-$args{output}  = "test";
-$args{verbose} = "";
+$args{input}       = "";
+$args{output}      = "test";
+$args{known}       = "";
+$args{corrections} = "";
+$args{verbose}     = "";
 
 my $options_okay = GetOptions(
-    'input=s'  => \$args{input},
-    'output=s' => \$args{output},
-    'verbose'  => \$args{verbose}
+    'input=s'       => \$args{input},
+    'output=s'      => \$args{output},
+    'known=s'       => \$args{known},
+    'corrections=s' => \$args{corrections},
+    'verbose'       => \$args{verbose}
 );
+
+croak "Please supply an input database with -i" if $args{input} eq "";
+
+croak "Known markers file $args{known} does not exist! $OS_ERROR\n" unless $args{known} eq "" or -e $args{known};
+
+croak "Corrections file $args{corrections} does not exist! $OS_ERROR\n"
+  unless $args{corrections} eq ""
+  or -e $args{corrections};
 
 my $metadata = { verbose => $args{verbose} };
 
 print STDERR "INFER MARKERS\n";
-my ( $blocklist, $linkage_groups, $marker_blocks ) =
-  load_markers( $args{input}, $metadata );
+my $blocklist = refine_markers( $args{input}, $args{corrections}, $metadata );
 
 print STDERR "MAKING LINKAGE MAPS\n";
-make_linkage_maps( $blocklist, $args{output}, $linkage_groups, $marker_blocks );
+my ( $linkage_groups, $marker_blocks ) = make_linkage_maps( $blocklist, $args{output}, $args{known} );
 
 output_marker_blocks( $linkage_groups, $marker_blocks, $args{output} );
 
@@ -74,11 +85,11 @@ print STDERR "Done\n";
 exit;
 
 ## INFER MARKERS
-sub load_markers {
-    my ( $input, $metadata ) = @_;
+sub refine_markers {
+    my ( $input, $corrections, $metadata ) = @_;
 
     print STDERR "Loading blocks...\n";
-    my $blocklist = load_blocks( $input, $metadata );
+    my $blocklist = load_blocks( $input, $corrections, $metadata );
 
     correct_paternal( $blocklist, $metadata );
 
@@ -86,17 +97,26 @@ sub load_markers {
 
     #    fill_empty_blocks( $blocklist, $valid_patterns, $metadata );
 
-    my ( $linkage_groups, $marker_blocks ) = build_linkage_groups( $blocklist, $metadata );
-
-    ( $blocklist, $linkage_groups, $marker_blocks );
+    $blocklist;
 }
 
 sub load_blocks {
-    my ( $input, $metadata ) = @_;
+    my ( $input, $corrections, $metadata ) = @_;
 
     my $blocklist = [];
     my $header;
     my $types;
+
+    my %correct;
+    if ( $corrections ne '' ) {
+        open my $correctfile, '<', $corrections or croak "Can't open corrections file $corrections! $OS_ERROR\n";
+        while ( my $correctline = <$correctfile> ) {
+            chomp $correctline;
+            my ( $wrong, $right ) = split /\t/, $correctline;
+            $correct{$wrong} = $right;
+        }
+        close $correctfile;
+    }
 
     print STDERR "Load cleanblocks from database...\n" if $metadata->{verbose};
     my $dbh = DBI->connect( "dbi:SQLite:dbname=$input", "", "" );
@@ -118,6 +138,15 @@ sub load_blocks {
             $samplenum = length $block->{Maternal};
             $empty     = ' ' x $samplenum;
             last;
+        }
+    }
+
+    print STDERR "Correcting patterns...\n";
+    for my $block ( @{$blocklist} ) {
+        for my $field ( keys %{$block} ) {
+            if ( defined $correct{ $block->{$field} } ) {
+                $block->{$field} = $correct{ $block->{$field} };
+            }
         }
     }
 
@@ -283,15 +312,13 @@ sub fill_empty_blocks {
 }
 
 sub build_linkage_groups {
-    my ( $blocklist, $metadata ) = @_;
+    my ( $blocklist, $known, $metadata ) = @_;
 
     my %linkage_groups;
     my %marker_blocks;
 
     for my $b ( 0 .. $#{$blocklist} ) {
         my $block = $blocklist->[$b];
-
-        next if $block->{validity} !~ /V$/;
 
         my $maternal = $block->{Maternal};
         my $paternal = $block->{Paternal};
@@ -307,6 +334,18 @@ sub build_linkage_groups {
         $marker_blocks{$paternal}{ $block->{scaffold} }{ $block->{start} } =
           $block->{end};
     }
+    if ( $known ne '' ) {
+        open my $knownfile, '<', $known or croak "Can't open known file $known: $OS_ERROR\n";
+        while ( my $knownline = <$knownfile> ) {
+            chomp $knownline;
+            my ( $maternal, $paternal ) = split /\t/, $knownline;
+            $linkage_groups{$maternal}{$paternal}{length}   = 0;
+            $linkage_groups{$maternal}{$paternal}{blocks}   = 0;
+            $linkage_groups{$maternal}{$paternal}{output}   = $paternal;
+            $linkage_groups{$maternal}{$paternal}{validity} = ();
+        }
+        close $knownfile;
+    }
 
     ( \%linkage_groups, \%marker_blocks );
 }
@@ -314,9 +353,9 @@ sub build_linkage_groups {
 ## MAKE LINKAGE MAPS
 
 sub make_linkage_maps {
-    my ( $blocklist, $output, $linkage_groups, $marker_block ) = @_;
+    my ( $blocklist, $output, $known ) = @_;
 
-    my %genome;
+    my ( $linkage_groups, $marker_blocks ) = build_linkage_groups( $blocklist, $known, $metadata );
 
     my $pm = new Parallel::ForkManager( scalar keys %{$linkage_groups} );
 
@@ -329,45 +368,91 @@ sub make_linkage_maps {
           "Building map for print $chromosome_print, chromosome %3s.\t%4d paternal markers to process\n",
           $chromosome, $marker_num;
 
+        # First pass through markers in order of length
         my %revised_lg;
         my $marker_count;
         my %rejects;
-        for my $marker ( sort { $lg->{$b}{length} <=> $lg->{$a}{length} } keys %{$lg} ) {
+        for my $marker (
+            sort { $lg->{$a}{length} == 0 ? -1 : $lg->{$b}{length} == 0 ? 1 : $lg->{$b}{length} <=> $lg->{$a}{length} }
+            keys %{$lg}
+          )
+        {
             $marker_count++;
-            printf STDERR "%2d: processed %3d of %3d markers, retained %3d\n", $chromosome, $marker_count, $marker_num,
-              scalar keys %revised_lg
-              if $marker_count % 10 == 0;
             my ( $fixed_marker, $outcome ) =
               integrate_marker( $marker, $lg->{$marker}{length}, \%revised_lg, $chromosome_print, $output );
             $lg->{$marker}{output} = $fixed_marker if $outcome eq 'Valid';
             $rejects{$outcome}{$marker} = $fixed_marker;
         }
-        printf STDERR "%2d: ", $chromosome;
-        for my $outcome (sort keys %rejects) {
-            my $marker_num = keys %{$rejects{$outcome}};
-            my $bases;
-            for my $marker (keys %{$rejects{$outcome}}) {
-                $bases += $lg->{$marker}{length};
-                delete $lg->{$marker} if $outcome ne 'Valid';
+
+        # Attempt to integrate rejected markers until no more are added on one pass
+        my $more_added = 1;
+
+        while ($more_added) {
+            $more_added = 0;
+            for my $outcome ( sort keys %rejects ) {
+                next if $outcome eq 'Valid';
+                for my $marker (
+                    sort {
+                            $lg->{$a}{length} == 0 ? -1
+                          : $lg->{$b}{length} == 0 ? 1
+                          : $lg->{$b}{length} <=> $lg->{$a}{length}
+                    } keys %{ $rejects{$outcome} }
+                  )
+                {
+
+                    my ( $fixed_marker, $new_outcome ) =
+                      integrate_marker( $marker, $lg->{$marker}{length}, \%revised_lg, $chromosome_print, $output );
+                    if ( $new_outcome eq 'Valid' ) {
+                        $more_added++;
+                        $lg->{$marker}{output} = $fixed_marker;
+                        delete $rejects{$outcome}{$marker};
+                        delete $rejects{$outcome} if ( keys %{ $rejects{$outcome} } == 0 );
+                        $rejects{'Valid'}{$marker} = $fixed_marker;
+                    }
+                }
             }
-            printf STDERR "%8s:%3d:%8d ", $outcome, $marker_num, $bases;
         }
-        print STDERR "\n";
-        $genome{$chromosome_print} = make_linkage_map( $chromosome_print, $lg, $output );
+
+        my $summary       = sprintf "%2d: ", $chromosome;
+        my $total_markers = 0;
+        my $total_bases   = 0;
+        my %total_uniques;
+        for my $outcome ( "Disorder", "End", "Missing", "Valid" ) {
+            my %unique_markers;
+            my $marker_num = 0;
+            my $bases      = 0;
+            if ( defined $rejects{$outcome} ) {
+                $marker_num = keys %{ $rejects{$outcome} };
+                for my $marker ( keys %{ $rejects{$outcome} } ) {
+                    $unique_markers{ $lg->{$marker}{output} }++;
+                    $total_uniques{ $lg->{$marker}{output} }++;
+                    $bases += $lg->{$marker}{length};
+                    delete $lg->{$marker} if $outcome ne 'Valid';
+                }
+            }
+            $total_markers += $marker_num;
+            $total_bases   += $bases;
+            $summary .= sprintf "%8s:%4d:%4d:%9d ", $outcome, $marker_num, scalar keys %unique_markers, $bases;
+        }
+        $summary .= sprintf "   Total:%4d:%4d:%9d\n", $total_markers, scalar keys %total_uniques, $total_bases;
+        print STDERR $summary;
+
+        make_linkage_map( $chromosome_print, $lg, $output );
 
         $pm->finish();
     }
     $pm->wait_all_children;
 
-    \%genome;
+    ( $linkage_groups, $marker_blocks );
 }
 
 sub integrate_marker {
-    my ( $marker, $length, $rlg, $chromosome_print, $output ) = @_;
+    my ( $marker, $length, $rlg, $chromosome_print, $output, $verbose ) = @_;
+    $verbose = $verbose // 0;
 
     $rlg->{$marker}{output} = $marker;
     $rlg->{$marker}{length} = $length;
-    return ( $marker, 'Valid' ) if keys %{$rlg} < 3 or $length >= 100000;
+    return ( $marker, 'Valid' ) if keys %{$rlg} < 3 or $length == 0 or $length >= 200000;
 
     # Build map with marker in it
     my $marker_id = run_mstmap( $chromosome_print, $rlg, $output );
@@ -381,9 +466,9 @@ sub integrate_marker {
         my $chromosome_lgs = keys %{$map};
     }
 
-    my ( $fixed_marker, $outcome ) = check_marker_on_map( $marker, $map, $rlg, $marker_id );
+    my ( $fixed_marker, $outcome ) = check_marker_on_map( $marker, $map, $rlg, $marker_id, $verbose );
 
-    delete $rlg->{$marker} if $outcome eq 'End' or $outcome eq 'Disorder';
+    delete $rlg->{$marker} if $outcome eq 'Disorder' or $outcome eq 'End' or $outcome eq 'Missing';
 
     if ( $outcome eq 'Valid' and $fixed_marker ne $marker ) {
         if ( !defined $rlg->{$fixed_marker} ) {
@@ -402,28 +487,32 @@ sub integrate_marker {
 }
 
 sub check_marker_on_map {
-    my ( $marker, $map, $markers, $marker_id ) = @_;
+    my ( $marker, $map, $markers, $marker_id, $verbose ) = @_;
 
     my $original_marker;
-    my $new_marker = '';
+    my $new_marker    = '';
     my $marker_status = '';
-#    print "\n";
+
+    print "\n" if $verbose;
     for my $lg ( sort keys %{$map} ) {
         my @cMs = sort { $a <=> $b } keys %{ $map->{$lg} };
         for my $i ( 0 .. $#cMs ) {
-            my $new = 0;
+            my $new          = 0;
             my $cM           = $cMs[$i];
             my $cM_marker_id = ( keys %{ $map->{$lg}{$cM} } )[0];
             my $cM_marker    = $marker_id->{$cM_marker_id};
-#            print "\n$lg\t$cM\t$cM_marker\t$markers->{$cM_marker}{output}\t$markers->{$cM_marker}{length}";
 
-            if ($cM_marker eq $marker) {
+            print "\n$lg\t$cM\t$markers->{$cM_marker}{output}\t$markers->{$cM_marker}{length}" if $verbose;
+
+            if ( $cM_marker eq $marker ) {
                 $new++;
-#                print "\tNew";
+
+                print "\tNew" if $verbose;
             }
 
             if ( $i == 0 or $i == $#cMs ) {
-#                print "\tEnd";
+
+                print "\tEnd" if $verbose;
                 $marker_status = 'End' if $new;
                 next;
             }
@@ -447,20 +536,22 @@ sub check_marker_on_map {
             }
             $fixed_marker = join '', @this;
             $new_marker = $fixed_marker if $new;
-            
-            if ($fixed_marker ne $original_marker) {
+
+            if ( $fixed_marker ne $original_marker ) {
                 if ($new) {
-#                    print "\tFixed"
+
+                    print "\tFixed" if $verbose;
                 }
                 else {
-#                    print "\tDisordered";
+                    print "\tDisordered" if $verbose;
                     $marker_status = 'Disorder';
                 }
             }
         }
     }
     $marker_status = $marker_status ne '' ? $marker_status : $new_marker eq '' ? 'Missing' : 'Valid';
- #   print "\t$marker_status";
+
+    print "\t$marker_status" if $verbose;
     ( $new_marker, $marker_status );
 }
 
@@ -473,7 +564,7 @@ sub make_linkage_map {
     my $map = load_map( $output, $chromosome_print );
     my $chromosome_lgs = keys %{$map};
 
-#    print STDERR "\tBuilt $chromosome_lgs linkage groups";
+    #    print STDERR "\tBuilt $chromosome_lgs linkage groups";
 
     # If more than one linkage map returned for this chromosome,
     # attempt to rephase markers and remake the map
@@ -484,16 +575,16 @@ sub make_linkage_map {
         $map = load_map( $output, $chromosome_print );
         my $chromosome_lgs = keys %{$map};
 
-#        print STDERR "\tAfter phasing, $chromosome_lgs linkage groups";
+        #        print STDERR "\tAfter phasing, $chromosome_lgs linkage groups";
     }
 
-#    smooth_markers( $map, $markers, $marker_id );
-#    $marker_id = run_mstmap( $chromosome_print, $markers, $output );
-#    $map = load_map( $output, $chromosome_print );
+    #    smooth_markers( $map, $markers, $marker_id );
+    #    $marker_id = run_mstmap( $chromosome_print, $markers, $output );
+    #    $map = load_map( $output, $chromosome_print );
 
     my $map_markers = write_map_markers( $map, $markers, $marker_id, $output, $chromosome_print );
 
-#    print STDERR "\n";
+    #    print STDERR "\n";
 
     $map_markers;
 }
@@ -506,7 +597,11 @@ sub run_mstmap {
 
     my $id = 1;
     my %marker_id;
-    for my $marker ( keys %{$markers} ) {
+    for my $marker (
+        sort { $markers->{$a}{output} cmp $markers->{$b}{output} || $markers->{$b}{length} <=> $markers->{$a}{length} }
+        keys %{$markers}
+      )
+    {
         $marker_id{$id} = $marker;
         $markers->{$marker}{output} =
           check_mirror( $markers->{$marker}{output}, $markers );
