@@ -2,6 +2,7 @@ use List::Util qw/sum min max/;
 use POSIX qw/ceil/;
 use Getopt::Long qw/GetOptionsFromString/;
 use DBD::SQLite;
+use Term::ExtendedColor qw/uncolor/;
 
 use strict;
 use warnings;
@@ -26,10 +27,12 @@ our $setup = sub {
 
     my $genetics_filename = "";
     my $rms_filename      = "";
+    my $map_filename      = "";
     my $options_okay      = GetOptionsFromString(
         $args->{extraargs},
         'genetics=s'    => \$genetics_filename,
         'rmsfilename=s' => \$rms_filename,
+        'mapfilename=s' => \$map_filename,
     );
     croak "Can't process user options: $OS_ERROR\n" if !$options_okay;
 
@@ -38,11 +41,13 @@ our $setup = sub {
 
     my $genetics = load_genetics( $genetics_filename, $rms_filename );
 
+    my $valid_markers = load_map($map_filename);
+
     my $samples = get_samples( $args->{vcf_filename}, $genetics );
 
     my $dbfilename = create_output_database( $args->{output_prefix}, $genetics );
 
-    { genetics => $genetics, samples => $samples, dbfilename => $dbfilename };
+    { genetics => $genetics, valid_markers => $valid_markers, samples => $samples, dbfilename => $dbfilename };
 };
 
 sub load_genetics {
@@ -83,7 +88,6 @@ sub load_genetics {
         my ( $parents, $males, $females, $type, $recombination ) = split /\t/, $marker_type;
         $genetics{types}{$parents}{$type}{'Male'}   = $males;
         $genetics{types}{$parents}{$type}{'Female'} = $females;
-
 
         $genetics{gts}{$type}{'Male'}   = $genetics{gts}{$type}{'Male'}   // get_gts($males);
         $genetics{gts}{$type}{'Female'} = $genetics{gts}{$type}{'Female'} // get_gts($females);
@@ -187,6 +191,41 @@ sub get_samples {
     \%samples;
 }
 
+sub load_map {
+    my ($map_filename) = @_;
+
+    my %markers;
+    return \%markers if $map_filename eq '';
+
+    open my $mapfile, '<', $map_filename or croak "Can't open map file $map_filename! $OS_ERROR\n";
+
+    my $header = <$mapfile>;
+    my $empty;
+    while ( my $mapline = <$mapfile> ) {
+        chomp $mapline;
+        next if $mapline eq "";
+        my ( $chromosome, $print, $cM, $original, $clean, $length ) = split /\t/, uncolor $mapline;
+
+        if ( !defined $empty ) {
+            $empty = ' ' x length $clean;
+        }
+        map { s/B/H/g if /^[AB]+$/ } ( $print, $clean );
+
+        for my $pattern ( $print, $clean ) {
+            next if defined $markers{$pattern};
+            my $ref =
+              $pattern eq $print
+              ? { maternal => $print, paternal => $empty }
+              : { maternal => $print, paternal => $clean };
+            $markers{$pattern} = $ref;
+            $markers{ mirror($pattern) } = $ref;
+        }
+    }
+    close $mapfile;
+
+    \%markers;
+}
+
 sub create_output_database {
     my ( $output_prefix, $genetics ) = @_;
 
@@ -225,8 +264,8 @@ sub create_output_database {
 
 our $process = sub {
     my ( $scf, $scfref, $data, $userdata, $scfl ) = @_;
-    $data->{$scf} = get_markers( $scfref, $userdata->{samples}, $userdata->{genetics} );
-    find_blocks( $data->{$scf}, $scf, $userdata );
+    $data->{$scf} = get_markers( $scfref, $userdata );
+    find_blocks( $data->{$scf}, $userdata );
     collapse( $data->{$scf}, $userdata->{samples} );
     output_to_db( $scf, $data->{$scf}, $userdata, $scfl );
     $data->{$scf} = "";
@@ -234,13 +273,13 @@ our $process = sub {
 };
 
 sub get_markers {
-    my ( $scfref, $samples, $genetics ) = @_;
+    my ( $scfref, $userdata ) = @_;
 
     my %markers;
     my %prevpos;
     foreach my $snp ( @{$scfref} ) {
         chomp $snp;
-        my ( $marker, $type, $parentcall, $pos, $pattern, $info ) = parse_snp( $snp, $samples, $genetics );
+        my ( $marker, $type, $parentcall, $pos, $pattern, $info ) = parse_snp( $snp, $userdata );
         if ( $type ne "Reject" && $info->{'FS'} > FS_THRESHOLD ) {
             $info->{error} = "Fails FS threshold: Type $type";
             $type = "Reject";
@@ -303,7 +342,9 @@ sub invert_pattern {
 }
 
 sub parse_snp {
-    my ( $snp, $samples, $genetics ) = @_;
+    my ( $snp, $userdata ) = @_;
+    my $genetics = $userdata->{genetics};
+    my $samples  = $userdata->{samples};
 
     my @f     = split /\t/, $snp;
     my $callf = $f[8];
@@ -352,6 +393,12 @@ sub parse_snp {
         $marker{$sample}{gt} = $gt;
         $pattern .= $gt;
         $marker{$sample}{gq} = $calls->{$sample}{'GQ'};
+    }
+
+    my $valid_type = check_marker_on_map( $pattern, $userdata->{valid_markers} );
+    if ( defined $valid_type ) {
+        $info{error} = "On map";
+        return ( \%marker, $valid_type, $parentcall, $pos, $pattern, \%info );
     }
 
     if ( keys %invalid_samples ) {
@@ -584,8 +631,24 @@ sub get_parent_call {
     return ( $parentcall, \%vgt );
 }
 
+sub check_marker_on_map {
+    my ( $pattern, $valid_markers ) = @_;
+
+    return if !defined $valid_markers->{$pattern};
+    my $type =
+      (
+        $pattern eq $valid_markers->{$pattern}{maternal}
+          or mirror($pattern) eq $valid_markers->{$pattern}{maternal}
+      ) ? "Maternal-AHAH"
+      : ( $pattern eq $valid_markers->{$pattern}{paternal}
+          or mirror($pattern) eq $valid_markers->{$pattern}{paternal} ) ? "Paternal-AHAH"
+      : undef;
+
+    return $type;
+}
+
 sub find_blocks {
-    my ( $markers, $scf, $userdata ) = @_;
+    my ( $markers, $userdata ) = @_;
 
     for my $type ( keys %{$markers} ) {
         next if ( $type eq "Reject" );
@@ -647,7 +710,7 @@ sub get_sample_consensus {
         return;
     }
 
-    my $maxseq = get_max_seq($seqblocks, $genetics->{recombination}{$type});
+    my $maxseq = get_max_seq( $seqblocks, $genetics->{recombination}{$type} );
     my @maxgts = split //, $maxseq;
 
     # Get block for each position, or neighbouring blocks
@@ -681,17 +744,18 @@ sub get_sample_consensus {
 }
 
 sub get_max_seq {
-    my ($seqblocks, $recombination) = @_;
+    my ( $seqblocks, $recombination ) = @_;
 
     my %gts;
     map { $gts{ $_->{gt} } += $_->{length} } @{$seqblocks};
     my ( $gtmax1, $gtmax2 ) = ( reverse sort { $gts{$a} <=> $gts{$b} } keys %gts )[ 0, 1 ];
 
     my %stateseq;
-    # If recombination allowed, check all breakpoints; if not, just check either genotype
-    my @breakpoints = $recombination eq 'Y' ? (0..$#{$seqblocks}) : (0);
 
-    for my $breakpoint ( @breakpoints ) {
+    # If recombination allowed, check all breakpoints; if not, just check either genotype
+    my @breakpoints = $recombination eq 'Y' ? ( 0 .. $#{$seqblocks} ) : (0);
+
+    for my $breakpoint (@breakpoints) {
         my $gt1    = $gtmax1;
         my $gt2    = $gtmax2;
         my $seq1   = "";
@@ -833,9 +897,7 @@ sub output_markers_to_db {
         foreach my $pos ( keys %{ $data->{$type} } ) {
             my $stp = $data->{$type}{$pos};
 
-            #            $stp->{cons} = $stp->{marker}{cons} // "";
-
-            if ( $type eq "Reject" ) {
+            if ( !defined $stp->{p} ) {
                 $stp->{p}          = -1;
                 $stp->{rmsobs}     = -1;
                 $stp->{rmspattern} = -1;
@@ -947,7 +1009,6 @@ sub output_blocks_to_db {
     $dbh->commit;
 }
 
-
 sub phase {
     my ( $pattern, $type, $userdata ) = @_;
     if ( $type =~ /Paternal-AHAB/ ) {
@@ -973,6 +1034,23 @@ sub phase {
     }
 
     $pattern;
+}
+
+sub mirror {
+    my $pat = shift;
+    if (   ( $pat =~ 'A' and $pat =~ 'B' and $pat =~ 'H' )
+        or ( $pat =~ 'A' and $pat =~ 'B' and $pat !~ 'H' ) )
+    {
+        $pat =~ tr/AB/BA/;
+    }
+    if ( $pat =~ 'A' and $pat =~ 'H' and $pat !~ 'B' ) {
+        $pat =~ tr /AH/HA/;
+    }
+    if ( $pat =~ 'B' and $pat =~ 'H' and $pat !~ 'A' ) {
+        $pat =~ tr /HB/BH/;
+    }
+
+    $pat;
 }
 
 1;

@@ -112,7 +112,7 @@ sub load_blocks {
         open my $correctfile, '<', $corrections or croak "Can't open corrections file $corrections! $OS_ERROR\n";
         while ( my $correctline = <$correctfile> ) {
             chomp $correctline;
-            my ( $wrong, $right ) = split /\t/, $correctline;
+            my ( $wrong, $right, $comment ) = split /\t/, $correctline;
             $correct{$wrong} = $right;
         }
         close $correctfile;
@@ -338,11 +338,14 @@ sub build_linkage_groups {
         open my $knownfile, '<', $known or croak "Can't open known file $known: $OS_ERROR\n";
         while ( my $knownline = <$knownfile> ) {
             chomp $knownline;
-            my ( $maternal, $paternal ) = split /\t/, $knownline;
-            $linkage_groups{$maternal}{$paternal}{length}   = 0;
-            $linkage_groups{$maternal}{$paternal}{blocks}   = 0;
-            $linkage_groups{$maternal}{$paternal}{output}   = $paternal;
-            $linkage_groups{$maternal}{$paternal}{validity} = ();
+            my ( $maternal, $paternal, $comment ) = split /\t/, $knownline;
+            if (!defined $linkage_groups{$maternal}{$paternal}) {
+                $linkage_groups{$maternal}{$paternal}{length}   = 0;
+                $linkage_groups{$maternal}{$paternal}{blocks}   = 0;
+                $linkage_groups{$maternal}{$paternal}{output}   = $paternal;
+                $linkage_groups{$maternal}{$paternal}{validity} = ();
+            }
+            $linkage_groups{$maternal}{$paternal}{known}++;
         }
         close $knownfile;
     }
@@ -368,74 +371,13 @@ sub make_linkage_maps {
           "Building map for print $chromosome_print, chromosome %3s.\t%4d paternal markers to process\n",
           $chromosome, $marker_num;
 
-        # First pass through markers in order of length
-        my %revised_lg;
-        my $marker_count;
-        my %rejects;
-        for my $marker (
-            sort { $lg->{$a}{length} == 0 ? -1 : $lg->{$b}{length} == 0 ? 1 : $lg->{$b}{length} <=> $lg->{$a}{length} }
-            keys %{$lg}
-          )
-        {
-            $marker_count++;
-            my ( $fixed_marker, $outcome ) =
-              integrate_marker( $marker, $lg->{$marker}{length}, \%revised_lg, $chromosome_print, $output );
-            $lg->{$marker}{output} = $fixed_marker if $outcome eq 'Valid';
-            $rejects{$outcome}{$marker} = $fixed_marker;
-        }
+        my ( $revised_lg, $rejects ) = build_initial_chromosome_map( $lg, $chromosome_print, $output );
 
-        # Attempt to integrate rejected markers until no more are added on one pass
-        my $more_added = 1;
+        revise_chromosome_map( $lg, $revised_lg, $rejects, $chromosome_print, $output );
 
-        while ($more_added) {
-            $more_added = 0;
-            for my $outcome ( sort keys %rejects ) {
-                next if $outcome eq 'Valid';
-                for my $marker (
-                    sort {
-                            $lg->{$a}{length} == 0 ? -1
-                          : $lg->{$b}{length} == 0 ? 1
-                          : $lg->{$b}{length} <=> $lg->{$a}{length}
-                    } keys %{ $rejects{$outcome} }
-                  )
-                {
+        output_rejected_markers ($chromosome_print, $rejects, $lg, $output);
 
-                    my ( $fixed_marker, $new_outcome ) =
-                      integrate_marker( $marker, $lg->{$marker}{length}, \%revised_lg, $chromosome_print, $output );
-                    if ( $new_outcome eq 'Valid' ) {
-                        $more_added++;
-                        $lg->{$marker}{output} = $fixed_marker;
-                        delete $rejects{$outcome}{$marker};
-                        delete $rejects{$outcome} if ( keys %{ $rejects{$outcome} } == 0 );
-                        $rejects{'Valid'}{$marker} = $fixed_marker;
-                    }
-                }
-            }
-        }
-
-        my $summary       = sprintf "%2d: ", $chromosome;
-        my $total_markers = 0;
-        my $total_bases   = 0;
-        my %total_uniques;
-        for my $outcome ( "Disorder", "End", "Missing", "Valid" ) {
-            my %unique_markers;
-            my $marker_num = 0;
-            my $bases      = 0;
-            if ( defined $rejects{$outcome} ) {
-                $marker_num = keys %{ $rejects{$outcome} };
-                for my $marker ( keys %{ $rejects{$outcome} } ) {
-                    $unique_markers{ $lg->{$marker}{output} }++;
-                    $total_uniques{ $lg->{$marker}{output} }++;
-                    $bases += $lg->{$marker}{length};
-                    delete $lg->{$marker} if $outcome ne 'Valid';
-                }
-            }
-            $total_markers += $marker_num;
-            $total_bases   += $bases;
-            $summary .= sprintf "%8s:%4d:%4d:%9d ", $outcome, $marker_num, scalar keys %unique_markers, $bases;
-        }
-        $summary .= sprintf "   Total:%4d:%4d:%9d\n", $total_markers, scalar keys %total_uniques, $total_bases;
-        print STDERR $summary;
+        output_map_summary( $chromosome, $lg, $rejects );
 
         make_linkage_map( $chromosome_print, $lg, $output );
 
@@ -443,16 +385,74 @@ sub make_linkage_maps {
     }
     $pm->wait_all_children;
 
+    # Collapse rejected markers into one file
+    system('cat test.[ABH]*.rejected.tsv | sort -k1,1n -k4,4 -k2,2 > test.rejected.tsv');
+
     ( $linkage_groups, $marker_blocks );
 }
 
+sub build_initial_chromosome_map {
+    my ( $lg, $chromosome_print, $output ) = @_;
+
+    # First pass through markers in order of length
+    my %revised_lg;
+    my $marker_count;
+    my %rejects;
+    for my $marker (
+        sort { defined $lg->{$a}{known} ? -1 : defined $lg->{$b}{known} ? 1 : $lg->{$b}{length} <=> $lg->{$a}{length} }
+        keys %{$lg}
+      )
+    {
+        $marker_count++;
+        my ( $fixed_marker, $outcome ) =
+          integrate_marker( $marker, $lg->{$marker}, \%revised_lg, $chromosome_print, $output );
+        $lg->{$marker}{output} = $fixed_marker if $outcome eq 'Valid';
+        $rejects{$outcome}{$marker} = $fixed_marker;
+    }
+    ( \%revised_lg, \%rejects );
+}
+
+sub revise_chromosome_map {
+    my ( $lg, $revised_lg, $rejects, $chromosome_print, $output ) = @_;
+
+    # Attempt to integrate rejected markers until no more are added on one pass
+    my $more_added = 1;
+
+    while ($more_added) {
+        $more_added = 0;
+        for my $outcome ( sort keys %{$rejects} ) {
+            next if $outcome eq 'Valid';
+            for my $marker (
+                sort {
+                        defined $lg->{$a}{known} ? -1
+                      : defined $lg->{$b}{known} ? 1
+                      : $lg->{$b}{length} <=> $lg->{$a}{length}
+                } keys %{ $rejects->{$outcome} }
+              )
+            {
+                my ( $fixed_marker, $new_outcome ) =
+                  integrate_marker( $marker, $lg->{$marker}, $revised_lg, $chromosome_print, $output );
+                if ( $new_outcome eq 'Valid' ) {
+                    $more_added++;
+                    $lg->{$marker}{output} = $fixed_marker;
+                    delete $rejects->{$outcome}{$marker};
+                    delete $rejects->{$outcome} if ( keys %{ $rejects->{$outcome} } == 0 );
+                    $rejects->{'Valid'}{$marker} = $fixed_marker;
+                }
+            }
+        }
+    }
+    return;
+}
+
+
 sub integrate_marker {
-    my ( $marker, $length, $rlg, $chromosome_print, $output, $verbose ) = @_;
+    my ( $marker, $marker_ref, $rlg, $chromosome_print, $output, $verbose ) = @_;
     $verbose = $verbose // 0;
 
     $rlg->{$marker}{output} = $marker;
-    $rlg->{$marker}{length} = $length;
-    return ( $marker, 'Valid' ) if keys %{$rlg} < 3 or $length == 0 or $length >= 200000;
+    $rlg->{$marker}{length} = $marker_ref->{length};
+    return ( $marker, 'Valid' ) if keys %{$rlg} < 3 or defined $marker_ref->{known} or $marker_ref->{length} >= 200000;
 
     # Build map with marker in it
     my $marker_id = run_mstmap( $chromosome_print, $rlg, $output );
@@ -828,6 +828,49 @@ sub write_map_markers {
 
     \%chromosome;
 }
+
+sub output_map_summary {
+    my ( $chromosome, $lg, $rejects ) = @_;
+    my $summary       = sprintf "%2d: ", $chromosome;
+    my $total_markers = 0;
+    my $total_bases   = 0;
+    my %total_uniques;
+    for my $outcome ( "Disorder", "End", "Missing", "Valid" ) {
+        my %unique_markers;
+        my $marker_num = 0;
+        my $bases      = 0;
+        if ( defined $rejects->{$outcome} ) {
+            $marker_num = keys %{ $rejects->{$outcome} };
+            for my $marker ( keys %{ $rejects->{$outcome} } ) {
+                $unique_markers{ $lg->{$marker}{output} }++;
+                $total_uniques{ $lg->{$marker}{output} }++;
+                $bases += $lg->{$marker}{length};
+                delete $lg->{$marker} if $outcome ne 'Valid';
+            }
+        }
+        $total_markers += $marker_num;
+        $total_bases   += $bases;
+        $summary .= sprintf "%8s:%4d:%4d:%9d ", $outcome, $marker_num, scalar keys %unique_markers, $bases;
+    }
+    $summary .= sprintf "   Total:%4d:%4d:%9d\n", $total_markers, scalar keys %total_uniques, $total_bases;
+    print STDERR $summary;
+    return;
+}
+
+sub output_rejected_markers {
+    my ($chromosome_print, $rejects, $lg, $output) = @_;
+
+    open my $rejected, '>', "$output.$chromosome_print.rejected.tsv" or croak "Can't open rejected markers file! $OS_ERROR\n";
+
+    for my $outcome (sort keys %{$rejects}) {
+        next if $outcome eq 'Valid';
+        for my $marker (keys %{$rejects->{$outcome}}) {
+            print $rejected "$chromosomes{$chromosome_print}\t$lg->{$marker}{output}\t$lg->{$marker}{length}\t$outcome\n";
+        }
+    }
+    close $rejected;
+}
+
 
 ## MAP GENOME
 
