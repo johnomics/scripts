@@ -977,7 +977,6 @@ sub output_blocks_to_db {
                 my $start = $blockpos;
                 my $end   = $p - 1;
                 my $len   = $end - $start + 1;
-
                 my @out_patterns;
                 for my $out_type (@short_types) {
                     if ( $curpat{$out_type} ne '' ) {
@@ -986,7 +985,7 @@ sub output_blocks_to_db {
                             if ( $block_p >= $start and defined $scfpos{$block_p}{types}{$out_type} ) {
                                 $curpat_present++;
                             }
-                            last if $block_p > $end;
+                            last if $block_p >= $end;
                         }
                         if ( !$curpat_present ) {
                             $curpat{$out_type} = '';
@@ -996,8 +995,9 @@ sub output_blocks_to_db {
                 }
 
                 $insert_handle->execute( $scf, $start, $end, $len, @out_patterns );
-                $curpat{$t} = $scfpos{$p}{types}{$t};
+                map {if (defined $scfpos{$p}{types}{$_}) {$curpat{$_} = $scfpos{$p}{types}{$_}}} @short_types;
                 $blockpos = $p;
+                last;
             }
         }
         $dbh->commit;

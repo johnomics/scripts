@@ -78,7 +78,7 @@ my $blocklist = refine_markers( $args{input}, $args{corrections}, $metadata );
 print STDERR "MAKING LINKAGE MAPS\n";
 my ( $linkage_groups, $marker_blocks ) = make_linkage_maps( $blocklist, $args{output}, $args{known} );
 
-output_marker_blocks( $linkage_groups, $marker_blocks, $args{output} );
+output_marker_blocks( $linkage_groups, $marker_blocks, $args{input}, $args{output} );
 
 print STDERR "Done\n";
 
@@ -95,7 +95,7 @@ sub refine_markers {
 
     collapse( $blocklist, $metadata );
 
-    #    fill_empty_blocks( $blocklist, $valid_patterns, $metadata );
+    output_blocks( $blocklist, $metadata );
 
     $blocklist;
 }
@@ -163,14 +163,18 @@ sub load_blocks {
 
 sub collapse {
     my ( $blocklist, $metadata ) = @_;
+    for my $block ( @{$blocklist} ) {
+        delete $block->{'validity'};
+        delete $block->{'IntercrossHet'};
+        delete $block->{'IntercrossHom'};
+    }
+
     my $i = 0;
     my $j = 1;
     while ( $j <= $#{$blocklist} ) {
         my $same = 1;
         $same = 0
           if ( $blocklist->[$i]{'scaffold'} ne $blocklist->[$j]{'scaffold'} );
-        $same = 0
-          if ( $blocklist->[$i]{'validity'} ne $blocklist->[$j]{'validity'} );
 
         map {
             if ( $blocklist->[$i]{$_} ne $blocklist->[$j]{$_} ) {
@@ -182,7 +186,7 @@ sub collapse {
                     $same = 0;
                 }
             }
-        } keys %{ $metadata->{types} };
+        } ( 'Maternal', 'Paternal' );
 
         if ($same) {
             $blocklist->[$i]{'end'} = $blocklist->[$j]{'end'};
@@ -195,8 +199,6 @@ sub collapse {
             $j++;
         }
     }
-
-    update_block_stats( "After collapse", $blocklist, $metadata );
 
     return;
 }
@@ -271,42 +273,29 @@ sub get_paternal_patterns {
     \%patterns;
 }
 
-sub fill_empty_blocks {
-    my ( $blocklist, $valid_patterns, $metadata ) = @_;
+sub output_blocks {
+    my ( $blocklist, $metadata ) = @_;
 
-    my @empty_blocks;
+    my $dbh = DBI->connect( "dbi:SQLite:dbname=$metadata->{input}", "", "", { AutoCommit => 0 } );
+
+    $dbh->do("DROP TABLE IF EXISTS mapblocks");
+
+    $dbh->do(
+"CREATE TABLE mapblocks (scaffold text, start integer, end integer, length integer, Maternal text, Paternal text)"
+    );
+
+    $dbh->commit;
+
+    my $insert = $dbh->prepare_cached("INSERT INTO mapblocks VALUES (?,?,?,?,?,?)");
+
     for my $block ( @{$blocklist} ) {
-        next if $block->{'validity'} ne 'i  m p  ';
-        push @empty_blocks, $block;
-    }
-
-    my $dbh = DBI->connect( "dbi:SQLite:dbname=$metadata->{input}", "", "" );
-
-    for my $block ( sort { $b->{length} <=> $a->{length} } @empty_blocks ) {
-        my $sth = $dbh->prepare(
-"SELECT position, pattern FROM markers where scaffold=\"$block->{scaffold}\" and position >= $block->{start} and position <= $block->{end} and marker_type=\"Reject\" ORDER BY scaffold, position"
+        $insert->execute(
+            $block->{scaffold}, $block->{start},    $block->{end},
+            $block->{length},   $block->{Maternal}, $block->{Paternal}
         );
-        my $rejects = $dbh->selectall_arrayref( $sth, { Slice => {} } );
-        $sth->finish;
-
-        my $snps = @{$rejects};
-        printf "%-16s\t%8d\t%8d\t%8d\t%6d\n", $block->{scaffold}, $block->{start}, $block->{end},
-          $block->{length}, $snps;
-
-        my %patterns;
-        for my $reject ( @{$rejects} ) {
-
-            #			next if $reject->{pattern} =~ /[01]/ or $reject->{pattern} =~ /^\.+$/;
-            $patterns{ $reject->{pattern} }++;
-        }
-
-        my @sorted_patterns = sort { $patterns{$b} <=> $patterns{$a} } keys %patterns;
-        for my $p ( 0 .. $#sorted_patterns ) {
-            last if $p == 10;
-            print "\t$sorted_patterns[$p]\t$patterns{$sorted_patterns[$p]}\n";
-        }
     }
 
+    $dbh->commit;
     $dbh->disconnect;
 
 }
@@ -330,20 +319,25 @@ sub build_linkage_groups {
         $linkage_groups{$maternal}{$paternal}{length} += $block->{length};
         $linkage_groups{$maternal}{$paternal}{blocks}++;
         $linkage_groups{$maternal}{$paternal}{output} = $paternal;
-        push @{ $linkage_groups{$maternal}{$paternal}{validity}{ $block->{validity} } }, $b;
-        $marker_blocks{$paternal}{ $block->{scaffold} }{ $block->{start} } =
-          $block->{end};
+        if ( defined $marker_blocks{$paternal}{ $block->{scaffold} }{ $block->{start} } ) {
+            if ( $block->{end} > $marker_blocks{$paternal}{ $block->{scaffold} }{ $block->{start} } ) {
+                $marker_blocks{$paternal}{ $block->{scaffold} }{ $block->{start} } = $block->{end};
+            }
+        }
+        else {
+            $marker_blocks{$paternal}{ $block->{scaffold} }{ $block->{start} } = $block->{end};
+        }
     }
+    
     if ( $known ne '' ) {
         open my $knownfile, '<', $known or croak "Can't open known file $known: $OS_ERROR\n";
         while ( my $knownline = <$knownfile> ) {
             chomp $knownline;
             my ( $maternal, $paternal, $comment ) = split /\t/, $knownline;
-            if (!defined $linkage_groups{$maternal}{$paternal}) {
-                $linkage_groups{$maternal}{$paternal}{length}   = 0;
-                $linkage_groups{$maternal}{$paternal}{blocks}   = 0;
-                $linkage_groups{$maternal}{$paternal}{output}   = $paternal;
-                $linkage_groups{$maternal}{$paternal}{validity} = ();
+            if ( !defined $linkage_groups{$maternal}{$paternal} ) {
+                $linkage_groups{$maternal}{$paternal}{length} = 0;
+                $linkage_groups{$maternal}{$paternal}{blocks} = 0;
+                $linkage_groups{$maternal}{$paternal}{output} = $paternal;
             }
             $linkage_groups{$maternal}{$paternal}{known}++;
         }
@@ -375,7 +369,7 @@ sub make_linkage_maps {
 
         revise_chromosome_map( $lg, $revised_lg, $rejects, $chromosome_print, $output );
 
-        output_rejected_markers ($chromosome_print, $rejects, $lg, $output);
+        output_rejected_markers( $chromosome_print, $rejects, $lg, $output );
 
         output_map_summary( $chromosome, $lg, $rejects );
 
@@ -444,7 +438,6 @@ sub revise_chromosome_map {
     }
     return;
 }
-
 
 sub integrate_marker {
     my ( $marker, $marker_ref, $rlg, $chromosome_print, $output, $verbose ) = @_;
@@ -858,31 +851,78 @@ sub output_map_summary {
 }
 
 sub output_rejected_markers {
-    my ($chromosome_print, $rejects, $lg, $output) = @_;
+    my ( $chromosome_print, $rejects, $lg, $output ) = @_;
 
-    open my $rejected, '>', "$output.$chromosome_print.rejected.tsv" or croak "Can't open rejected markers file! $OS_ERROR\n";
+    open my $rejected, '>', "$output.$chromosome_print.rejected.tsv"
+      or croak "Can't open rejected markers file! $OS_ERROR\n";
 
-    for my $outcome (sort keys %{$rejects}) {
+    for my $outcome ( sort keys %{$rejects} ) {
         next if $outcome eq 'Valid';
-        for my $marker (keys %{$rejects->{$outcome}}) {
-            print $rejected "$chromosomes{$chromosome_print}\t$lg->{$marker}{output}\t$lg->{$marker}{length}\t$outcome\n";
+        for my $marker ( keys %{ $rejects->{$outcome} } ) {
+            print $rejected
+              "$chromosomes{$chromosome_print}\t$lg->{$marker}{output}\t$lg->{$marker}{length}\t$outcome\n";
         }
     }
     close $rejected;
 }
 
-
 ## MAP GENOME
 
 sub output_marker_blocks {
-    my ( $linkage_groups, $marker_blocks, $output ) = @_;
+    my ( $linkage_groups, $marker_blocks, $input, $output ) = @_;
 
-    open my $chromosome_map_file, '>', "$output.chromosome.map.tsv"
-      or croak "Can't open chromosome map file! $OS_ERROR\n";
-    print $chromosome_map_file "Chromosome\tPrint\tcM\tOriginalMarker\tCleanMarker\tLength\n";
-    open my $scaffold_map_file, '>', "$output.scaffold.map.tsv"
-      or croak "Can't open scaffold map file! $OS_ERROR\n";
-    print $scaffold_map_file "Chromosome\tcM\tScaffold\tStart\tEnd\tLength\n";
+    my ( $dbh, $insert_chromosome, $insert_scaffold ) = create_map_tables($input);
+
+    my $chromosome_numbers = get_chromosome_numbers($linkage_groups);
+
+    my %genome;
+    for my $chromosome ( sort { $a <=> $b } keys %{$chromosome_numbers} ) {
+        my $chromosome_print = $chromosome_numbers->{$chromosome};
+        my $map = load_chromosome_map( $chromosome_print, \%genome, $output );
+
+        for my $lg ( sort keys %{$map} ) {
+            for my $cM ( sort { $a <=> $b } keys %{ $map->{$lg} } ) {
+                for my $marker ( keys %{ $map->{$lg}{$cM} } ) {
+
+                    $insert_chromosome->execute(
+                        $chromosome, $chromosome_print, $cM, $marker,
+                        colour_clean_marker( $map->{$lg}{$cM}{$marker}{output} ),
+                        $map->{$lg}{$cM}{$marker}{length}
+                    );
+
+                    insert_scaffold_blocks( $marker_blocks->{$marker}, $chromosome, $cM, $insert_scaffold );
+                }
+            }
+        }
+    }
+    $dbh->commit;
+    $dbh->disconnect;
+}
+
+sub create_map_tables {
+    my ($input) = @_;
+
+    my $dbh = DBI->connect( "dbi:SQLite:dbname=$input", "", "", { AutoCommit => 0 } );
+
+    $dbh->do("DROP TABLE IF EXISTS chromosome_map") or die $dbh->errstr;
+    $dbh->do(
+"CREATE TABLE chromosome_map (chromosome integer, print text, cm real, original text, clean text, length integer)"
+    ) or die $dbh->errstr;
+    $dbh->do("DROP TABLE IF EXISTS scaffold_map") or die $dbh->errstr;
+    $dbh->do(
+"CREATE TABLE scaffold_map (chromosome integer, cm real, scaffold text, start integer, end integer, length integer)"
+    ) or die $dbh->errstr;
+
+    $dbh->commit;
+
+    my $insert_chromosome = $dbh->prepare_cached("INSERT INTO chromosome_map VALUES (?,?,?,?,?,?)");
+    my $insert_scaffold   = $dbh->prepare_cached("INSERT INTO scaffold_map VALUES (?,?,?,?,?,?)");
+
+    ( $dbh, $insert_chromosome, $insert_scaffold );
+}
+
+sub get_chromosome_numbers {
+    my ($linkage_groups) = @_;
 
     my %chromosome_numbers;
     my $new_chromosome_number = 100;
@@ -892,68 +932,50 @@ sub output_marker_blocks {
         $chromosome_numbers{$chromosome} = $print;
     }
 
-    my %genome;
-    for my $chromosome ( sort { $a <=> $b } keys %chromosome_numbers ) {
-        my $chromosome_print = $chromosome_numbers{$chromosome};
+    \%chromosome_numbers;
+}
 
-        open my $chrom_file, '<', "$output.$chromosome_print.mstmap.markers"
-          or croak "Can't open file for chromosome $chromosome! $OS_ERROR\n";
-        my $header = <$chrom_file>;
-        while ( my $chrom_line = <$chrom_file> ) {
-            chomp $chrom_line;
-            my ( $id, $lg, $cM, $original, $output, $length ) = split /\t/, $chrom_line;
-            $genome{$chromosome_print}{$lg}{$cM}{$original}{output} = $output;
-            $genome{$chromosome_print}{$lg}{$cM}{$original}{length} = $length;
-        }
-        close $chrom_file;
-
-        croak "More than one linkage group found for chromosome print $chromosome_print"
-          if keys %{ $genome{$chromosome_print} } > 1;
-        for my $lg ( sort keys %{ $genome{$chromosome_print} } ) {
-            for my $cM (
-                sort { $a <=> $b }
-                keys %{ $genome{$chromosome_print}{$lg} }
-              )
-            {
-                for my $marker ( keys %{ $genome{$chromosome_print}{$lg}{$cM} } ) {
-
-                    print $chromosome_map_file "$chromosome\t$chromosome_print\t$cM\t$marker\t";
-
-                    map {
-                        my $colour = $_ eq 'A' ? 'red1' : $_ eq 'B' ? 'royalblue1' : $_ eq 'H' ? 'sandybrown' : 'bold';
-                        print $chromosome_map_file fg $colour, $_;
-                    } split //, $genome{$chromosome_print}{$lg}{$cM}{$marker}{output};
-                    print $chromosome_map_file "\t$genome{$chromosome_print}{$lg}{$cM}{$marker}{length}";
-                    print $chromosome_map_file "\n";
-
-                    for my $scaffold ( sort keys %{ $marker_blocks->{$marker} } ) {
-                        my $block_start = -1;
-                        my $last_end    = -1;
-                        for my $start (
-                            sort { $a <=> $b }
-                            keys %{ $marker_blocks->{$marker}{$scaffold} }
-                          )
-                        {
-                            $block_start = $start if $block_start == -1;
-                            if ( $last_end != -1 and $start > $last_end + 1 ) {
-                                my $length = $last_end - $block_start + 1;
-                                print $scaffold_map_file
-                                  "$chromosome\t$cM\t$scaffold\t$block_start\t$last_end\t$length\n";
-                                $block_start = $start;
-                            }
-                            $last_end =
-                              $marker_blocks->{$marker}{$scaffold}{$start};
-                        }
-                        my $length = $last_end - $block_start + 1;
-                        print $scaffold_map_file "$chromosome\t$cM\t$scaffold\t$block_start\t$last_end\t$length\n";
-                    }
-                }
-            }
-        }
-        print $chromosome_map_file "\n";
+sub load_chromosome_map {
+    my ( $chromosome_print, $genome, $output ) = @_;
+    open my $chrom_file, '<', "$output.$chromosome_print.mstmap.markers"
+      or croak "Can't open file for chromosome $chromosomes{$chromosome_print}! $OS_ERROR\n";
+    my $header = <$chrom_file>;
+    while ( my $chrom_line = <$chrom_file> ) {
+        chomp $chrom_line;
+        my ( $id, $lg, $cM, $original, $output, $length ) = split /\t/, $chrom_line;
+        $genome->{$chromosome_print}{$lg}{$cM}{$original}{output} = $output;
+        $genome->{$chromosome_print}{$lg}{$cM}{$original}{length} = $length;
     }
-    close $chromosome_map_file;
-    close $scaffold_map_file;
+    close $chrom_file;
+
+    croak "More than one linkage group found for chromosome print $chromosome_print"
+      if keys %{ $genome->{$chromosome_print} } > 1;
+
+    $genome->{$chromosome_print};
+}
+
+sub colour_clean_marker {
+    my ($marker) = @_;
+
+    my $colour_marker = "";
+    for my $call ( split //, $marker ) {
+        my $colour = $call eq 'A' ? 'red1' : $call eq 'B' ? 'royalblue1' : $call eq 'H' ? 'sandybrown' : 'bold';
+        $colour_marker .= fg $colour, $call;
+    }
+
+    $colour_marker;
+}
+
+sub insert_scaffold_blocks {
+    my ( $blocks, $chromosome, $cM, $insert_scaffold ) = @_;
+    for my $scaffold ( sort keys %{$blocks} ) {
+        for my $start ( sort { $a <=> $b } keys %{ $blocks->{$scaffold} } ) {
+            my $end = $blocks->{$scaffold}{$start};
+            my $length = $end - $start + 1;
+            $insert_scaffold->execute( $chromosome, $cM, $scaffold, $start, $end, $length );
+        }
+    }
+    return;
 }
 
 ## STATISTICS
