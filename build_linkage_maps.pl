@@ -206,24 +206,20 @@ sub collapse {
 sub correct_paternal {
     my ( $blocklist, $metadata ) = @_;
 
-    my $patterns = get_paternal_patterns($blocklist);
+    my $patterns = get_paternal_patterns($blocklist, $metadata);
 
     my $pattern_num = scalar keys %{$patterns};
     for my $pattern ( sort { $patterns->{$b}{length} <=> $patterns->{$a}{length} } keys %{$patterns} ) {
 
-        #        if ( $patterns->{$pattern}{length} > 50000 ) {
         for my $upgrade (
             sort { $patterns->{$pattern}{validity}{$b}{length} <=> $patterns->{$pattern}{validity}{$a}{length} }
             keys %{ $patterns->{$pattern}{validity} }
           )
         {
-            next if $upgrade =~ /I[ed]/ or $upgrade =~ /[X\-]/;
             for my $b ( @{ $patterns->{$pattern}{validity}{$upgrade}{blocks} } ) {
                 $blocklist->[$b]{validity} = "   MVPVV";
             }
         }
-
-        #        }
     }
 
     update_block_stats( "After correcting paternal", $blocklist, $metadata );
@@ -233,10 +229,15 @@ sub correct_paternal {
 }
 
 sub get_paternal_patterns {
-    my ($blocklist) = @_;
+    my ($blocklist, $metadata) = @_;
     my %patterns;
     for my $b ( 0 .. $#{$blocklist} ) {
         my $block    = $blocklist->[$b];
+        if ($block->{validity} =~ /I[ed]/ or $block->{validity} =~ /[X\-]/) {
+            $block->{'Maternal'} = $metadata->{empty};
+            $block->{'Paternal'} = $metadata->{empty};
+        };
+
         my $paternal = $block->{'Paternal'};
         $patterns{$paternal}{length} += $block->{length};
         $patterns{$paternal}{blocks}++;
