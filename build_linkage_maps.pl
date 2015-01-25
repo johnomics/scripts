@@ -76,9 +76,9 @@ print STDERR "INFER MARKERS\n";
 my $blocklist = refine_markers( $args{input}, $args{corrections}, $metadata );
 
 print STDERR "MAKING LINKAGE MAPS\n";
-my ( $linkage_groups, $marker_blocks ) = make_linkage_maps( $blocklist, $args{output}, $args{known} );
+my ( $linkage_groups, $marker_blocks, $maternal_blocks ) = make_linkage_maps( $blocklist, $args{output}, $args{known} );
 
-output_marker_blocks( $linkage_groups, $marker_blocks, $args{input}, $args{output} );
+output_marker_blocks( $linkage_groups, $marker_blocks, $maternal_blocks, $args{input}, $args{output} );
 
 print STDERR "Done\n";
 
@@ -306,7 +306,8 @@ sub build_linkage_groups {
 
     my %linkage_groups;
     my %marker_blocks;
-
+    my %maternal_blocks;
+    
     for my $b ( 0 .. $#{$blocklist} ) {
         my $block = $blocklist->[$b];
 
@@ -314,8 +315,12 @@ sub build_linkage_groups {
         my $paternal = $block->{Paternal};
 
         next
-          if ( $maternal eq $metadata->{empty}
-            or $paternal eq $metadata->{empty} );
+          if ( $maternal eq $metadata->{empty} );
+        
+        if ($paternal eq $metadata->{empty}) {
+            $maternal_blocks{$maternal}{$block->{scaffold}}{$block->{start}} = $block->{end};
+            next;
+        }
 
         $linkage_groups{$maternal}{$paternal}{length} += $block->{length};
         $linkage_groups{$maternal}{$paternal}{blocks}++;
@@ -345,7 +350,7 @@ sub build_linkage_groups {
         close $knownfile;
     }
 
-    ( \%linkage_groups, \%marker_blocks );
+    ( \%linkage_groups, \%marker_blocks, \%maternal_blocks );
 }
 
 ## MAKE LINKAGE MAPS
@@ -353,7 +358,7 @@ sub build_linkage_groups {
 sub make_linkage_maps {
     my ( $blocklist, $output, $known ) = @_;
 
-    my ( $linkage_groups, $marker_blocks ) = build_linkage_groups( $blocklist, $known, $metadata );
+    my ( $linkage_groups, $marker_blocks, $maternal_blocks ) = build_linkage_groups( $blocklist, $known, $metadata );
 
     my $pm = new Parallel::ForkManager( scalar keys %{$linkage_groups} );
 
@@ -383,7 +388,7 @@ sub make_linkage_maps {
     # Collapse rejected markers into one file
     system('cat test.[ABH]*.rejected.tsv | sort -k1,1n -k4,4 -k2,2 > test.rejected.tsv');
 
-    ( $linkage_groups, $marker_blocks );
+    ( $linkage_groups, $marker_blocks, $maternal_blocks );
 }
 
 sub build_initial_chromosome_map {
@@ -870,7 +875,7 @@ sub output_rejected_markers {
 ## MAP GENOME
 
 sub output_marker_blocks {
-    my ( $linkage_groups, $marker_blocks, $input, $output ) = @_;
+    my ( $linkage_groups, $marker_blocks, $maternal_blocks, $input, $output ) = @_;
 
     my ( $dbh, $insert_chromosome, $insert_scaffold ) = create_map_tables($input);
 
@@ -895,7 +900,9 @@ sub output_marker_blocks {
                 }
             }
         }
+        insert_scaffold_blocks($maternal_blocks->{$chromosome_print}, $chromosome, -1, $insert_scaffold );
     }
+    
     $dbh->commit;
     $dbh->disconnect;
 }
