@@ -4,6 +4,7 @@ import os
 import sys
 import argparse
 import subprocess
+from collections import defaultdict
 from statistics import mean
 from os.path import isfile
 import sqlite3 as db
@@ -15,6 +16,44 @@ from Bio.SeqRecord import SeqRecord
 from Bio.SeqFeature import SeqFeature, FeatureLocation, ExactPosition
 from Bio.Alphabet import generic_dna
 from BCBio import GFF
+
+class GroupStat:
+    def __init__(self, count=0, length=0):
+        self.count = count
+        self.length = length
+    
+    def __add__(self, other):
+        self.count += other.count
+        self.length += other.length
+        return self
+
+class Stats:
+    def __init__(self, name):
+        self.name = name
+        self.group_num = 0
+        self.block_num = 0
+        self.group_stats = {'orient':GroupStat(), 'order':GroupStat(), 'overlap':GroupStat(), 'error':GroupStat(), 'ok':GroupStat()}
+        self.block_count = {'orient':0, 'order':0, 'overlap':0, 'error':0, 'ok':0}
+        self.blocklist_count = {'orient':0, 'order':0, 'overlap':0, 'error':0, 'ok':0}
+
+    def __add__(self, other):
+        self.group_num += other.group_num
+        self.block_num += other.block_num
+        for gt in self.group_stats:
+            self.group_stats[gt] += other.group_stats[gt]
+            self.block_count[gt] += other.block_count[gt]
+            self.blocklist_count[gt] += other.blocklist_count[gt]
+        return self
+
+    def __repr__(self):
+        output = "{}: {:6d} blocks in {:4d} groups\n".format(self.name, self.block_num, self.group_num)
+        output += "Type\tGroups\tLists\tBlocks\tLength\n"
+        for gt in 'ok', 'orient', 'order', 'overlap', 'error':
+            output += "{}\t{:6d}\t{:6d}\t{:6d}\t{:10d}\n".format(
+                  gt, self.group_stats[gt].count, self.blocklist_count[gt],
+                  self.block_count[gt], self.group_stats[gt].length)
+        return output
+        
 
 class Chromosome:
     def __init__(self, name, cm, prev_cm=-1, next_cm=-1):
@@ -33,14 +72,24 @@ class Chromosome:
         self.markers[cm].update_previous(prev_cm)
         self.markers[cm].update_next(next_cm)
 
-    def add_block(self, cm, block):
-        if cm not in self.cMDict:
-            self.cMDict[cm] = [block]
-        else:
-            self.cMDict[cm].append(block)
-
     def __repr__(self):
         return('\n'.join([self.name, repr(self.blocks), repr(self.markers)]))
+
+    @property
+    def stats(self):
+        stats = Stats(self.name)
+        stats.group_num = len(self.blocks)
+        for blockset in self.blocks:
+            gt = blockset.grouptype
+            for b in blockset.groups:
+                stats.block_num += len(b.blocklist)
+                stats.group_stats[gt].length += b.length
+                stats.block_count[gt] += len(b.blocklist)
+                stats.blocklist_count[gt] += 1
+            stats.group_stats[gt].count += 1
+        
+        return stats
+        
 
 class Marker:
     def __init__(self, cm, prev_cm=-1, next_cm=-1):
@@ -91,12 +140,11 @@ class BlockSet:
         self.groups.add(blocklist)
 
     def __repr__(self):
-        output = ''
+        output = 'Type: {}\n'.format(self.grouptype)
         for b in self.groups:
             output += repr(b) + '\n'
-            output += '{}\t{}\n'.format(self.grouptype, b.length)
+            output += 'Length: {}\n'.format(b.length)
             output += '-----\n'
-
         output += '====='
         
         return output
@@ -142,12 +190,16 @@ class BlockList:
         self.append(scaffold, start, 1)
 
     @property
+    def scaffold(self):
+        scaffolds = {sb.scaffold:0 for sb in self.summarylist}
+        return '_'.join(sorted(scaffolds.keys()))
+        
+    @property
     def name(self):
-        summarydict = {}
+        summarydict = defaultdict(list)
         scaffolds = []
         for sb in self.summarylist:
             if sb.scaffold not in summarydict:
-                summarydict[sb.scaffold] = []
                 scaffolds.append(sb.scaffold)
             summarydict[sb.scaffold].append((sb.start,sb.end))
         names = []
@@ -175,6 +227,11 @@ class BlockList:
     def sequence(self):
         return sum([sb.sequence for sb in self.summarylist], Seq("", generic_dna))
     
+    def empty(self):
+        self.blocklist = []
+        self.summarylist = []
+        self.update()
+        
     def append(self, scaffold, start, direction=1):
         self.blocklist = self.blocklist + [(scaffold, start, direction)]
         self.summarylist = self.summarylist + [SummaryBlock(scaffold, start, blocks[scaffold][start], direction)]
@@ -642,11 +699,6 @@ def extend_groups(chromosome):
             extend_to_ends(b)
 
 
-class GroupStat:
-    def __init__(self, count=0, length=0):
-        self.count = count
-        self.length = length
-
 def classify_groups(chromosome):
 
     cm_chains = {}
@@ -661,8 +713,6 @@ def classify_groups(chromosome):
                 cm_chains[b.cm_chain]['type'] = ''
             
             cm_chains[b.cm_chain]['count'] += 1
-    
-    group_stats = {'orient':GroupStat(), 'order':GroupStat(), 'overlap':GroupStat(), 'error':GroupStat(), 'ok':GroupStat()}
     
     for cms in sorted(cm_chains):
         
@@ -682,27 +732,18 @@ def classify_groups(chromosome):
                     group_type = 'error'
         
         if group_type != '':
-            group_stats[group_type].count += 1
             cm_chains[cms]['type'] = group_type
 
-    block_num = 0
     for blockset in chromosome.blocks:
         for b in blockset.groups:
-            block_num += len(b.blocklist)
-            gt = cm_chains[b.cm_chain]['type']
-            blockset.grouptype = gt
-            group_stats[gt].length += b.length
+            blockset.grouptype = cm_chains[b.cm_chain]['type']
 
-    print("{:3s}\t{:6d}".format(chromosome.name, block_num),end='')
-    for gt in 'ok', 'orient', 'order', 'overlap', 'error':
-        print("\t{:6d}\t{:10d}".format(group_stats[gt].count, group_stats[gt].length), end='')
-    print()
-
+    print(chromosome.stats)
 
 def identify_groups(chromosome, blocks):
     collapse_neighbours(chromosome, blocks)
     refine_groups(chromosome)
-    extend_groups(chromosome)
+#    extend_groups(chromosome)
     classify_groups(chromosome)
 
 
@@ -748,10 +789,13 @@ def extend(b, item):
         else:
             ext_start = blocks[first_scaffold][ext_start].next_block
 
+        # Extending to ends is OK
         if ext_start == 0:
             break
 
-        if blocks[first_scaffold][ext_start].cm != -1 or blocks[first_scaffold][ext_start].chromosome != 0 and blocks[first_scaffold][ext_start].chromosome != chromosome:
+        # If we reach another cM, abandon extension
+        if blocks[first_scaffold][ext_start].cm != -1 or blocks[first_scaffold][ext_start].chromosome != '0' and blocks[first_scaffold][ext_start].chromosome != chromosome:
+            starts_to_extend = []
             break
 
         starts_to_extend.append(ext_start)
@@ -768,70 +812,21 @@ def extend(b, item):
 def extend_to_ends(b):
     extend(b, 0)
     extend(b, -1)
-    
-
-def build_scaffolds(chromosome, blocks):
-
-    scaffolds = []
-    groups = {}
-
-    for blockset in chromosome.blocks:
-        setnum = len(blockset.groups)
-        if setnum not in groups:
-            groups[setnum] = 0
-        groups[setnum] += 1
-
-        for b in blockset.groups:
-            scaffoldlist = []
-            
-            extend_to_ends(b)
-
-            for scaffold, start, direction in b.blocklist:
-                scaffoldlist.append(blocks[scaffold][start])
-            scaffolds.append(scaffoldlist)
-
-    return scaffolds, groups
-
-def get_block_scaffolds(scaffolds, blockset, cms=None, fillcms=False):
-    for blocks in blockset.groups:
-        for sb in blocks.summarylist:
-            if fillcms and sb.cm != -1 and sb.cm not in cms:
-                cms[sb.cm] = 0
-            if sb.cm in cms and sb.scaffold not in scaffolds:
-                scaffolds[sb.scaffold] = {'start': blocks.start, 'end': blocks.end}
 
 
-def get_group_scaffolds(i, blocks):
-    group_scaffolds = {}
-    cms = {}
-    print(blocks[i])
-    get_block_scaffolds(group_scaffolds, blocks[i], cms, fillcms=True)
-    if i > 0:
-        get_block_scaffolds(group_scaffolds, blocks[i-1], cms)
-    if i < len(blocks)-1:
-        get_block_scaffolds(group_scaffolds, blocks[i+1], cms)
-
-    return group_scaffolds, cms
-
-def bridge_with_genome_overlaps(a, b, overlaps):
+def get_genome_overlaps(scaffolds, overlaps):
     found = False
-    statement = "select * from genome_overlaps where rscaffold=\"{}\" and qscaffold=\"{}\"".format(a, b)
-    for rstart, rend, qstart, qend, rhitlen, qhitlen, pcid, rseqlen, qseqlen, rpccov, qpccov, rscaffold, qscaffold, hittype in overlaps.execute(statement):
+    statement = '''select * from genome_overlaps
+                   where rscaffold in ({0}) and qscaffold in ({0})
+                     and rscaffold != qscaffold'''.format(
+                ','.join('?'*len(scaffolds)))
+    for rstart, rend, qstart, qend, rhitlen, qhitlen, pcid, rseqlen, qseqlen, rpccov, qpccov, \
+        rscaffold, qscaffold, hittype in overlaps.execute(statement, list(scaffolds)*2):
         found = True
-        print(a, len(sequences[a]), rstart, rend, rhitlen, rpccov, b, len(sequences[b]), qstart, qend, qhitlen, qpccov, pcid, hittype, sep='\t')
+#        print(rscaffold, len(sequences[rscaffold]), rstart, rend, rhitlen, rpccov,
+#              qscaffold, len(sequences[qscaffold]), qstart, qend, qhitlen, qpccov,
+#              pcid, hittype, sep='\t')
     
-    return found
-
-
-def print_genome_overlaps(scaffolds, overlaps):
-    found = False
-    for a in scaffolds:
-        for b in scaffolds:
-            if a == b:
-                continue
-            abfound = bridge_with_genome_overlaps(a, b, overlaps)
-            if abfound:
-                found = True
     if not found:
         print("No genome overlaps found")
 
@@ -849,137 +844,197 @@ def get_pacbio_hits(scaffolds, overlaps):
     for rstart, rend, qstart, qend, rhitlen, qhitlen, pcid, rseqlen, qseqlen, rpccov, qpccov, rscaffold, qscaffold, hittype \
       in overlaps.execute(statement, list(scaffolds)):
         gstart, gend = order_hit_ends(qstart, qend)
-        bstart, bend = order_hit_ends(scaffolds[qscaffold]['start'], scaffolds[qscaffold]['end'])
-        if (gstart > bstart and gend < bend
-           or gstart > bend or gend < bstart):
-            continue
-        if rscaffold not in pacbio_scaffolds:
-            pacbio_scaffolds[rscaffold] = {}
-            pacbio_lengths[rscaffold] = rseqlen
-        if qscaffold not in pacbio_scaffolds[rscaffold]:
-            pacbio_scaffolds[rscaffold][qscaffold] = []
-        pacbio_scaffolds[rscaffold][qscaffold].append((qstart, qend, qhitlen, rstart, rend, pcid))
+        hits_to_keep = {}
+        for start in scaffolds[qscaffold]:
+            bstart, bend = order_hit_ends(start, scaffolds[qscaffold][start])
+            if (gstart > bstart and gend < bend
+               or gstart > bend or gend < bstart):
+                continue
+            hits_to_keep[gstart] = gend
+
+        if hits_to_keep:
+            if rscaffold not in pacbio_scaffolds:
+                pacbio_scaffolds[rscaffold] = defaultdict(list)
+                pacbio_lengths[rscaffold] = rseqlen
+            pacbio_scaffolds[rscaffold][qscaffold].append((qstart, qend, qhitlen, rstart, rend, pcid))
 
     return pacbio_scaffolds, pacbio_lengths
 
+def order_pacbio_hits(pbscaffold_hits):
+    pacbio_order = {}
+    for gs in pbscaffold_hits:
+        for (qstart, qend, qhitlen, rstart, rend, pcid) in sorted(pbscaffold_hits[gs], key=lambda x:x[2], reverse=True):
+            if rstart > rend:
+                qstart, qend = qend, qstart
+                rstart, rend = rend, rstart
+            ignore = False
+            for start, hit in pacbio_order.items():
+                if gs == hit['scaffold'] and qstart >= hit['gstart'] and qend <= hit['gend']:
+                    ignore = True
+            if not ignore:
+                pacbio_order[rstart] = {'scaffold': gs, 'pbstart': rstart, 'pbend': rend, 'gstart': qstart, 'gend': qend, 'pcid':pcid}
+    return pacbio_order
 
+class Bridge:
+    
+    def __init__(self, pbs, pblen, hit1, hit2):
+        self.pbs = pbs
+        self.pblen = pblen
+        self.hit1 = hit1
+        self.hit2 = hit2
+        self.gap = self.hit2['pbstart']-1 - self.hit1['pbend']+1
+
+    def __repr__(self):
+        out = ('''{0} ({1:6d} bp) {2} - {3} joins
+       {4:16s} ({5:7d} bp) {6:7d} - {7:7d} ({2:7d} - {8:7d}; {9:5.2f}%) and
+       {10:16s} ({11:7d} bp) {12:7d} - {13:7d} ({14:7d} - {3:7d}; {15:5.2f}%)'''.format(
+                   self.pbs, self.pblen, self.hit1['pbstart'], self.hit2['pbend'],
+                   self.hit1['scaffold'], len(sequences[self.hit1['scaffold']]),
+                   self.hit1['gstart'], self.hit1['gend'], self.hit1['pbend'], self.hit1['pcid'],
+                   self.hit2['scaffold'], len(sequences[self.hit2['scaffold']]),
+                   self.hit2['gstart'], self.hit2['gend'], self.hit2['pbstart'], self.hit2['pcid']
+               ))
+            
+        if self.hit1['pbend'] < self.hit2['pbstart']:
+            out += "\tFill gap with {} {}-{}".format(self.pbs, self.hit1['pbend']+1, self.hit2['pbstart']-1)
+        elif self.hit1['pbstart'] < self.hit2['pbstart'] and self.hit1['pbend'] > self.hit2['pbend']:
+            out += "\tSecond hit contained in first hit"
+        elif self.hit2['pbstart'] < self.hit1['pbstart'] and self.hit2['pbend'] > self.hit1['pbend']:
+            out += "\tFirst hit contained in second hit"
+        else:
+            out += "\tOverlap of {} bases".format(self.hit1['pbend'] - self.hit2['pbstart'] + 1)
+        return out
+
+def add_bridge(bridges, pbs, pblen, hit1, hit2):
+    for hit in hit1, hit2:
+        if hit['scaffold'] not in bridges:
+            bridges[hit['scaffold']] = defaultdict(list)
+    bridges[hit1['scaffold']][hit2['scaffold']].append(Bridge(pbs, pblen, hit1, hit2))
+    bridges[hit2['scaffold']][hit1['scaffold']].append(Bridge(pbs, pblen, hit2, hit1))
+    
 def get_pacbio_bridges(scaffolds, pacbio_scaffolds, pacbio_lengths):
     bridges = {}
     for pbs in pacbio_scaffolds:
         if len(pacbio_scaffolds[pbs]) <= 1:
             continue
-        pacbio_order = {}
-        pairs = {tuple(sorted([a,b])) for a in pacbio_scaffolds[pbs] for b in pacbio_scaffolds[pbs] if a != b}
-        for gs in pacbio_scaffolds[pbs]:
-            for (qstart, qend, qhitlen, rstart, rend, pcid) in sorted(pacbio_scaffolds[pbs][gs], key=lambda x:x[2], reverse=True):
-                if rstart > rend:
-                    qstart, qend = qend, qstart
-                    rstart, rend = rend, rstart
-                ignore = False
-                for start, hit in pacbio_order.items():
-                    if gs == hit['scaffold'] and qstart >= hit['gstart'] and qend <= hit['gend']:
-                        ignore = True
-                if not ignore:
-                    pacbio_order[rstart] = {'scaffold': gs, 'pbstart': rstart, 'pbend': rend, 'gstart': qstart, 'gend': qend, 'pcid':pcid}
+        pacbio_order = order_pacbio_hits(pacbio_scaffolds[pbs])
 
         for s1, hit1 in sorted(pacbio_order.items()):
             for s2, hit2 in sorted(pacbio_order.items()):
                 if s2 <= s1:
                     continue
-                print('''{0} ({1:6d} bp) {2} - {3} joins
-        {4:16s} ({5:7d} bp) {6:7d} - {7:7d} ({2:7d} - {8:7d}; {9:5.2f}%) and
-        {10:16s} ({11:7d} bp) {12:7d} - {13:7d} ({14:7d} - {3:7d}; {15:5.2f}%)'''.format(
-                    pbs, pacbio_lengths[pbs], hit1['pbstart'], hit2['pbend'],
-                    hit1['scaffold'], len(sequences[hit1['scaffold']]),
-                    hit1['gstart'], hit1['gend'], hit1['pbend'], hit1['pcid'],
-                    hit2['scaffold'], len(sequences[hit2['scaffold']]),
-                    hit2['gstart'], hit2['gend'], hit2['pbstart'], hit2['pcid']
-                ), end='')
-                if hit1['pbend'] < hit2['pbstart']:
-                    print("\tFill gap with {} {}-{}".format(pbs, hit1['pbend']+1, hit2['pbstart']-1))
-                elif hit1['pbstart'] < hit2['pbstart'] and hit1['pbend'] > hit2['pbend']:
-                    print("\tSecond hit contained in first hit")
-                elif hit2['pbstart'] < hit1['pbstart'] and hit2['pbend'] > hit1['pbend']:
-                    print("\tFirst hit contained in second hit")
-                else:
-                    print("\tOverlap of {} bases".format(hit1['pbend'] - hit2['pbstart'] + 1))
+                add_bridge(bridges, pbs, pacbio_lengths[pbs], hit1, hit2)
 
     return bridges
 
 
-def print_pacbio_overlaps(scaffolds, overlaps):
+def get_pacbio_overlaps(scaffolds, overlaps):
+    
+    bridges = {}
+
     pacbio_scaffolds, pacbio_lengths = get_pacbio_hits(scaffolds, overlaps)
     
     if not pacbio_scaffolds:
         print("No PacBio overlaps found")
-        return
+        return bridges
 
     bridges = get_pacbio_bridges(scaffolds, pacbio_scaffolds, pacbio_lengths)
 
+    return bridges
 
-def view_groups(chromosome, overlaps):
-    for i in range(len(chromosome.blocks)):
-        group_scaffolds, cms = get_group_scaffolds(i, chromosome.blocks)
+def get_block_scaffolds(scaffolds, blockset, cms=None, fillcms=False):
+    for blocks in blockset.groups:
+        for sb in blocks.summarylist:
+            if fillcms and sb.cm != -1 and sb.cm not in cms:
+                cms[sb.cm] = 0
+            if sb.cm in cms:
+                if sb.scaffold not in scaffolds:
+                    scaffolds[sb.scaffold] = {}
+                if blocks.start not in scaffolds[sb.scaffold]:
+                    scaffolds[sb.scaffold][blocks.start] = blocks.end
 
-        if len(cms) > 1:
-            continue
+def get_neighbour(group, bridges, direction):
+    neighbour = None
+    (thisgroup, ) = group
+    if direction == 1:
+        this = thisgroup.summarylist[-1]
+    else:
+        this = thisgroup.summarylist[0]
+    if this.scaffold in bridges:
+        for a in bridges[this.scaffold]:
+            if this.scaffold != a:
+                print(this.scaffold, a)
+                for bridge in sorted(bridges[this.scaffold][a],key=lambda x:x.gap):
+                    if not neighbour:
+                        neighbour = bridge
+                    print(bridge)
+    return neighbour
 
-#        print(sorted(cms.keys()))
-#        print([(g, len(sequences[g])) for g in group_scaffolds])
-
-#        print_genome_overlaps(group_scaffolds, overlaps)
-        print_pacbio_overlaps(group_scaffolds, overlaps)
-        
-        print("=======")
-
-
-def get_hits(sl, group):
-    for blockset in group.groups:
-        for sb in blockset.summarylist:
-            statement = "select * from genome_overlaps where rscaffold=\"{}\" and qscaffold=\"{}\"".format(sl.scaffold, sb.scaffold)
-#            statement = '''select * from overlaps
-#                           where rscaffold=\"{}\" and (rstart <= {} and rend >= {} or rstart <= {} and rend >= {}) and 
-#                           qscaffold=\"{}\" and (rstart <= {} and rend >= {} or rstart <= {} and rend >= {})'''.format(
-#                               sl.scaffold, sl.start, sl.start, sl.end, sl.end,
-#                               sb.scaffold, sb.start, sb.start, sb.end, sb.end)
-            for rstart, rend, qstart, qend, rhitlen, qhitlen, pcid, rpccov, qpccov, rscaffold, qscaffold, hittype in overlaps.execute(statement):
-                rout = "{} (length {}) {}-{} ({} bp, {} covered)".format(sl.scaffold, len(sequences[sl.scaffold]), rstart, rend, rhitlen, rpccov)
-                qout = "{} (length {}) {}-{} ({} bp, {} covered)".format(sb.scaffold, len(sequences[sb.scaffold]), qstart, qend, qhitlen, qpccov)
-                print(rout, qout, pcid, hittype, sep='\t')
+def extend_ok(i, direction, blocks):
+    group_scaffolds = {}
+    cms = {}
+    if direction == 1:
+        print(blocks[i])
+        print(blocks[i+direction])
+    else:
+        print(blocks[i+direction])
+        print(blocks[i])
+    get_block_scaffolds(group_scaffolds, blocks[i], cms, fillcms=True)
+    get_block_scaffolds(group_scaffolds, blocks[i+direction], cms)
     
+    genome_overlaps = get_genome_overlaps(group_scaffolds, overlaps)
+    pacbio_bridges = get_pacbio_overlaps(group_scaffolds, overlaps)
+    
+    neighbour = get_neighbour(blocks[i].groups, pacbio_bridges, direction)
+    if not neighbour:
+        return i
+
+    print("Neighbour:")
+    print(neighbour)
+    (this,) = blocks[i].groups
+    to_remove = set()
+    blocklists = [bl for bl in blocks[i+direction].groups]
+    for bl in blocklists:
+        if bl.scaffold == neighbour.hit2['scaffold']:
+            print('Neighbour:', bl)
+            for (scaffold, start, direction) in bl.blocklist:
+                if direction == 1:
+                    this.append(scaffold, start, direction)
+                else:
+                    this.prepend(scaffold, start, direction)
+            print('i:{} dir:{}'.format(i, direction))
+            print("Groups are currently:")
+            print(blocks[i+direction].groups)
+            print("And bl is:")
+            print(bl)
+            blocks[i+direction].groups.remove(bl)
+
+#    for bl in to_remove:
+#        blocks[i+direction].groups.remove(bl)
+
+    print("Blocks now:")
+    print(blocks[i])
+    print(blocks[i+direction])
+    print("=======")
+
+    return i
 
 def extend_ok_groups(chromosome, overlaps):
-    
-    for i in range(0, len(chromosome.blocks)):
+    i = 0
+    while i < (len(chromosome.blocks)):
         thisgroup = chromosome.blocks[i]
         if thisgroup.grouptype != 'ok':
+            i += 1
             continue
-
-        (thisblockset,) = thisgroup.groups
-        prevsl = thisblockset.summarylist[0]
-        nextsl = thisblockset.summarylist[-1]
         
-        print(prevsl.cm, nextsl.cm)
-
         if i > 0:
-            prevgroup = chromosome.blocks[i-1]
-            print(prevgroup)
-            get_hits(prevsl, prevgroup)
+            i = extend_ok(i, -1, chromosome.blocks)
 
-        print(thisgroup)
-            
         if i < len(chromosome.blocks)-1:
-            nextgroup = chromosome.blocks[i+1]
-            print(nextgroup)
-            get_hits(nextsl, nextgroup)
+            i = extend_ok(i, 1, chromosome.blocks)
+        
+        i += 1
 
-    newblocks = []
-    for blockset in chromosome.blocks:
-        if blockset.groups:
-            newblocks.append(blockset)
-    
-    chromosome.blocks = newblocks
-    
 
 def join_ok_groups(chromosome):
     for i in range(0, len(chromosome.blocks)-1):
@@ -1013,36 +1068,49 @@ def join_ok_groups(chromosome):
     
     chromosome.blocks = newblocks
 
+def build_scaffolds(chromosome, blocks):
+
+    scaffolds = []
+    for blockset in chromosome.blocks:
+        for b in blockset.groups:
+            scaffoldlist = []
+            
+            extend_to_ends(b)
+
+            for scaffold, start, direction in b.blocklist:
+                scaffoldlist.append(blocks[scaffold][start])
+            scaffolds.append(scaffoldlist)
+
+    return scaffolds
+
 
 def assemble_chromosome(chromosome, blocks, threads, overlaps):
 
     identify_groups(chromosome, blocks)
 
-    view_groups(chromosome, overlaps)
+#    extend_ok_groups(chromosome, overlaps)
 
-    scaffolds, groups = build_scaffolds(chromosome, blocks)
+    scaffolds = build_scaffolds(chromosome, blocks)
 
-    return scaffolds, groups
+    return scaffolds
+
+def get_genome_stats(chromosomes):
+    genome_stats = Stats("Genome")
+
+    for chromosome in chromosomes:
+        genome_stats += chromosomes[chromosome].stats
+
+    print(genome_stats)
 
 
 def reassemble(chromosomes, blocks, threads, overlaps):
     genome = []
 
-    groups = {}
-    print("Chromosome\tBlocks\tOK\tOrient\tOrder\tOverlap\tError")
-
     for chromosome in chromosomes:
-        chromosome_blocks, chromosome_groups = assemble_chromosome(chromosomes[chromosome], blocks, threads, overlaps)
-        genome += chromosome_blocks
-        
-        for i in chromosome_groups:
-            if i not in groups:
-                groups[i] = 0
-            groups[i] += chromosome_groups[i]
-    
-    for i in groups:
-        print(i, groups[i])
-    
+        chromosome_scaffolds = assemble_chromosome(chromosomes[chromosome], blocks, threads, overlaps)
+        genome += chromosome_scaffolds
+
+    get_genome_stats(chromosomes)
     
     deleted_blocks = 0
     deleted_length = 0
