@@ -145,7 +145,7 @@ class GenomeData:
     
         return errors
 
-class GroupStat:
+class PoolStat:
     def __init__(self, count=0, length=0):
         self.count = count
         self.length = length
@@ -158,28 +158,28 @@ class GroupStat:
 class Stats:
     def __init__(self, name):
         self.name = name
-        self.group_num = 0
-        self.block_num = 0
-        self.group_stats = {'orient':GroupStat(), 'order':GroupStat(), 'overlap':GroupStat(), 'error':GroupStat(), 'ok':GroupStat()}
-        self.block_count = {'orient':0, 'order':0, 'overlap':0, 'error':0, 'ok':0}
-        self.blocklist_count = {'orient':0, 'order':0, 'overlap':0, 'error':0, 'ok':0}
+        self.pool_num = 0
+        self.log_num = 0
+        self.pool_stats = {'orient':PoolStat(), 'order':PoolStat(), 'overlap':PoolStat(), 'error':PoolStat(), 'ok':PoolStat()}
+        self.log_count = {'orient':0, 'order':0, 'overlap':0, 'error':0, 'ok':0}
+        self.raft_count = {'orient':0, 'order':0, 'overlap':0, 'error':0, 'ok':0}
 
     def __add__(self, other):
-        self.group_num += other.group_num
-        self.block_num += other.block_num
-        for gt in self.group_stats:
-            self.group_stats[gt] += other.group_stats[gt]
-            self.block_count[gt] += other.block_count[gt]
-            self.blocklist_count[gt] += other.blocklist_count[gt]
+        self.pool_num += other.pool_num
+        self.log_num += other.log_num
+        for gt in self.pool_stats:
+            self.pool_stats[gt] += other.pool_stats[gt]
+            self.log_count[gt] += other.raft_count[gt]
+            self.raft_count[gt] += other.raft_count[gt]
         return self
 
     def __repr__(self):
-        output = "{}: {:6d} blocks in {:4d} groups\n".format(self.name, self.block_num, self.group_num)
+        output = "{}: {:6d} blocks in {:4d} groups\n".format(self.name, self.log_num, self.pool_num)
         output += "Type\tGroups\tLists\tBlocks\tLength\n"
         for gt in 'ok', 'orient', 'order', 'overlap', 'error':
             output += "{}\t{:6d}\t{:6d}\t{:6d}\t{:10d}\n".format(
-                  gt, self.group_stats[gt].count, self.blocklist_count[gt],
-                  self.block_count[gt], self.group_stats[gt].length)
+                  gt, self.pool_stats[gt].count, self.raft_count[gt],
+                  self.log_count[gt], self.pool_stats[gt].length)
         return output
 
 
@@ -188,27 +188,27 @@ class Chromosome:
         self.name = str(name)
         self.markers = {}
         self.set_markers(genome.db)
-        self.blocks = []
+        self.pools = []
         self.mapped_blocks, self.mapped_blocks_length, self.placed_blocks, self.placed_blocks_length = self.set_blocks(genome)
         
     def __repr__(self):
-        return('\n'.join([self.name, repr(self.blocks), repr(self.markers)]))
+        return('\n'.join([self.name, repr(self.pools), repr(self.markers)]))
 
     def __iter__(self):
-        return iter(self.blocks)
+        return iter(self.pools)
 
     @property
     def stats(self):
         stats = Stats(self.name)
-        stats.group_num = len(self.blocks)
-        for blockset in self.blocks:
-            gt = blockset.grouptype
-            for b in blockset:
-                stats.block_num += len(b.blocklist)
-                stats.group_stats[gt].length += b.length
-                stats.block_count[gt] += len(b.blocklist)
-                stats.blocklist_count[gt] += 1
-            stats.group_stats[gt].count += 1
+        stats.pool_num = len(self.pools)
+        for pool in self.pools:
+            gt = pool.pooltype
+            for raft in pool:
+                stats.log_num += len(raft.logs)
+                stats.pool_stats[gt].length += raft.length
+                stats.log_count[gt] += len(raft.logs)
+                stats.raft_count[gt] += 1
+            stats.pool_stats[gt].count += 1
         
         return stats
 
@@ -231,7 +231,7 @@ class Chromosome:
         mapped_blocks = mapped_blocks_length = placed_blocks = placed_blocks_length = 0
 
         for cm in sorted(self.markers) + [-1]:
-            cm_blocks = BlockSet(self)
+            cm_blocks = Pool(self)
             cm_block_id = 1
             statement = "select scaffold, start, end, length from scaffold_map where chromosome={} and cm={} order by scaffold, start, end".format(self.name, cm)
             for scaffold, start, end, length in genome.db.execute(statement):
@@ -246,10 +246,10 @@ class Chromosome:
                 if cm != -1:
                     placed_blocks += 1
                     placed_blocks_length += length
-                cm_blocks.add(BlockList(cm_block_id, scaffold, start, self))
+                cm_blocks.add(Raft(cm_block_id, scaffold, start, self))
                 cm_block_id += 1
             if cm != -1:
-                self.blocks.append(cm_blocks)
+                self.pools.append(cm_blocks)
 
         return mapped_blocks, mapped_blocks_length, placed_blocks, placed_blocks_length
 
@@ -258,14 +258,14 @@ class Chromosome:
         
         marker_chains = {}
         
-        for blockset in chromosome:
-            if blockset.marker_chain not in marker_chains:
-                marker_chains[blockset.marker_chain] = {}
-                marker_chains[blockset.marker_chain]['count'] = 0
-                marker_chains[blockset.marker_chain]['type'] = ''
+        for pool in chromosome:
+            if pool.marker_chain not in marker_chains:
+                marker_chains[pool.marker_chain] = {}
+                marker_chains[pool.marker_chain]['count'] = 0
+                marker_chains[pool.marker_chain]['type'] = ''
 
-            marker_chains[blockset.marker_chain]['type'] = ''
-            marker_chains[blockset.marker_chain]['count'] += 1
+            marker_chains[pool.marker_chain]['type'] = ''
+            marker_chains[pool.marker_chain]['count'] += 1
         
         return marker_chains
 
@@ -281,132 +281,270 @@ class Chromosome:
 
     def get_scaffolds(self, blocks):
         scaffolds = []
-        for blockset in self:
-            for b in blockset:
+        for pool in self:
+            for raft in pool:
                 scaffoldlist = []
                 
-                extend_to_ends(b)
+                extend_to_ends(raft)
         
-                for scaffold, start, direction in b.blocklist:
+                for scaffold, start, direction in raft.logs:
                     scaffoldlist.append(blocks[scaffold][start])
                 scaffolds.append(scaffoldlist)
         
         return scaffolds
 
     def assemble(self, genome, threads):
-        self.identify_groups(genome.blocks)
+        p = 1
+        while p < len(self.pools):
+            self.pools[p].assemble()
+            self.pools[p].connect()
+            p += 1
 
+        self.identify_groups(genome.blocks)
+        
 #        extend_ok_groups(self, overlaps)
 
 
     def identify_groups(self, blocks):
         self.collapse_neighbours(blocks)
-        refine_groups(self)
-        extend_groups(self)
+        refine_pools(self)
+        extend_pools(self)
         print(self.stats)
 
     def collapse_neighbours(self, blocks):
 
-        blocks_to_delete = {}
+        logs_to_delete = {}
 
-        for blockset in self:
-            blocklists_to_delete = []
-            for b in blockset:
-                (scaffold, start, direction) = b.blocklist[0]
+        for pool in self:
+            rafts_to_delete = []
+            for raft in pool:
+                (scaffold, start, direction) = raft.logs[0]
 
-                if scaffold in blocks_to_delete and start in blocks_to_delete[scaffold]:
-                    blocklists_to_delete.append(b)
+                if scaffold in logs_to_delete and start in logs_to_delete[scaffold]:
+                    rafts_to_delete.append(raft)
                     continue
                 
-                merge_blocks(b, scaffold, start, self.name, 1, self.markers, blocks, blocks_to_delete)
-                merge_blocks(b, scaffold, start, self.name, -1, self.markers, blocks, blocks_to_delete)
+                merge_blocks(raft, scaffold, start, self.name, 1, self.markers, blocks, logs_to_delete)
+                merge_blocks(raft, scaffold, start, self.name, -1, self.markers, blocks, logs_to_delete)
                 
-            for b in blocklists_to_delete:
-                blockset.groups.remove(b)
+            for raft in rafts_to_delete:
+                pool.rafts.remove(raft)
 
-        newblocks = []
-        for blockset in self:
-            if blockset.groups:
-                newblocks.append(blockset)
+        newpools = []
+        for pool in self:
+            if pool.rafts:
+                newpools.append(pool)
 
-        self.blocks = newblocks
-
-
-
-class Marker:
-    def __init__(self, cm, prev_cm=-1, next_cm=-1):
-        self.cm = cm
-        self.prev_cm = prev_cm
-        self.next_cm = next_cm
-
-    def __repr__(self):
-        return('{}-({},{})'.format(self.cm, self.prev_cm, self.next_cm))
-
-    def update_previous(self, prev_cm):
-        if prev_cm != -1:
-            self.prev_cm = prev_cm
-    
-    def update_next(self, next_cm):
-        if next_cm != -1:
-            self.next_cm = next_cm
+        self.pools = newpools
 
 
-class Block:
-    def __init__(self, scaffold, start, end, prev_block=0, next_block=0, chromosome=0, cm=-1):
-        self.scaffold = scaffold
-        self.start = start
-        self.end = end
-        self.prev_block = prev_block
-        self.next_block = next_block
-        self.chromosome = str(chromosome)
-        self.cm = cm
-    
-    @property
-    def length(self):
-        return self.end - self.start + 1
-    
-    def __repr__(self):
-        return "{}:{}-{} ({}, {}) [{}, {}]".format(self.scaffold, self.start, self.end, self.prev_block, self.next_block, self.chromosome, self.cm)
-
-    def add_marker(self, chromosome, cm):
-        self.chromosome = str(chromosome)
-        self.cm = cm
-
-
-class BlockSet:
+class Pool:
     def __init__(self, chromosome):
         self.chromosome = chromosome
-        self.groups = set()
+        self.rafts = set()
 
-    def add(self, blocklist):
-        self.groups.add(blocklist)
+    def add(self, raft):
+        self.rafts.add(raft)
 
     def __repr__(self):
-        output = 'Type: {}\n'.format(self.grouptype)
-        for b in self:
-            output += repr(b) + '\n'
-            output += 'Length: {}\n'.format(b.length)
+        output = 'Type: {}\n'.format(self.pooltype)
+        for raft in self:
+            output += repr(raft) + '\n'
+            output += 'Length: {}\n'.format(raft.length)
             output += '-----\n'
         output += '====='
         
         return output
     
     def __iter__(self):
-        return iter(self.groups)
+        return iter(self.rafts)
     
     @property
     def marker_chain(self):
-        for group in self.groups:
-            return group.marker_chain
+        for raft in self.rafts:
+            return raft.marker_chain
         return ''
     
     @property
-    def grouptype(self):
+    def pooltype(self):
         if len(self.marker_chain) == 1:
             return 'order'
         else:
             return 'ok'
 
+    def assemble(self):
+        print("Assemble", self.marker_chain)
+    
+    def connect(self):
+        print("Connect", self.marker_chain)
+
+
+class Raft:
+    def __init__(self, bl_id, scaffold, start, chromosome):
+        self.chromosome = chromosome
+        self.id = bl_id
+        self.logs = []
+        self.manifest = []
+        self.append(scaffold, start, 1)
+
+    def __repr__(self):
+        return '\n'.join([repr(m) for m in self.manifest])
+
+    def __hash__(self):
+        return self.id
+
+    def __eq__(self, other):
+        return self.id == other.id
+
+    def __iter__(self):
+        return iter(self.logs)
+
+    @property
+    def scaffold(self):
+        scaffolds = {m.scaffold:0 for m in self.manifest}
+        return '_'.join(sorted(scaffolds.keys()))
+        
+    @property
+    def name(self):
+        summarydict = defaultdict(list)
+        scaffolds = []
+        for m in self.manifest:
+            if m.scaffold not in summarydict:
+                scaffolds.append(m.scaffold)
+            summarydict[m.scaffold].append((m.start,m.end))
+        names = []
+        for scaffold in scaffolds:
+            names.append('{}_{}_{}'.format(scaffold, summarydict[scaffold][0][0], summarydict[scaffold][-1][-1]))
+        name = '-'.join(names)
+        return name
+
+    @property
+    def start(self):
+        return self.manifest[0].start
+    
+    @property
+    def end(self):
+        return self.manifest[-1].end
+
+    @property
+    def length(self):
+        length = 0
+        for m in self.manifest:
+            length += m.length
+        return length
+    
+    @property
+    def sequence(self):
+        return sum([m.sequence for m in self.manifest], Seq("", generic_dna))
+    
+    def empty(self):
+        self.logs = []
+        self.manifest = []
+        self.update()
+        
+    def append(self, scaffold, start, direction=1):
+        self.logs = self.logs + [(scaffold, start, direction)]
+        self.manifest = self.manifest + [SummaryBlock(scaffold, start, genome.blocks[scaffold][start], direction)]
+        self.update()
+
+    def prepend(self, scaffold, start, direction=1):
+        self.logs = [(scaffold, start, direction)] + self.logs
+        self.manifest = [SummaryBlock(scaffold, start, genome.blocks[scaffold][start], direction)] + self.manifest
+        self.update()
+
+    def update(self):
+        self.collapse()
+
+    @property
+    def marker_chain(self):
+        marker_chain = []
+        for m in self.manifest:
+            if m.cm != -1:
+                marker_chain.append(m.cm)
+                if len(marker_chain)>1 and marker_chain[-2] == marker_chain[-1]:
+                    del marker_chain[-1]
+
+        if not self.check_chain(marker_chain):
+            print("To fix:", marker_chain, "\n", self, "\n")
+
+        return tuple(marker_chain)
+
+    def check_chain(self, chain):
+        
+        if len(chain) == 1:
+            return True
+        
+        if chain[0] < chain[1]:
+            direction = 1
+        else:
+            direction = -1
+        
+        for i in range(1, len(chain)-1):
+            if chain[i] < chain[i+1]:
+                this_dir = 1
+            else:
+                this_dir = -1
+            if direction != this_dir:
+                return False
+                break
+        
+        return True
+
+
+    def collapse_consecutive(self):
+        newsummary = []
+        for i in range(0, len(self.manifest)):
+            sbi = self.manifest[i]
+            if len(newsummary) == 0:
+                newsummary.append(sbi)
+            else:
+                last = newsummary[-1]
+                if last.scaffold==sbi.scaffold and last.end == sbi.start-1 and last.cm == sbi.cm:
+                    last.end = sbi.end
+                else:
+                    newsummary.append(sbi)
+
+        self.manifest = newsummary
+
+    def collapse_trios(self):
+        if len(self.manifest) < 3:
+            return
+
+        newsummary = []
+        i = 0
+        while i < len(self.manifest):
+            sbi = self.manifest[i]
+            if i < len(self.manifest)-2:
+                sbj = self.manifest[i+1]
+                sbk = self.manifest[i+2]
+                if (sbi.scaffold == sbj.scaffold and sbi.scaffold == sbk.scaffold and
+                    sbi.end == sbj.start-1       and sbj.end == sbk.start-1 and
+                    sbi.cm == sbk.cm             and sbj.cm == -1):
+                        sbi.end = sbk.end
+                        newsummary.append(sbi)
+                        i += 3
+                        continue
+
+            newsummary.append(sbi)
+            i += 1
+        
+        self.manifest = newsummary
+        
+
+    def collapse(self):
+        self.collapse_consecutive()
+        self.collapse_trios()
+
+    def order(self):
+        if self.manifest[0].cm != -1 and self.manifest[-1].cm != -1 and self.manifest[0].cm > self.manifest[-1].cm:
+            self.logs.reverse()
+            for i in range(0, len(self.logs)):
+                (scaffold, start, direction) = self.logs[i]
+                self.logs[i] = (scaffold, start, -1)
+
+            self.manifest.reverse()
+            for sb in self.manifest:
+                sb.start, sb.end = sb.end, sb.start
 
 class SummaryBlock:
     def __init__(self, scaffold, start, block, direction):
@@ -440,172 +578,47 @@ class SummaryBlock:
         return '{}:{}-{} ({}, {} bp)'.format(self.scaffold, str(self.start), str(self.end), str(self.cm), str(self.length))
 
 
-class BlockList:
-    def __init__(self, bl_id, scaffold, start, chromosome):
-        self.chromosome = chromosome
-        self.id = bl_id
-        self.blocklist = []
-        self.summarylist = []
-        self.append(scaffold, start, 1)
-
-    def __repr__(self):
-        return '\n'.join([repr(s) for s in self.summarylist])
-
-    def __hash__(self):
-        return self.id
-
-    def __eq__(self, other):
-        return self.id == other.id
-
-    def __iter__(self):
-        return iter(self.blocklist)
-
-    @property
-    def scaffold(self):
-        scaffolds = {sb.scaffold:0 for sb in self.summarylist}
-        return '_'.join(sorted(scaffolds.keys()))
-        
-    @property
-    def name(self):
-        summarydict = defaultdict(list)
-        scaffolds = []
-        for sb in self.summarylist:
-            if sb.scaffold not in summarydict:
-                scaffolds.append(sb.scaffold)
-            summarydict[sb.scaffold].append((sb.start,sb.end))
-        names = []
-        for scaffold in scaffolds:
-            names.append('{}_{}_{}'.format(scaffold, summarydict[scaffold][0][0], summarydict[scaffold][-1][-1]))
-        name = '-'.join(names)
-        return name
-
-    @property
-    def start(self):
-        return self.summarylist[0].start
+class Block:
+    def __init__(self, scaffold, start, end, prev_block=0, next_block=0, chromosome=0, cm=-1):
+        self.scaffold = scaffold
+        self.start = start
+        self.end = end
+        self.prev_block = prev_block
+        self.next_block = next_block
+        self.chromosome = str(chromosome)
+        self.cm = cm
     
-    @property
-    def end(self):
-        return self.summarylist[-1].end
-
     @property
     def length(self):
-        length = 0
-        for sb in self.summarylist:
-            length += sb.length
-        return length
+        return self.end - self.start + 1
     
-    @property
-    def sequence(self):
-        return sum([sb.sequence for sb in self.summarylist], Seq("", generic_dna))
+    def __repr__(self):
+        return "{}:{}-{} ({}, {}) [{}, {}]".format(self.scaffold, self.start, self.end, self.prev_block, self.next_block, self.chromosome, self.cm)
+
+    def add_marker(self, chromosome, cm):
+        self.chromosome = str(chromosome)
+        self.cm = cm
+
+
+class Marker:
+    def __init__(self, cm, prev_cm=-1, next_cm=-1):
+        self.cm = cm
+        self.prev_cm = prev_cm
+        self.next_cm = next_cm
+
+    def __repr__(self):
+        return('{}-({},{})'.format(self.cm, self.prev_cm, self.next_cm))
+
+    def update_previous(self, prev_cm):
+        if prev_cm != -1:
+            self.prev_cm = prev_cm
     
-    def empty(self):
-        self.blocklist = []
-        self.summarylist = []
-        self.update()
-        
-    def append(self, scaffold, start, direction=1):
-        self.blocklist = self.blocklist + [(scaffold, start, direction)]
-        self.summarylist = self.summarylist + [SummaryBlock(scaffold, start, genome.blocks[scaffold][start], direction)]
-        self.update()
-
-    def prepend(self, scaffold, start, direction=1):
-        self.blocklist = [(scaffold, start, direction)] + self.blocklist
-        self.summarylist = [SummaryBlock(scaffold, start, genome.blocks[scaffold][start], direction)] + self.summarylist
-        self.update()
-
-    def update(self):
-        self.collapse()
-
-    @property
-    def marker_chain(self):
-        marker_chain = []
-        for sb in self.summarylist:
-            if sb.cm != -1:
-                marker_chain.append(sb.cm)
-                if len(marker_chain)>1 and marker_chain[-2] == marker_chain[-1]:
-                    del marker_chain[-1]
-
-        if not self.check_chain(marker_chain):
-            print("To fix:", marker_chain, "\n", self, "\n")
-
-        return tuple(marker_chain)
-
-    def check_chain(self, chain):
-        
-        if len(chain) == 1:
-            return True
-        
-        if chain[0] < chain[1]:
-            direction = 1
-        else:
-            direction = -1
-        
-        for i in range(1, len(chain)-1):
-            if chain[i] < chain[i+1]:
-                this_dir = 1
-            else:
-                this_dir = -1
-            if direction != this_dir:
-                return False
-                break
-        
-        return True
+    def update_next(self, next_cm):
+        if next_cm != -1:
+            self.next_cm = next_cm
 
 
-    def collapse_consecutive(self):
-        newsummary = []
-        for i in range(0, len(self.summarylist)):
-            sbi = self.summarylist[i]
-            if len(newsummary) == 0:
-                newsummary.append(sbi)
-            else:
-                last = newsummary[-1]
-                if last.scaffold==sbi.scaffold and last.end == sbi.start-1 and last.cm == sbi.cm:
-                    last.end = sbi.end
-                else:
-                    newsummary.append(sbi)
 
-        self.summarylist = newsummary
-
-    def collapse_trios(self):
-        if len(self.summarylist) < 3:
-            return
-
-        newsummary = []
-        i = 0
-        while i < len(self.summarylist):
-            sbi = self.summarylist[i]
-            if i < len(self.summarylist)-2:
-                sbj = self.summarylist[i+1]
-                sbk = self.summarylist[i+2]
-                if (sbi.scaffold == sbj.scaffold and sbi.scaffold == sbk.scaffold and
-                    sbi.end == sbj.start-1       and sbj.end == sbk.start-1 and
-                    sbi.cm == sbk.cm             and sbj.cm == -1):
-                        sbi.end = sbk.end
-                        newsummary.append(sbi)
-                        i += 3
-                        continue
-
-            newsummary.append(sbi)
-            i += 1
-        
-        self.summarylist = newsummary
-        
-
-    def collapse(self):
-        self.collapse_consecutive()
-        self.collapse_trios()
-
-    def order(self):
-        if self.summarylist[0].cm != -1 and self.summarylist[-1].cm != -1 and self.summarylist[0].cm > self.summarylist[-1].cm:
-            self.blocklist.reverse()
-            for i in range(0, len(self.blocklist)):
-                (scaffold, start, direction) = self.blocklist[i]
-                self.blocklist[i] = (scaffold, start, -1)
-
-            self.summarylist.reverse()
-            for sb in self.summarylist:
-                sb.start, sb.end = sb.end, sb.start
 
 
 def get_args():
@@ -674,7 +687,7 @@ def load_overlaps(overlaps):
         print("Can't load overlaps from file {}!".format(overlaps))
         sys.exit()
 
-def merge_blocks(b, scaffold, block_i, chromosome, direction, markers, blocks, blocks_to_delete):
+def merge_blocks(raft, scaffold, block_i, chromosome, direction, markers, blocks, blocks_to_delete):
     
     block = blocks[scaffold][block_i]
     blocks_to_merge = []
@@ -720,9 +733,9 @@ def merge_blocks(b, scaffold, block_i, chromosome, direction, markers, blocks, b
                 blocks_to_delete[scaffold][merge_block] = True
                 
                 if direction == 1:
-                    b.append(scaffold, merge_block)
+                    raft.append(scaffold, merge_block)
                 else:
-                    b.prepend(scaffold, merge_block)
+                    raft.prepend(scaffold, merge_block)
            
             blocks_to_merge=[]
             continue
@@ -731,65 +744,40 @@ def merge_blocks(b, scaffold, block_i, chromosome, direction, markers, blocks, b
 
 
 
-def refine_groups(chromosome):
-    """If a well-ordered block exists in a group,
-       split it off into its own group
+def refine_pools(chromosome):
+    """If a well-built raft exists in a pool,
+       split it off into its own pool
     """
-    newblocks = []
-    for blockset in chromosome:
-        newblocksets = [BlockSet(chromosome)]
-        for b in blockset:
-            b.order()
-            if b.summarylist[0].cm != b.summarylist[-1].cm:
-                newblocksets.append(BlockSet(chromosome))
-                newblocksets[-1].groups.add(b)
+    newocean = []
+    for pool in chromosome:
+        newpools = [Pool(chromosome)]
+        for raft in pool:
+            raft.order()
+            if raft.manifest[0].cm != raft.manifest[-1].cm:
+                newpools.append(Pool(chromosome))
+                newpools[-1].rafts.add(raft)
             else:
-                newblocksets[0].groups.add(b)
+                newpools[0].rafts.add(raft)
 
-        if not newblocksets[0].groups:
-            del newblocksets[0]
+        if not newpools[0].rafts:
+            del newpools[0]
 
-        newblocks += newblocksets
+        newocean += newpools
 
-    chromosome.blocks = newblocks
+    chromosome.pool = newocean
 
-def extend_groups(chromosome):
-    for blockset in chromosome:
-        for b in blockset:
-            extend_to_ends(b)
+def extend_pools(chromosome):
+    for pool in chromosome:
+        for raft in pool:
+            extend_to_ends(raft)
 
+def extend_to_ends(raft):
+    extend(raft, 0)
+    extend(raft, -1)
 
-def call_finisher(dirname):
-    with open(dirname + '/finisherSC.log', 'w') as logfile:
-        subprocess.call(['python', '/whale-data/jd626/bin/finishingTool/finisherSC.py', '-o', 'contigs.fasta_improved3.fasta', '.', '/whale-data/jd626/bin/MUMmer/elephant/MUMmer3.23'], stdout=logfile, stderr=logfile, cwd=dirname)
-
-def build_groups(chromosome, threads):
-    dirnames = []
-    for block in chromosome:
-        for b in block:
-            for sb in b.summarylist:
-                if sb.cm == -1:
-                    continue
-                chrstring = 'chr' + str(chromosome.name)
-                dirname = 'reassembly/' + chrstring + '/' + chrstring + '_' + str(sb.cm)
-                filename = dirname + '/contigs.fasta'
-                linkname = dirname + '/raw_reads.fasta'
-                if not os.path.exists(dirname):
-                    os.makedirs(dirname, exist_ok=True)
-                    os.symlink("/whale-data/jd626/hmel_pacbio/LoRDEC/heliconius_melpomene_melpomene.subreads.LoRDEC.with_tail.fasta", linkname)
-                    dirnames.append(dirname)
-                with open(filename, 'a') as f:
-                    SeqIO.write(sb.sequence, f, "fasta")
-
-    pool = ThreadPool(threads)
-    pool.map(call_finisher, dirnames)
-    pool.close()
-    pool.join()
-
-
-def extend(b, item):
+def extend(raft, item):
     
-    first_scaffold, first_start, direction = b.blocklist[item]
+    first_scaffold, first_start, direction = raft.logs[item]
     ext_start = first_start
     extend = 0
     starts_to_extend = []
@@ -815,15 +803,11 @@ def extend(b, item):
     if starts_to_extend:
         if item == 0:
             for start in starts_to_extend:
-                b.prepend(first_scaffold, start, direction)
+                raft.prepend(first_scaffold, start, direction)
         else:
             for start in starts_to_extend:
-                b.append(first_scaffold, start, direction)
+                raft.append(first_scaffold, start, direction)
 
-
-def extend_to_ends(b):
-    extend(b, 0)
-    extend(b, -1)
 
 
 def get_genome_overlaps(scaffolds, overlaps):
@@ -955,24 +939,24 @@ def get_pacbio_overlaps(scaffolds, overlaps):
 
     return bridges
 
-def get_block_scaffolds(scaffolds, blockset, cms=None, fillcms=False):
-    for blocks in blockset:
-        for sb in blocks.summarylist:
+def get_pool_scaffolds(scaffolds, pool, cms=None, fillcms=False):
+    for raft in pool:
+        for sb in raft.manifest:
             if fillcms and sb.cm != -1 and sb.cm not in cms:
                 cms[sb.cm] = 0
             if sb.cm in cms:
                 if sb.scaffold not in scaffolds:
                     scaffolds[sb.scaffold] = {}
-                if blocks.start not in scaffolds[sb.scaffold]:
-                    scaffolds[sb.scaffold][blocks.start] = blocks.end
+                if raft.start not in scaffolds[sb.scaffold]:
+                    scaffolds[sb.scaffold][raft.start] = raft.end
 
 def get_neighbour(group, bridges, direction):
     neighbour = None
     (thisgroup, ) = group
     if direction == 1:
-        this = thisgroup.summarylist[-1]
+        this = thisgroup.manifest[-1]
     else:
-        this = thisgroup.summarylist[0]
+        this = thisgroup.manifest[0]
     if this.scaffold in bridges:
         for a in bridges[this.scaffold]:
             if this.scaffold != a:
@@ -983,23 +967,23 @@ def get_neighbour(group, bridges, direction):
                     print(bridge)
     return neighbour
 
-def extend_ok(i, direction, blocks):
-    group_scaffolds = {}
+def extend_ok(i, direction, pools):
+    pool_scaffolds = {}
     cms = {}
     if direction == 1:
-        print('Testing block against next')
-        print(blocks[i])
-        print(blocks[i+direction])
+        print('Testing pool against next')
+        print(pools[i])
+        print(pools[i+direction])
     else:
-        print('Testing block against previous')
-        print(blocks[i+direction])
-        print(blocks[i])
-    get_block_scaffolds(group_scaffolds, blocks[i], cms, fillcms=True)
-    get_block_scaffolds(group_scaffolds, blocks[i+direction], cms)
+        print('Testing pool against previous')
+        print(pools[i+direction])
+        print(pools[i])
+    get_pool_scaffolds(pool_scaffolds, pools[i], cms, fillcms=True)
+    get_pool_scaffolds(pool_scaffolds, pools[i+direction], cms)
     
-    print(group_scaffolds)
-    genome_overlaps = get_genome_overlaps(group_scaffolds, overlaps)
-    pacbio_bridges = get_pacbio_overlaps(group_scaffolds, overlaps)
+    print(pool_scaffolds)
+    genome_overlaps = get_genome_overlaps(pool_scaffolds, overlaps)
+    pacbio_bridges = get_pacbio_overlaps(pool_scaffolds, overlaps)
     
     for a in pacbio_bridges:
         for b in pacbio_bridges[a]:
@@ -1008,88 +992,88 @@ def extend_ok(i, direction, blocks):
                 print(bridge)
     return i
     
-    neighbour = get_neighbour(blocks[i].groups, pacbio_bridges, direction)
+    neighbour = get_neighbour(pools[i].rafts, pacbio_bridges, direction)
     if not neighbour:
         return i
 
     print("Neighbour:")
     print(neighbour)
-    (this,) = blocks[i].groups
+    (this,) = pools[i].rafts
     to_remove = set()
-    blocklists = [bl for bl in blocks[i+direction].groups]
-    for bl in blocklists:
-        if bl.scaffold == neighbour.hit2['scaffold']:
-            print('Neighbour:', bl)
-            for (scaffold, start, direction) in bl.blocklist:
+    rafts = [raft for raft in pools[i+direction].rafts]
+    for raft in rafts:
+        if raft.scaffold == neighbour.hit2['scaffold']:
+            print('Neighbour:', raft)
+            for (scaffold, start, direction) in raft.logs:
                 if direction == 1:
                     this.append(scaffold, start, direction)
                 else:
                     this.prepend(scaffold, start, direction)
             print('i:{} dir:{}'.format(i, direction))
-            print("Groups are currently:")
-            print(blocks[i+direction].groups)
-            print("And bl is:")
-            print(bl)
-            blocks[i+direction].groups.remove(bl)
+            print("Pools are currently:")
+            print(pools[i+direction].rafts)
+            print("And raft is:")
+            print(raft)
+            pools[i+direction].rafts.remove(bl)
 
-#    for bl in to_remove:
-#        blocks[i+direction].groups.remove(bl)
+#    for raft in to_remove:
+#        pools[i+direction].rafts.remove(bl)
 
-    print("Blocks now:")
-    print(blocks[i])
-    print(blocks[i+direction])
+    print("Pools now:")
+    print(pools[i])
+    print(pools[i+direction])
     print("=======")
 
     return i
 
-def extend_ok_groups(chromosome, overlaps):
+def extend_ok_pools(chromosome, overlaps):
     i = 0
-    while i < (len(chromosome.blocks)):
-        thisgroup = chromosome.blocks[i]
-        if thisgroup.grouptype != 'ok':
+    while i < (len(chromosome.pools)):
+        thispool = chromosome.pools[i]
+        if thispool.pooltype != 'ok':
             i += 1
             continue
         
         if i > 0:
-            i = extend_ok(i, -1, chromosome.blocks)
+            i = extend_ok(i, -1, chromosome.pools)
 
-        if i < len(chromosome.blocks)-1:
-            i = extend_ok(i, 1, chromosome.blocks)
+        if i < len(chromosome.pools)-1:
+            i = extend_ok(i, 1, chromosome.pools)
         
         i += 1
 
 
-def join_ok_groups(chromosome):
-    for i in range(0, len(chromosome.blocks)-1):
-        bi = chromosome.blocks[i]
+def join_ok_pools(chromosome):
+    for i in range(0, len(chromosome.pools)-1):
+        pool_i = chromosome.pools[i]
         j=i+1
-        while j<len(chromosome.blocks):
-            bj = chromosome.blocks[j]
+        while j<len(chromosome.pools):
+            pool_j = chromosome.pools[j]
 
-            if bi.grouptype == 'ok' and bj.grouptype == 'ok':
-                if len(bi.groups) != 1 or len(bj.groups) != 1:
-                    print("OK group has more than one blocklist!")
+            if pool_i.pooltype == 'ok' and pool_j.pooltype == 'ok':
+                if len(pool_i.rafts) != 1 or len(pool_j.rafts) != 1:
+                    print("OK pool has more than one raft!")
                     sys.exit()
-                (bi_bl,)=bi.groups
-                (bj_bl,)=bj.groups
+                (pool_i_raft,)=pool_i.rafts
+                (pool_j_raft,)=pool_j.rafts
 
-                extend(bi_bl, -1)
-                extend(bj_bl, 0)
-                for (scaffold, start, direction) in bj_bl.blocklist:
-                    bi_bl.append(scaffold, start, direction)
-                bj.groups.pop()
-                bj.grouptype=''
+                extend(pool_i_raft, -1)
+                extend(pool_j_raft, 0)
+                for (scaffold, start, direction) in pool_j_raft.logs:
+                    pool_i_raft.append(scaffold, start, direction)
+                pool_j.rafts.pop()
+                pool_j.pooltype=''
             else:
                 break
 
             j += 1
 
-    newblocks = []
-    for blockset in chromosome:
-        if blockset.groups:
-            newblocks.append(blockset)
+    newpools = []
+    for pool in chromosome:
+        if pool.rafts:
+            newpools.append(pool)
     
-    chromosome.blocks = newblocks
+    chromosome.pools = newpoolss
 
 
 
