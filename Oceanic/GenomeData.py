@@ -16,9 +16,9 @@ class GenomeData:
         
         print("Loading genome...")
         overlap_db = self.open_database(args.overlaps)
-        overlaps = overlap_db.cursor()
+        self.overlaps = overlap_db.cursor()
         
-        self.sequences = self.load_genome(args.fasta, overlaps)
+        self.sequences = self.load_genome(args.fasta)
         
         print("Loading annotation...")
         self.load_annotation(args.gff)
@@ -27,7 +27,7 @@ class GenomeData:
         self.db = conn.cursor()
         
         print("Loading blocks...")
-        self.blocks = self.load_blocks(self.db, overlaps)
+        self.blocks = self.load_blocks()
         
         print("Loading errors...")
         self.errors = self.load_errors(args.errors)
@@ -45,7 +45,7 @@ class GenomeData:
     
         return conn
 
-    def load_genome(self, fasta, overlaps):
+    def load_genome(self, fasta):
         try:
             with open(fasta, 'r') as f:
                 sequences = SeqIO.to_dict(SeqIO.parse(f, "fasta"))
@@ -59,7 +59,7 @@ class GenomeData:
         for scaffold in sequences:
             statement = "select hittype from genome_overlaps where rscaffold=\"{}\"".format(scaffold)
             skip = 0
-            for (hittype, ) in overlaps.execute(statement):
+            for (hittype, ) in self.overlaps.execute(statement):
                 if hittype == '[CONTAINED]':
                     skip = 1
             if skip:
@@ -92,13 +92,13 @@ class GenomeData:
             print("Can't load annotation from file {}!".format(gff))
             sys.exit()
 
-    def load_blocks(self, c, overlaps):
+    def load_blocks(self):
         blocks = {}
         block_num = 0
         genome_length = 0
 
         # Load map blocks from database
-        for scaffold, start, end in c.execute("select scaffold, start, end from mapblocks"):
+        for scaffold, start, end in self.db.execute("select scaffold, start, end from mapblocks"):
             if scaffold not in self.sequences:
                 continue
             if end < start:

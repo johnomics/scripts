@@ -31,9 +31,12 @@ class Raft:
         return False
 
     @property
+    def scaffolds(self):
+        return list({m.scaffold:0 for m in self.manifest}.keys())
+
+    @property
     def scaffold(self):
-        scaffolds = {m.scaffold:0 for m in self.manifest}
-        return '_'.join(sorted(scaffolds.keys()))
+        return '_'.join(sorted(self.scaffolds))
         
     @property
     def name(self):

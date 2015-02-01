@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 
+from itertools import chain
+
 class Pool:
     def __init__(self, chromosome):
         self.chromosome = chromosome
@@ -29,6 +31,10 @@ class Pool:
         self.rafts.remove(raft)
     
     @property
+    def scaffolds(self):
+        return list(chain(r.scaffold for r in self.rafts))
+    
+    @property
     def marker_chain(self):
         for raft in self.rafts:
             return raft.marker_chain
@@ -51,24 +57,25 @@ class Pool:
         for raft in [raft for raft in self.rafts if not raft.logs]:
             self.rafts.remove(raft)
 
-    def assemble(self, other, merger):
+    def assemble(self, other, mergeclass):
+        merger = mergeclass(self, other)
         for a in self.rafts:
             if not a:
                 continue
 
             repeat = True
+            seen = {}
             while repeat:
                 repeat = False
                 for b in other.rafts:
-                    if not b or repr(a) == repr(b):
+                    if not b or repr(a) == repr(b) or (a,b) in seen:
                         continue
 
-                    merge = merger(a, b)
-                    if merge:
+                    seen[(a,b)] = 1
+                    if merger.bridge(a, b):
                         repeat = True
-                        a.replace(merge)
-                        b.empty()
                         break
+            merger.merge(a)
         other.cleanup()
 
     def extend(self):

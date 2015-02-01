@@ -114,30 +114,28 @@ class Chromosome:
         
         return scaffolds
     
-    def run_merger(self, merger):
+    def run_merger(self, mergeclass):
         for pool in self.pools:
-            pool.assemble(pool, merger)
-        self.connect(merger)
+            pool.assemble(pool, mergeclass)
+        self.connect(mergeclass)
     
     def assemble(self, genome, threads):
-        self.run_merger(merge.cm)
+        self.run_merger(merge.MarkerMerge)
 
         for pool in self.pools:
             pool.extend()
             
-        self.run_merger(merge.overlap)
+        self.run_merger(merge.OverlapMerge)
 
-        self.run_merger(merge.pacbio)
+        self.run_merger(merge.PacBioMerge)
 
         print(self.stats)
 
-#        extend_ok_pools(self, overlaps)
 
-
-    def connect(self, merger):
+    def connect(self, mergeclass):
         p = 0
         while p < len(self.pools)-1:
-            self.pools[p].assemble(self.pools[p+1], merger)
+            self.pools[p].assemble(self.pools[p+1], mergeclass)
             p = self.split(p)
             if self.pools[p+1]:
                 p += 1

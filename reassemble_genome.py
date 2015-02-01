@@ -1,12 +1,12 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3 -u
 
 import os
 import sys
 import argparse
 
-from Oceanic import GenomeData as gd
-from Oceanic import Chromosome as chrom
-from Oceanic import Stats as stats
+import Oceanic.GenomeData as gd
+import Oceanic.Chromosome as chrom
+import Oceanic.Stats as stats
 
 def get_genome_stats(chromosomes):
     genome_stats = stats.Stats("Genome")
