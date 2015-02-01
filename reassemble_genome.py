@@ -9,6 +9,8 @@ from statistics import mean
 from os.path import isfile
 import sqlite3 as db
 from multiprocessing.dummy import Pool as ThreadPool
+from itertools import combinations
+from copy import deepcopy
 
 from Bio import SeqIO
 from Bio.Seq import Seq
@@ -189,7 +191,8 @@ class Chromosome:
         self.markers = {}
         self.set_markers(genome.db)
         self.pools = []
-        self.mapped_blocks, self.mapped_blocks_length, self.placed_blocks, self.placed_blocks_length = self.set_blocks(genome)
+        self.genome = genome
+        self.mapped_blocks, self.mapped_blocks_length, self.placed_blocks, self.placed_blocks_length = self.set_blocks()
         
     def __repr__(self):
         return('\n'.join([self.name, repr(self.pools), repr(self.markers)]))
@@ -227,21 +230,21 @@ class Chromosome:
         
             prev_cm = cm
 
-    def set_blocks(self, genome):
+    def set_blocks(self):
         mapped_blocks = mapped_blocks_length = placed_blocks = placed_blocks_length = 0
 
         for cm in sorted(self.markers) + [-1]:
-            cm_blocks = Pool(self)
+            cm_blocks = Pool(self, self.genome)
             cm_block_id = 1
             statement = "select scaffold, start, end, length from scaffold_map where chromosome={} and cm={} order by scaffold, start, end".format(self.name, cm)
-            for scaffold, start, end, length in genome.db.execute(statement):
-                if scaffold not in genome.sequences:
+            for scaffold, start, end, length in self.genome.db.execute(statement):
+                if scaffold not in self.genome.sequences:
                     continue
-                if (scaffold, start) in genome.errors:
+                if (scaffold, start) in self.genome.errors:
                     continue
                 mapped_blocks += 1
                 mapped_blocks_length += length
-                genome.blocks[scaffold][start].add_marker(self.name,cm)
+                self.genome.blocks[scaffold][start].add_marker(self.name,cm)
 
                 if cm != -1:
                     placed_blocks += 1
@@ -279,72 +282,58 @@ class Chromosome:
         self.markers[cm].update_previous(prev_cm)
         self.markers[cm].update_next(next_cm)
 
-    def get_scaffolds(self, blocks):
+    def get_scaffolds(self):
         scaffolds = []
         for pool in self:
             for raft in pool:
                 scaffoldlist = []
                 
-                extend_to_ends(raft)
-        
                 for scaffold, start, direction in raft.logs:
-                    scaffoldlist.append(blocks[scaffold][start])
+                    scaffoldlist.append(self.genome.blocks[scaffold][start])
                 scaffolds.append(scaffoldlist)
         
         return scaffolds
 
     def assemble(self, genome, threads):
-        p = 1
-        while p < len(self.pools):
-            self.pools[p].assemble()
-            self.pools[p].connect()
-            p += 1
+        for pool in self.pools:
+            pool.assemble(pool, cm_merge)
+        self.connect(cm_merge)
+        for pool in self.pools:
+            pool.extend()
 
-        self.identify_groups(genome.blocks)
-        
+        print(self.stats)
+
 #        extend_ok_groups(self, overlaps)
 
 
-    def identify_groups(self, blocks):
-        self.collapse_neighbours(blocks)
-        refine_pools(self)
-        extend_pools(self)
-        print(self.stats)
+    def connect(self, merger):
+        p = 0
+        while p < len(self.pools)-1:
+            self.pools[p].assemble(self.pools[p+1], merger)
+            p = self.split(p)
+            if self.pools[p+1]:
+                p += 1
+            else:
+                del self.pools[p+1]
 
-    def collapse_neighbours(self, blocks):
 
-        logs_to_delete = {}
+    def split(self, p):
+        ordered_rafts = [raft for raft in self.pools[p] if raft.ordered]
+        if not ordered_rafts or len(ordered_rafts) == len(self.pools[p]):
+            return p
 
-        for pool in self:
-            rafts_to_delete = []
-            for raft in pool:
-                (scaffold, start, direction) = raft.logs[0]
-
-                if scaffold in logs_to_delete and start in logs_to_delete[scaffold]:
-                    rafts_to_delete.append(raft)
-                    continue
-                
-                merge_blocks(raft, scaffold, start, self.name, 1, self.markers, blocks, logs_to_delete)
-                merge_blocks(raft, scaffold, start, self.name, -1, self.markers, blocks, logs_to_delete)
-                
-            for raft in rafts_to_delete:
-                pool.rafts.remove(raft)
-
-        newpools = []
-        for pool in self:
-            if pool.rafts:
-                newpools.append(pool)
-
-        self.pools = newpools
+        self.pools.insert(p+1, Pool(self, genome))
+        for raft in ordered_rafts:
+            self.pools[p+1].add(raft)
+            self.pools[p].remove(raft)
+        return p+1
 
 
 class Pool:
-    def __init__(self, chromosome):
+    def __init__(self, chromosome, genome = ''):
         self.chromosome = chromosome
+        self.genome = genome
         self.rafts = set()
-
-    def add(self, raft):
-        self.rafts.add(raft)
 
     def __repr__(self):
         output = 'Type: {}\n'.format(self.pooltype)
@@ -359,6 +348,15 @@ class Pool:
     def __iter__(self):
         return iter(self.rafts)
     
+    def __len__(self):
+        return len(self.rafts)
+
+    def add(self, raft):
+        self.rafts.add(raft)
+
+    def remove(self, raft):
+        self.rafts.remove(raft)
+    
     @property
     def marker_chain(self):
         for raft in self.rafts:
@@ -368,20 +366,125 @@ class Pool:
     @property
     def pooltype(self):
         if len(self.marker_chain) == 1:
-            return 'order'
+            if len(self.rafts) > 1:
+                return 'order'
+            else:
+                return 'orient'
         else:
-            return 'ok'
+            if len(self.rafts) > 1:
+                return 'overlap'
+            else:
+                return 'ok'
 
-    def assemble(self):
-        print("Assemble", self.marker_chain)
+    def cleanup(self):
+        for raft in [raft for raft in self.rafts if not raft.logs]:
+            self.rafts.remove(raft)
+
+    def assemble(self, other, merger):
+        for a in self.rafts:
+            if not a:
+                continue
+
+            repeat = True
+            while repeat:
+                repeat = False
+                for b in other.rafts:
+                    if not b or repr(a) == repr(b):
+                        continue
+
+                    merge = merger(a, b)
+                    if merge:
+                        repeat = True
+                        a.replace(merge)
+                        b.empty()
+                        break
+        other.cleanup()
+
+    def extend(self):
+        for raft in self.rafts:
+            raft.extend()
+
+def orient(a, b):
+    edge_blocks = [a.start, a.last, b.start, b.last]
+    if a.start < b.start:
+        a_far, a_near, b_near, b_far = sorted(edge_blocks)
+    else:
+        b_far, b_near, a_near, a_far = sorted(edge_blocks)
     
-    def connect(self):
-        print("Connect", self.marker_chain)
+    a_forward = a.start <= a.last
+    b_forward = b.start <= b.last
+    return a_near, b_near, a_forward, b_forward
 
+def merge_logs(this, other):
+    if not this:
+        return deepcopy(other)
+
+    new = deepcopy(this) + deepcopy(other)
+    new.sort(key=lambda x: x[1]) # Sort by start position
+
+    this_dir = this[0][2]
+    new = [(scaffold, start, this_dir) for scaffold, start, direction in new]
+    if this_dir == -1:
+        new.reverse()
+
+    return new
+
+def cm_merge(a, b):
+    if a.scaffold != b.scaffold:
+        return None
+    bridge = []
+    scaffold = a.genome.blocks[a.scaffold]
+
+    start, target, a_forward, b_forward = orient(a,b)
+    this_cm = scaffold[start].cm
+    direction = 1 if start < target else -1
+
+    while True:
+        if direction == 1:
+            start = scaffold[start].next_block
+        else:
+            start = scaffold[start].prev_block
+        
+        if start == target:
+            bridge = merge_logs(bridge, a.logs)
+            bridge = merge_logs(bridge, b.logs)
+            return bridge
+            
+        if start == 0:
+            break
+        
+        block_i_chr = scaffold[start].chromosome
+        block_i_cm = scaffold[start].cm
+        if block_i_chr == '0' or block_i_cm == -1 and block_i_chr == a.chromosome.name:
+            bridge.append((a.scaffold, start, direction))
+            continue
+    
+        if block_i_chr != a.chromosome.name: # This check comes after the cM check because chr==0 is OK
+            break
+    
+        if block_i_cm == this_cm:
+            bridge.append((a.scaffold, start, direction))
+    
+        if block_i_cm == a.chromosome.markers[this_cm].next_cm:
+            this_cm = a.chromosome.markers[this_cm].next_cm
+            bridge.append((a.scaffold, start, direction))
+    
+        
+        if block_i_cm == a.chromosome.markers[this_cm].prev_cm:
+            this_cm = a.chromosome.markers[this_cm].prev_cm
+            bridge.append((a.scaffold, start, direction))
+        
+        if bridge and bridge[-1][1] == start:
+            continue
+
+        break
+
+    return None
 
 class Raft:
     def __init__(self, bl_id, scaffold, start, chromosome):
         self.chromosome = chromosome
+        self.genome = chromosome.genome
         self.id = bl_id
         self.logs = []
         self.manifest = []
@@ -398,6 +501,15 @@ class Raft:
 
     def __iter__(self):
         return iter(self.logs)
+    
+    def __len__(self):
+        return len(self.logs)
+    
+    def __contains__(self, start):
+        for log in self.logs:
+            if log[1] == start:
+                return True
+        return False
 
     @property
     def scaffold(self):
@@ -423,6 +535,10 @@ class Raft:
         return self.manifest[0].start
     
     @property
+    def last(self):
+        return self.logs[-1][1]
+
+    @property
     def end(self):
         return self.manifest[-1].end
 
@@ -436,24 +552,6 @@ class Raft:
     @property
     def sequence(self):
         return sum([m.sequence for m in self.manifest], Seq("", generic_dna))
-    
-    def empty(self):
-        self.logs = []
-        self.manifest = []
-        self.update()
-        
-    def append(self, scaffold, start, direction=1):
-        self.logs = self.logs + [(scaffold, start, direction)]
-        self.manifest = self.manifest + [SummaryBlock(scaffold, start, genome.blocks[scaffold][start], direction)]
-        self.update()
-
-    def prepend(self, scaffold, start, direction=1):
-        self.logs = [(scaffold, start, direction)] + self.logs
-        self.manifest = [SummaryBlock(scaffold, start, genome.blocks[scaffold][start], direction)] + self.manifest
-        self.update()
-
-    def update(self):
-        self.collapse()
 
     @property
     def marker_chain(self):
@@ -468,6 +566,39 @@ class Raft:
             print("To fix:", marker_chain, "\n", self, "\n")
 
         return tuple(marker_chain)
+
+    @property
+    def ordered(self):
+        return len(self.marker_chain) > 1
+
+
+    def empty(self):
+        self.logs = []
+        self.manifest = []
+        self.update()
+        
+    def replace(self, logs):
+        self.empty()
+        for scaffold, start, direction in logs:
+            self.append(scaffold, start, direction)
+        self.update()
+
+    def append(self, scaffold, start, direction=1):
+        self.logs = self.logs + [(scaffold, start, direction)]
+        self.manifest = self.manifest + [SummaryBlock(scaffold, start, self.genome.blocks[scaffold][start], direction)]
+        self.update()
+
+    def prepend(self, scaffold, start, direction=1):
+        self.logs = [(scaffold, start, direction)] + self.logs
+        self.manifest = [SummaryBlock(scaffold, start, self.genome.blocks[scaffold][start], direction)] + self.manifest
+        self.update()
+
+    def merge(self, other):
+        for scaffold, start, direction in other.logs:
+            self.append(scaffold, start, direction)
+
+    def update(self):
+        self.collapse()
 
     def check_chain(self, chain):
         
@@ -499,7 +630,9 @@ class Raft:
                 newsummary.append(sbi)
             else:
                 last = newsummary[-1]
-                if last.scaffold==sbi.scaffold and last.end == sbi.start-1 and last.cm == sbi.cm:
+                if (last.scaffold==sbi.scaffold and
+                    abs(last.end-sbi.start) == 1 and
+                    last.cm == sbi.cm):
                     last.end = sbi.end
                 else:
                     newsummary.append(sbi)
@@ -518,7 +651,7 @@ class Raft:
                 sbj = self.manifest[i+1]
                 sbk = self.manifest[i+2]
                 if (sbi.scaffold == sbj.scaffold and sbi.scaffold == sbk.scaffold and
-                    sbi.end == sbj.start-1       and sbj.end == sbk.start-1 and
+                    abs(sbi.end - sbj.start) == 1 and abs(sbj.end - sbk.start) == 1 and
                     sbi.cm == sbk.cm             and sbj.cm == -1):
                         sbi.end = sbk.end
                         newsummary.append(sbi)
@@ -545,6 +678,44 @@ class Raft:
             self.manifest.reverse()
             for sb in self.manifest:
                 sb.start, sb.end = sb.end, sb.start
+
+
+    def extend(self):
+        self.extend_dir(0)
+        self.extend_dir(-1)
+
+    def extend_dir(self, item):
+        first_scaffold, first_start, direction = self.logs[item]
+        ext_start = first_start
+        extend = 0
+        starts_to_extend = []
+        scaffold = self.genome.blocks[first_scaffold]
+        chromosome = scaffold[first_start].chromosome
+        
+        while True:
+            if item == 0 and direction == 1 or item == -1 and direction == -1:
+                ext_start = scaffold[ext_start].prev_block
+            else:
+                ext_start = scaffold[ext_start].next_block
+        
+            # Extending to ends is OK
+            if ext_start == 0:
+                break
+        
+            # If we reach another cM, abandon extension
+            if scaffold[ext_start].cm != -1 or scaffold[ext_start].chromosome != '0' and scaffold[ext_start].chromosome != chromosome:
+                starts_to_extend = []
+                break
+        
+            starts_to_extend.append(ext_start)
+        
+        if starts_to_extend:
+            if item == 0:
+                for start in starts_to_extend:
+                    self.prepend(first_scaffold, start, direction)
+            else:
+                for start in starts_to_extend:
+                    self.append(first_scaffold, start, direction)
 
 class SummaryBlock:
     def __init__(self, scaffold, start, block, direction):
@@ -686,128 +857,6 @@ def load_overlaps(overlaps):
     except IOError:
         print("Can't load overlaps from file {}!".format(overlaps))
         sys.exit()
-
-def merge_blocks(raft, scaffold, block_i, chromosome, direction, markers, blocks, blocks_to_delete):
-    
-    block = blocks[scaffold][block_i]
-    blocks_to_merge = []
-    this_cm = block.cm
-    
-    while True:
-        if direction == 1:
-            block_i = blocks[scaffold][block_i].next_block
-        else:
-            block_i = blocks[scaffold][block_i].prev_block
-
-        if block_i == 0:
-            break
-        
-        block_i_chr = blocks[scaffold][block_i].chromosome
-        block_i_cm = blocks[scaffold][block_i].cm
-        
-        if block_i_chr == '0' or block_i_cm == -1 and block_i_chr == chromosome:
-            blocks_to_merge.append(block_i)
-            continue
-
-        if block_i_chr != chromosome:
-            break
-
-        merge = False
-        
-        if block_i_cm == this_cm:
-            merge = True
-        
-        if block_i_cm == markers[this_cm].next_cm:
-            this_cm = markers[this_cm].next_cm
-            merge = True
-        
-        if block_i_cm == markers[this_cm].prev_cm:
-            this_cm = markers[this_cm].prev_cm
-            merge = True
-
-        if merge:
-            blocks_to_merge.append(block_i)
-            for merge_block in blocks_to_merge:
-                if scaffold not in blocks_to_delete:
-                    blocks_to_delete[scaffold] = {}
-                blocks_to_delete[scaffold][merge_block] = True
-                
-                if direction == 1:
-                    raft.append(scaffold, merge_block)
-                else:
-                    raft.prepend(scaffold, merge_block)
-           
-            blocks_to_merge=[]
-            continue
-
-        break
-
-
-
-def refine_pools(chromosome):
-    """If a well-built raft exists in a pool,
-       split it off into its own pool
-    """
-    newocean = []
-    for pool in chromosome:
-        newpools = [Pool(chromosome)]
-        for raft in pool:
-            raft.order()
-            if raft.manifest[0].cm != raft.manifest[-1].cm:
-                newpools.append(Pool(chromosome))
-                newpools[-1].rafts.add(raft)
-            else:
-                newpools[0].rafts.add(raft)
-
-        if not newpools[0].rafts:
-            del newpools[0]
-
-        newocean += newpools
-
-    chromosome.pool = newocean
-
-def extend_pools(chromosome):
-    for pool in chromosome:
-        for raft in pool:
-            extend_to_ends(raft)
-
-def extend_to_ends(raft):
-    extend(raft, 0)
-    extend(raft, -1)
-
-def extend(raft, item):
-    
-    first_scaffold, first_start, direction = raft.logs[item]
-    ext_start = first_start
-    extend = 0
-    starts_to_extend = []
-    chromosome = genome.blocks[first_scaffold][first_start].chromosome
-
-    while 1:
-        if item == 0 and direction == 1 or item == -1 and direction == -1:
-            ext_start = genome.blocks[first_scaffold][ext_start].prev_block
-        else:
-            ext_start = genome.blocks[first_scaffold][ext_start].next_block
-
-        # Extending to ends is OK
-        if ext_start == 0:
-            break
-
-        # If we reach another cM, abandon extension
-        if genome.blocks[first_scaffold][ext_start].cm != -1 or genome.blocks[first_scaffold][ext_start].chromosome != '0' and genome.blocks[first_scaffold][ext_start].chromosome != chromosome:
-            starts_to_extend = []
-            break
-
-        starts_to_extend.append(ext_start)
-
-    if starts_to_extend:
-        if item == 0:
-            for start in starts_to_extend:
-                raft.prepend(first_scaffold, start, direction)
-        else:
-            for start in starts_to_extend:
-                raft.append(first_scaffold, start, direction)
-
 
 
 def get_genome_overlaps(scaffolds, overlaps):
@@ -1081,7 +1130,6 @@ def get_genome_stats(chromosomes):
     genome_stats = Stats("Genome")
 
     for chromosome in chromosomes:
-        print(chromosomes[chromosome].stats)
         genome_stats += chromosomes[chromosome].stats
 
     print(genome_stats)
@@ -1117,7 +1165,7 @@ def reassemble(chromosomes, genome, args):
 
     for chromosome in chromosomes:
         chromosomes[chromosome].assemble(genome, args.threads)
-        assembly += chromosomes[chromosome].get_scaffolds(genome.blocks)
+        assembly += chromosomes[chromosome].get_scaffolds()
 
     get_genome_stats(chromosomes)
     
