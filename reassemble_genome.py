@@ -92,6 +92,7 @@ def output(assembly):
         scaffold_lengths.append(scaffold_length)
     print("Blocks:{}\t".format(blocks), stats.genome(scaffold_lengths))
 
+
 def get_args():
     parser = argparse.ArgumentParser(description='''Output new FASTA file based on linkage map.
     

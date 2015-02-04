@@ -32,7 +32,7 @@ class Pool:
     
     @property
     def scaffolds(self):
-        return list(chain(r.scaffold for r in self.rafts))
+        return [scaffold for r in self.rafts for scaffold in r.scaffolds]
     
     @property
     def marker_chain(self):

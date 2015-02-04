@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 
+from collections import defaultdict
+
 class Raft:
     def __init__(self, bl_id, scaffold, start, chromosome):
         self.chromosome = chromosome
@@ -8,6 +10,7 @@ class Raft:
         self.logs = []
         self.manifest = []
         self.append(scaffold, start, 1)
+        self.bridges = defaultdict(list)
 
     def __repr__(self):
         return '\n'.join([repr(m) for m in self.manifest])
@@ -93,7 +96,41 @@ class Raft:
     def ordered(self):
         return len(self.marker_chain) > 1
 
+    @property
+    def ranges(self):
+        if not self._ranges:
+            self._ranges = self.set_ranges()
+        return self._ranges
 
+    def set_ranges(self):
+        scaffold = start = end = None
+        ranges = []
+        for sb in self.manifest:
+            end = sb.end
+            if sb.scaffold != scaffold:
+                if scaffold is not None:
+                    ranges.append(Range(scaffold, start, end))
+                start = sb.start
+                scaffold = sb.scaffold
+            else:
+                end = sb.end
+        ranges.append(Range(scaffold, start, end))
+
+        return ranges
+        
+    def get_ranges(self, end):
+        first_reversed = self.ranges[0].reversed()
+        if self.ordered:
+            if end == 'first':
+                return [first_reversed]
+            elif end == 'last':
+                return [self.ranges[-1]]
+        else:
+            if len(self.ranges) == 1:
+                return [first_reversed, self.ranges[0]]
+            else:
+                return [first_reversed, self.ranges[-1]]
+        
     def empty(self):
         self.logs = []
         self.manifest = []
@@ -121,6 +158,10 @@ class Raft:
 
     def update(self):
         self.collapse()
+        self._ranges = self.set_ranges()
+        
+    def add_bridge(self, other, self_overlap, other_overlap, pb_range):
+        self.bridges[other].append((self_overlap, other_overlap, pb_range))
 
     def check_chain(self, chain):
         
@@ -259,6 +300,18 @@ class SummaryBlock:
     def __repr__(self):
         return '{}:{}-{} ({}, {} bp)'.format(self.scaffold, str(self.start), str(self.end), str(self.cm), str(self.length))
 
+
+class Range():
+    def __init__(self, scaffold, start, end):
+        self.scaffold = scaffold
+        self.start = start
+        self.end = end
+
+    def __repr__(self):
+        return "{}:{}-{}".format(self.scaffold, self.start, self.end)
+
+    def reversed(self):
+        return Range(self.scaffold, self.end, self.start)
 
 
 
