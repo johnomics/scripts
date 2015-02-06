@@ -3,10 +3,17 @@
 from copy import deepcopy
 from collections import defaultdict
 from math import sqrt
+from operator import itemgetter
 
 from . import Raft as r
 
 class Merger():
+    
+    def order(self, start, end):
+        if start < end:
+            return start, end
+        else:
+            return end, start
     
     def do_join(self, a, b, bridge):
         a.replace(bridge)
@@ -26,7 +33,7 @@ class Merger():
 
 class MarkerMerge(Merger):
     
-    def __init__(self, this, other):
+    def __init__(self, this, other, options=None):
         self.joins = []
 
     def merge(self, a):
@@ -114,11 +121,8 @@ class MarkerMerge(Merger):
 
 class OverlapMerge(Merger):
     
-    def __init__(self, this, other):
+    def __init__(self, this, other, options=None):
         
-        print(this)
-        if this is not other:
-            print(other)
         self.hits = defaultdict(lambda:defaultdict(list))
         statement = '''select * from genome_overlaps
                        where rscaffold in ({})
@@ -149,18 +153,33 @@ class OverlapMerge(Merger):
         pass
 
     class Container():
-        def __init__(self):
+        def __init__(self, self_range):
+            self.scaffold = self_range.scaffold
+            self.start = self_range.start
+            self.end = self_range.end
+            if self.end < self.start:
+                self.start, self.end = self.end, self.start
+            self.len = self.end - self.start + 1
             self.positions = []
             self.coverage = 0
             self.pccov = 0
+            self.contained = None
 
         def add(self, hit):
-            self.seqlen = hit.seqlen
             start, end = hit.start, hit.end
             if start > end:
                 start, end = end, start
+            if end < self.start or start > self.end:
+                return
+            if start < self.start:
+                start = self.start
+            if end > self.end:
+                end = self.end
             self.positions.append((start, 'start'))
             self.positions.append((end, 'end'))
+
+        def __repr__(self):
+            return '{:7d} {:5.2f} %. Contained? {} {}'.format(self.coverage, self.pccov, self.contained, self.overlaps)
 
         @property
         def overlaps(self):
@@ -182,58 +201,72 @@ class OverlapMerge(Merger):
             begin = False
             end = False
             for overlap in self.overlaps:
-                if overlap[0] == 1:
+                if overlap[0] <= self.start + self.len*0.15:
                     begin = True
-                if overlap[1] == self.seqlen:
+                if overlap[1] >= self.end - self.len*0.15:
                     end = True
                 self.coverage += overlap[1] - overlap[0] + 1
 
-            self.pccov = self.coverage / self.seqlen * 100
-            self.contained = begin and end
+            self.pccov = self.coverage / self.len * 100
+            self.contained = begin and end and self.pccov > 75
             return self.coverage, self.pccov, self.contained
 
-    def contained(self, scftype, hits):
-        container = self.Container()
-        for hit in (self.Hit(h) for h in hits):
-            if scftype == 'r':
-                container.add(hit.r)
-            else:
-                container.add(hit.q)
-        coverage, pccov, contained = container.get_coverage()
-        
-        if contained and pccov > 80:
+    def pass_scaffold_pair(self, scaffold1, scaffold2):
+        return scaffold1 == scaffold2 or scaffold1 not in self.hits or scaffold2 not in self.hits[scaffold1]
+
+    
+    def within(self, hit, raft):
+        h_start, h_end = self.order(hit.start, hit.end)
+        r_start, r_end = self.order(raft.start, raft.end)
+        if h_end < r_start or r_end < h_start:
+            return False
+        else:
             return True
-
-        return False
-
+        
 
     def bridge(self, a, b):
         if a == b:
             return False
-        a_hit_scaffolds, b_hit_scaffolds = self.get_hit_scaffolds(a, b, self.hits)
-        if not b_hit_scaffolds:
-            return False
-        
-        for a_scaffold in a_hit_scaffolds:
-            for b_scaffold in b_hit_scaffolds:
-                if b_scaffold not in self.hits[a_scaffold]:
+
+        a_ranges = a.get_ranges('last')
+        b_ranges = b.get_ranges('first')
+
+        for a_range in a_ranges:
+            for b_range in b_ranges:
+                if self.pass_scaffold_pair(a_range.scaffold, b_range.scaffold):
                     continue
-                if self.contained('r', self.hits[a_scaffold][b_scaffold]):
-                    print("{} contained in {}!".format(a_scaffold, b_scaffold))
-                    return True
-                if self.contained('q', self.hits[a_scaffold][b_scaffold]):
-                    print("{} contained in {}!".format(b_scaffold, a_scaffold))
-                    return True
+                
+                a_container = self.Container(a_range)
+                b_container = self.Container(b_range)
+
+                for hit in (self.Hit(h) for h in self.hits[a_range.scaffold][b_range.scaffold]):
+                    if self.within(hit.r, a_range) and self.within(hit.q, b_range):
+                        a_container.add(hit.r)
+                        b_container.add(hit.q)
+                if not a_container.positions and not b_container.positions:
+                    continue
+
+                a_container.get_coverage()
+                b_container.get_coverage()
+                
+                if a_container.contained:
+                    a.discard(b_range)
+                    return False
+                if b_container.contained:
+                    b.discard(a_range)
+                    return False
 
         return False
 
 
 class PacBioMerge(Merger):
-    def __init__(self, this, other):
+    def __init__(self, this, other, tablename):
 
         self.this = this
         self.other = other
+        
         self.genome = this.genome
+        self.tablename = tablename if tablename is not None else 'pacbio_overlaps'
         self.bridges = defaultdict(lambda: defaultdict(list))
         
         self.genome_scaffolds = this.scaffolds + other.scaffolds
@@ -245,7 +278,7 @@ class PacBioMerge(Merger):
     def get_hits(self):
         hits = defaultdict(lambda: defaultdict(list))
         pb_lengths = {}
-        statement = 'select * from pacbio_overlaps where qscaffold in ({})'.format(','.join('?'*len(self.genome_scaffolds)))
+        statement = 'select * from {} where qscaffold in ({})'.format(self.tablename, ','.join('?'*len(self.genome_scaffolds)))
         for args in self.genome.overlaps.execute(statement, self.genome_scaffolds):
             hit = self.Hit(args)
             pb_lengths[hit.pb.scaffold] = hit.pb.seqlen
@@ -284,8 +317,6 @@ class PacBioMerge(Merger):
         for pacbio in self.hits:
             for gs1 in self.hits[pacbio]:
                 for gs2 in self.hits[pacbio]:
-                    if gs1 == gs2:
-                        continue
                     for hit1 in self.hits[pacbio][gs1]:
                         for hit2 in self.hits[pacbio][gs2]:
                                 bridges[gs1][gs2].append(self.Bridge(pacbio, self.pb_lengths[pacbio], hit1, hit2))    
@@ -303,7 +334,6 @@ class PacBioMerge(Merger):
                 self.hit1, self.hit2 = self.hit2, self.hit1
             self.gap = self.hit2.pb.start - self.hit1.pb.end - 1
             self._score = None
-            self.overhang = None
     
         @property
         def score(self):
@@ -326,23 +356,29 @@ class PacBioMerge(Merger):
                 out += "\tFirst hit contained in second hit"
             else:
                 out += "\tOverlap of {} bases".format(self.hit1.pb.end - self.hit2.pb.start + 1)
-            
-            out += "\nOverhang is {}\n".format(self.overhang)
             return out
             
+        def order(self, start, end):
+            if start < end:
+                return start, end
+            else:
+                return end, start
+        
         def get_hit(self, end_range):
+            r_start, r_end = self.order(end_range.start, end_range.end)
+
+            hit = None
             if self.hit1.g.scaffold == end_range.scaffold:
-                if (self.hit1.g.start < self.hit1.g.end and end_range.start <= self.hit1.g.end and self.hit1.g.start <= end_range.end
-                 or self.hit1.g.start > self.hit1.g.end and end_range.end   <= self.hit1.g.end and self.hit1.g.start <= end_range.start):
-                    return self.hit1
+                h_start, h_end = self.order(self.hit1.g.start, self.hit1.g.end)
+                if r_start < h_end and h_start < r_end:
+                    hit = self.hit1
 
             elif self.hit2.g.scaffold == end_range.scaffold:
-                if (self.hit2.g.start < self.hit2.g.end and end_range.end   <= self.hit2.g.start and self.hit2.g.end <= end_range.start
-                 or self.hit2.g.start > self.hit2.g.end and end_range.start <= self.hit2.g.start and self.hit2.g.end <= end_range.end):
-                    return self.hit2
-
-            else:
-                return None
+                h_start, h_end = self.order(self.hit2.g.start, self.hit2.g.end)
+                if r_start < h_end and h_start < r_end:
+                    hit = self.hit2
+            
+            return hit
         
         def get_hit_overhangs(self, range1, range2):
             hit1_overhang = hit2_overhang = None
@@ -357,52 +393,111 @@ class PacBioMerge(Merger):
                     hit2_overhang = abs(self.hit2.g.start - range2.end)
             else:
                     hit2_overhang = abs(range2.end - self.hit2.g.start) * -1
-            return hit1_overhang, hit2_overhang
+            
+            if self.hit1.pb.end < self.hit2.pb.start:
+                pb_range = r.Range(self.hit1.pb.scaffold, self.hit1.pb.end+1, self.hit2.pb.start-1)
+            else:
+                pb_range = r.Range(self.hit1.pb.scaffold, self.hit1.pb.end, self.hit2.pb.start)
+            pb_overhang = self.hit2.pb.start - self.hit1.pb.end - 1
+    
+            return hit1_overhang, hit2_overhang, pb_overhang, pb_range
 
+    def skip_range_pair(self, range1, range2):
+        r1start, r1end = self.order(range1.start, range1.end)
+        r2start, r2end = self.order(range2.start, range2.end)
+        if range1.scaffold == range2.scaffold and r1start == r1end and r2start == r2end:
+            return True
+        if range1.scaffold not in self.bridges or range2.scaffold not in self.bridges[range1.scaffold]:
+            return True
+        return False
 
-    def pass_scaffold_pair(self, scaffold1, scaffold2):
-        return scaffold1 == scaffold2 or scaffold1 not in self.bridges or scaffold2 not in self.bridges[scaffold1]
-
+    def get_range_dict(self, ranges):
+        range_dict = defaultdict(list)
+        for r in ranges:
+            new = deepcopy(r)
+            if new.end < new.start:
+                new.reverse()
+            range_dict[repr(new)].append(r)
+        return range_dict
+        
+        
     def bridge(self, a, b):
         if a == b:
             return None
 
-        a_ranges = a.get_ranges('last')
-        b_ranges = b.get_ranges('first')
+        a_ranges = self.get_range_dict(a.get_ranges('last'))
+        b_ranges = self.get_range_dict(b.get_ranges('first'))
         
-        for a_range in a_ranges:
-            for b_range in b_ranges:
-                if self.pass_scaffold_pair(a_range.scaffold, b_range.scaffold):
-                    continue
+        for a_range_i in a_ranges:
+            for a_range in a_ranges[a_range_i]:
+                for b_range_i in b_ranges:
+                    for b_range in b_ranges[b_range_i]:
+                        if self.skip_range_pair(a_range, b_range):
+                            continue
                 
-                for bridge in self.bridges[a_range.scaffold][b_range.scaffold]:
-                    
-                    a_hit = bridge.get_hit(a_range)
-                    b_hit = bridge.get_hit(b_range)
-                    
-                    if not a_hit or not b_hit:
-                        continue
+                        for bridge in self.bridges[a_range.scaffold][b_range.scaffold]:
+                            a_hit = bridge.get_hit(a_range)
+                            b_hit = bridge.get_hit(b_range)
+                            if not a_hit or not b_hit:
+                                continue
+                            a.add_bridge(a_hit, a_range, a_range_i, b_range, b_range_i, bridge)
 
-                    if a_hit == bridge.hit1:
-                        a_overhang, b_overhang = bridge.get_hit_overhangs(a_range, b_range)
-                    else:
-                        b_overhang, a_overhang = bridge.get_hit_overhangs(b_range, a_range)
+        for a_range in a.bridges:
+            merged = False
+            for b_range in a.bridges[a_range]:
+                ab = a.bridges[a_range][b_range]
+                best_hit = ab[sorted(ab, key = lambda x:(-ab[x].coverage, ab[x].overhang))[0]]
+                if best_hit.bridge.hit1.g.hitlen < 6000 or best_hit.bridge.hit2.g.hitlen < 6000 and best_hit.overhang > -15000:
+                    continue
 
-                    if bridge.hit1.pb.end < bridge.hit2.pb.start:
-                        pb_overhang = r.Range(bridge.hit1.pb.scaffold, bridge.hit1.pb.end+1, bridge.hit2.pb.start-1)
-                    else:
-                        pb_overhang = r.Range(bridge.hit1.pb.scaffold, bridge.hit1.pb.end, bridge.hit2.pb.start)
+                if not a.ordered and best_hit.self_range.end == a.start:
+                    a.reverse()
+                if not b.ordered and best_hit.other_range.end == b.end:
+                    b.reverse()
 
-                    a.add_bridge(b, a_overhang, b_overhang, pb_overhang)
-                    b.add_bridge(a, b_overhang, a_overhang, pb_overhang.reversed())
+                if best_hit.self_range.end == a.end and best_hit.other_range.end == b.start:
+                    new_marker_chain = a.marker_chain + b.marker_chain
+                    collapsed_mc = [new_marker_chain[0]]
+                    for i in range(1,len(new_marker_chain)):
+                        if new_marker_chain[i] != collapsed_mc[-1]:
+                            collapsed_mc.append(new_marker_chain[i])
+                    new_marker_chain = tuple(collapsed_mc)
+
+                    if (a.check_chain(new_marker_chain)):
+                        a.merge(b)
+                        b.empty()
+                        
+                    merged=True
+                    break
+            if merged:
+                break
 
         return None
     
     def merge(self, a):
-        for b in a.bridges:
-            print(a.scaffold, b.scaffold)
-            for bridge in a.bridges[b]:
-                print('\t', bridge)
+        pass
+
+class OKMerge(Merger):
+    def __init__(self, this, other, options=None):
+        self.this = this
+        self.other = other
+        self.genome = this.genome
+        
+    def bridge(self, a, b):
+        if self.this.pooltype != 'ok' or self.other.pooltype != 'ok':
+            return False
+
+        newgap = self.this.genome.add_gap()
+        a.append(newgap.scaffold, newgap.start, 1)
+        
+        a.merge(b)
+        b.empty()
+
+        return True
+        
+    def merge(self, a):
+        pass
+
 
 if __name__ == '__main__':
     pass

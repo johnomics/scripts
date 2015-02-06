@@ -3,6 +3,7 @@
 import sys
 from os.path import isfile
 import sqlite3 as sql
+from collections import defaultdict
 
 from Bio import SeqIO
 from Bio.SeqFeature import SeqFeature, FeatureLocation, ExactPosition
@@ -32,6 +33,7 @@ class GenomeData:
         print("Loading errors...")
         self.errors = self.load_errors(args.errors)
 
+        self.gapnum = 1
 
     def open_database(self, dbfile):
         try:
@@ -55,15 +57,25 @@ class GenomeData:
 
         print("Original stats:", Stats.genome([len(sequences[scaffold]) for scaffold in sequences]))
 
-        delete_scaffolds = []
+        delete_scaffolds = {}
+        
+        statement = 'select rscaffold, rseqlen, qscaffold, qseqlen from genome_overlaps where hittype=\"[IDENTITY]\"'
+        for (rscaffold, rseqlen, qscaffold, qseqlen, ) in self.overlaps.execute(statement):
+            if rseqlen <= qseqlen:
+                delete_scaffolds[qscaffold] = 1
+            else:
+                delete_scaffolds[rscaffold] = 1
+
         for scaffold in sequences:
+            if scaffold in delete_scaffolds:
+                continue
             statement = "select hittype from genome_overlaps where rscaffold=\"{}\"".format(scaffold)
             skip = 0
             for (hittype, ) in self.overlaps.execute(statement):
                 if hittype == '[CONTAINED]':
                     skip = 1
             if skip:
-                delete_scaffolds.append(scaffold)
+                delete_scaffolds[scaffold] = 1
         
         for scaffold in delete_scaffolds:
             del sequences[scaffold]
@@ -93,7 +105,7 @@ class GenomeData:
             sys.exit()
 
     def load_blocks(self):
-        blocks = {}
+        blocks = defaultdict(lambda:defaultdict(Block))
         block_num = 0
         genome_length = 0
 
@@ -105,8 +117,6 @@ class GenomeData:
                 continue
             block_num += 1
             genome_length += end - start + 1
-            if scaffold not in blocks:
-                blocks[scaffold] = {}
             blocks[scaffold][start] = Block(scaffold, start, end)
 
         # Store previous and next blocks
@@ -140,6 +150,11 @@ class GenomeData:
     
         return errors
 
+    def add_gap(self, length = 100):
+        newgapname = 'Gap' + str(self.gapnum)
+        self.blocks[newgapname][1] = Block(newgapname, 1, length)
+        self.gapnum += 1
+        return self.blocks[newgapname][1]
 
 class Block:
     def __init__(self, scaffold, start, end, prev_block=0, next_block=0, chromosome=0, cm=-1):
@@ -150,6 +165,7 @@ class Block:
         self.next_block = next_block
         self.chromosome = str(chromosome)
         self.cm = cm
+        self.contained = None
     
     @property
     def length(self):

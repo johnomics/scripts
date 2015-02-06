@@ -128,10 +128,13 @@ class Chromosome:
 
         for pool in self.pools:
             pool.extend()
-            
-        self.run_merger([merge.OverlapMerge, merge.PacBioMerge])
 
-#        print(self)
+#        for pool in self.pools:
+#            pool.assemble(pool, merge.PacBioMerge, 'genome_overlaps')
+        self.run_merger([merge.OverlapMerge, merge.PacBioMerge])
+        self.connect(merge.OKMerge)
+
+        print(self)
         print(self.stats)
 
 

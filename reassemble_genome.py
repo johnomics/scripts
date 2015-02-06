@@ -63,14 +63,21 @@ def reassemble(chromosomes, genome, args):
 
     left_blocks = 0
     left_length = 0
+    contained_blocks = 0
+    contained_length = 0
     for scaffold in genome.blocks:
         for start in genome.blocks[scaffold]:
+            if genome.blocks[scaffold][start].contained:
+                contained_blocks += 1
+                contained_length += genome.blocks[scaffold][start].length
+                continue
             left_blocks += 1
             left_length += genome.blocks[scaffold][start].length
             assembly.append([genome.blocks[scaffold][start]])
 
+    print("Contained {} blocks, length {}".format(contained_blocks, contained_length))
     print("Left over {} blocks, length {}".format(left_blocks, left_length))
-
+    
     return assembly
 
 

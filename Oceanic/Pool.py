@@ -57,8 +57,8 @@ class Pool:
         for raft in [raft for raft in self.rafts if not raft.logs]:
             self.rafts.remove(raft)
 
-    def assemble(self, other, mergeclass):
-        merger = mergeclass(self, other)
+    def assemble(self, other, mergeclass, options=None):
+        merger = mergeclass(self, other, options)
         for a in self.rafts:
             if not a:
                 continue

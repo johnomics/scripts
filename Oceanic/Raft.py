@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 from collections import defaultdict
+from copy import deepcopy
 
 class Raft:
     def __init__(self, bl_id, scaffold, start, chromosome):
@@ -10,7 +11,7 @@ class Raft:
         self.logs = []
         self.manifest = []
         self.append(scaffold, start, 1)
-        self.bridges = defaultdict(list)
+        self.bridges = defaultdict(lambda:defaultdict(lambda:defaultdict(list)))
 
     def __repr__(self):
         return '\n'.join([repr(m) for m in self.manifest])
@@ -88,7 +89,8 @@ class Raft:
                     del marker_chain[-1]
 
         if not self.check_chain(marker_chain):
-            print("To fix:", marker_chain, "\n", self, "\n")
+            return ()
+#            print("To fix:", marker_chain, "\n", self, "\n")
 
         return tuple(marker_chain)
 
@@ -135,12 +137,23 @@ class Raft:
         self.logs = []
         self.manifest = []
         self.update()
+    
+    def discard(self, c_range):
+        for log in self.logs:
+            self.genome.blocks[log[0]][log[1]].contained = c_range
+        self.empty()
         
     def replace(self, logs):
         self.empty()
         for scaffold, start, direction in logs:
             self.append(scaffold, start, direction)
         self.update()
+
+    def reverse(self):
+        newlogs = deepcopy(self.logs)
+        self.empty()
+        for scaffold, start, direction in reversed(newlogs):
+            self.append(scaffold, start, direction*-1)
 
     def append(self, scaffold, start, direction=1):
         self.logs = self.logs + [(scaffold, start, direction)]
@@ -159,13 +172,10 @@ class Raft:
     def update(self):
         self.collapse()
         self._ranges = self.set_ranges()
-        
-    def add_bridge(self, other, self_overlap, other_overlap, pb_range):
-        self.bridges[other].append((self_overlap, other_overlap, pb_range))
 
     def check_chain(self, chain):
         
-        if len(chain) == 1:
+        if len(chain) <= 1:
             return True
         
         if chain[0] < chain[1]:
@@ -268,6 +278,55 @@ class Raft:
                 for start in starts_to_extend:
                     self.append(first_scaffold, start, direction)
 
+    class RaftBridge():
+        def __init__(self, self_range, self_overhang, other_range, other_overhang, pb_range, pb_overhang, bridge):
+            self.self_range = self_range
+            self.self_overhang = self_overhang
+            self.other_range = other_range
+            self.other_overhang = other_overhang
+            self.pb_range = pb_range
+            self.pb_overhang = pb_overhang
+            self.bridge = bridge
+            
+        def __repr__(self):
+            out = '{} {:7d} = {} ({:7d} bp) = {} {:7d}'.format(
+                self.self_range, self.self_overhang, self.pb_range, self.pb_overhang, self.other_range.reversed(), self.other_overhang
+            )
+            (self_hit, other_hit) = (self.bridge.hit1, self.bridge.hit2) if self.bridge.hit1.g.scaffold == self.self_range.scaffold else (self.bridge.hit2, self.bridge.hit1)
+            out += ' {:6.2f} {:7d} {:6.2f} {:7d} {:10.2f}'.format(
+                self_hit.pcid, self_hit.g.hitlen, other_hit.pcid, other_hit.g.hitlen, self.bridge.score
+            )
+
+            return out
+
+        @property
+        def overhang(self):
+            return self.self_overhang + self.other_overhang
+        
+        @property
+        def coverage(self):
+            return self.bridge.hit1.g.hitlen + self.bridge.hit2.g.hitlen
+
+    
+    def add_bridge(self, self_hit, self_range, self_range_i, other_range, other_range_i, bridge):
+
+        if self_hit == bridge.hit1:
+            self_overhang, other_overhang, pb_overhang, pb_range = bridge.get_hit_overhangs(self_range, other_range)
+        else:
+            other_overhang, self_overhang, pb_overhang, pb_range = bridge.get_hit_overhangs(other_range, self_range)
+            pb_range.reverse()
+
+        pb_range_i = repr(pb_range)
+        cur_overhang = -10000000
+        if (self_range_i in self.bridges and other_range_i in self.bridges[self_range_i]
+            and pb_range_i in self.bridges[self_range_i][other_range_i]):
+            cur_overhang = self.bridges[self_range_i][other_range_i][pb_range_i].overhang
+        
+        if cur_overhang < self_overhang + other_overhang:
+            self.bridges[self_range_i][other_range_i][pb_range_i] = self.RaftBridge(self_range, self_overhang,
+                                                                                    other_range, other_overhang,
+                                                                                    pb_range, pb_overhang, bridge)
+
 
 class SummaryBlock:
     def __init__(self, scaffold, start, block, direction):
@@ -308,12 +367,13 @@ class Range():
         self.end = end
 
     def __repr__(self):
-        return "{}:{}-{}".format(self.scaffold, self.start, self.end)
+        return "{0:16s}:{1:7d}-{2:7d}".format(self.scaffold, self.start, self.end)
 
     def reversed(self):
         return Range(self.scaffold, self.end, self.start)
-
-
+    
+    def reverse(self):
+        self.start, self.end = self.end, self.start
 
 
 if __name__ == '__main__':
