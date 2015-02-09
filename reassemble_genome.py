@@ -5,7 +5,6 @@ import sys
 import argparse
 from multiprocessing import Pool
 from multiprocessing.dummy import Pool as ThreadPool
-from itertools import chain
 
 import Oceanic.GenomeData as gd
 import Oceanic.Chromosome as chrom

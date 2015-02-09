@@ -456,19 +456,13 @@ class PacBioMerge(Merger):
                     b.reverse()
 
                 if best_hit.self_range.end == a.end and best_hit.other_range.end == b.start:
-                    new_marker_chain = a.marker_chain + b.marker_chain
-                    collapsed_mc = [new_marker_chain[0]]
-                    for i in range(1,len(new_marker_chain)):
-                        if new_marker_chain[i] != collapsed_mc[-1]:
-                            collapsed_mc.append(new_marker_chain[i])
-                    new_marker_chain = tuple(collapsed_mc)
-
-                    if (a.check_chain(new_marker_chain)):
+                    new_chain = a.marker_chain + b.marker_chain
+                    if new_chain:
                         a.merge(b)
                         b.empty()
+                        merged=True
+                        break
                         
-                    merged=True
-                    break
             if merged:
                 break
 

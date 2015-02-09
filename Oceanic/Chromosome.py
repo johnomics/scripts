@@ -100,21 +100,6 @@ class Chromosome:
 
         return mapped_blocks, mapped_blocks_length, placed_blocks, placed_blocks_length
 
-    @property
-    def marker_chains(self):
-        
-        marker_chains = {}
-        
-        for pool in chromosome:
-            if pool.marker_chain not in marker_chains:
-                marker_chains[pool.marker_chain] = {}
-                marker_chains[pool.marker_chain]['count'] = 0
-                marker_chains[pool.marker_chain]['type'] = ''
-
-            marker_chains[pool.marker_chain]['type'] = ''
-            marker_chains[pool.marker_chain]['count'] += 1
-        
-        return marker_chains
 
     def add_marker(self, cm, prev_cm=-1, next_cm=-1):
         self.markers[cm] = Marker(cm, prev_cm, next_cm)

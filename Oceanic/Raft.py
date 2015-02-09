@@ -81,18 +81,8 @@ class Raft:
 
     @property
     def marker_chain(self):
-        marker_chain = []
-        for m in self.manifest:
-            if m.cm != -1:
-                marker_chain.append(m.cm)
-                if len(marker_chain)>1 and marker_chain[-2] == marker_chain[-1]:
-                    del marker_chain[-1]
-
-        if not self.check_chain(marker_chain):
-            return ()
-#            print("To fix:", marker_chain, "\n", self, "\n")
-
-        return tuple(marker_chain)
+        mc = MarkerChain(self.manifest)
+        return mc
 
     @property
     def ordered(self):
@@ -172,28 +162,6 @@ class Raft:
     def update(self):
         self.collapse()
         self._ranges = self.set_ranges()
-
-    def check_chain(self, chain):
-        
-        if len(chain) <= 1:
-            return True
-        
-        if chain[0] < chain[1]:
-            direction = 1
-        else:
-            direction = -1
-        
-        for i in range(1, len(chain)-1):
-            if chain[i] < chain[i+1]:
-                this_dir = 1
-            else:
-                this_dir = -1
-            if direction != this_dir:
-                return False
-                break
-        
-        return True
-
 
     def collapse_consecutive(self):
         newsummary = []
@@ -326,6 +294,58 @@ class Raft:
             self.bridges[self_range_i][other_range_i][pb_range_i] = self.RaftBridge(self_range, self_overhang,
                                                                                     other_range, other_overhang,
                                                                                     pb_range, pb_overhang, bridge)
+
+
+
+class MarkerChain:
+    def __init__(self, manifest=None, chain=None):
+        self.chain = []
+        if manifest:
+            for m in manifest:
+                if m.cm != -1:
+                    self.chain.append(m.cm)
+                    if len(self.chain)>1 and self.chain[-2] == self.chain[-1]:
+                        del self.chain[-1]
+        elif chain:
+            self.chain = chain
+
+        if not self.check():
+            self.chain = None
+
+    def __len__(self):
+        if self.chain == None:
+            return 0
+        else:
+            return len(self.chain)
+
+    def __add__(self, other):
+        new = self.chain + other.chain
+        collapsed = [new[0]]
+        for i in range(1,len(new)):
+            if new[i] != collapsed[-1]:
+                collapsed.append(new[i])
+        return MarkerChain(chain=collapsed)
+
+    def check(self):
+        
+        if len(self.chain) <= 1:
+            return True
+        
+        if self.chain[0] < self.chain[1]:
+            direction = 1
+        else:
+            direction = -1
+        
+        for i in range(1, len(self.chain)-1):
+            if self.chain[i] < self.chain[i+1]:
+                this_dir = 1
+            else:
+                this_dir = -1
+            if direction != this_dir:
+                return False
+        
+        return True
+
 
 
 class SummaryBlock:
