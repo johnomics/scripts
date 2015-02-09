@@ -5,6 +5,11 @@ from . import Raft as r
 from . import Stats as s
 from . import Mergers as merge
 
+import multiprocessing
+import sys
+from os.path import isfile
+import sqlite3 as sql
+
 class Chromosome:
     def __init__(self, name, genome):
         self.name = str(name)
@@ -19,6 +24,25 @@ class Chromosome:
 
     def __iter__(self):
         return iter(self.pools)
+
+    def threadstart(self, args):
+        overlap_db = self.open_database(args.overlaps)
+        self.overlaps = overlap_db.cursor()
+        conn = self.open_database(args.database)
+        self.db = conn.cursor()
+
+    def open_database(self, dbfile):
+        try:
+            if isfile(dbfile):
+                conn = sql.connect(dbfile)
+            else:
+                raise IOError
+        except:
+            print("Can't open database {}!".format(dbfile))
+            sys.exit()
+    
+        return conn
+
 
     @property
     def stats(self):
@@ -123,7 +147,10 @@ class Chromosome:
         
         self.connect(mergeclass)
     
-    def assemble(self, genome, threads):
+    def assemble(self, genome, args):
+        
+        self.threadstart(args)
+        
         self.run_merger(merge.MarkerMerge)
 
         for pool in self.pools:

@@ -3,6 +3,9 @@
 import os
 import sys
 import argparse
+from multiprocessing import Pool
+from multiprocessing.dummy import Pool as ThreadPool
+from itertools import chain
 
 import Oceanic.GenomeData as gd
 import Oceanic.Chromosome as chrom
@@ -39,14 +42,16 @@ def load_map(genome):
     return chromosomes
 
 
+
 def reassemble(chromosomes, genome, args):
 
     print("Reassembly...")
 
-    assembly = []
+    pool = ThreadPool(args.threads)
+    pool.map(lambda x: chromosomes[x].assemble(genome, args), chromosomes.keys())
 
+    assembly = []
     for chromosome in chromosomes:
-        chromosomes[chromosome].assemble(genome, args.threads)
         assembly += chromosomes[chromosome].get_scaffolds()
 
     get_genome_stats(chromosomes)

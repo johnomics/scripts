@@ -129,7 +129,7 @@ class OverlapMerge(Merger):
                        and   qscaffold in ({})
                     '''.format(','.join('?'*len(this.scaffolds)), ','.join('?'*len(other.scaffolds)))
 
-        for *args, rscaffold, qscaffold, hittype in this.genome.overlaps.execute(statement, this.scaffolds + other.scaffolds):
+        for *args, rscaffold, qscaffold, hittype in this.chromosome.overlaps.execute(statement, this.scaffolds + other.scaffolds):
             self.hits[rscaffold][qscaffold].append([rscaffold, qscaffold, hittype] + args)
 
     class Hit:
@@ -265,7 +265,7 @@ class PacBioMerge(Merger):
         self.this = this
         self.other = other
         
-        self.genome = this.genome
+        self.chromosome = this.chromosome
         self.tablename = tablename if tablename is not None else 'pacbio_overlaps'
         self.bridges = defaultdict(lambda: defaultdict(list))
         
@@ -279,7 +279,7 @@ class PacBioMerge(Merger):
         hits = defaultdict(lambda: defaultdict(list))
         pb_lengths = {}
         statement = 'select * from {} where qscaffold in ({})'.format(self.tablename, ','.join('?'*len(self.genome_scaffolds)))
-        for args in self.genome.overlaps.execute(statement, self.genome_scaffolds):
+        for args in self.chromosome.overlaps.execute(statement, self.genome_scaffolds):
             hit = self.Hit(args)
             pb_lengths[hit.pb.scaffold] = hit.pb.seqlen
             hits[hit.pb.scaffold][hit.g.scaffold].append(hit)
@@ -442,9 +442,9 @@ class PacBioMerge(Merger):
                                 continue
                             a.add_bridge(a_hit, a_range, a_range_i, b_range, b_range_i, bridge)
 
-        for a_range in a.bridges:
+        for a_range in sorted(a.bridges):
             merged = False
-            for b_range in a.bridges[a_range]:
+            for b_range in sorted(a.bridges[a_range]):
                 ab = a.bridges[a_range][b_range]
                 best_hit = ab[sorted(ab, key = lambda x:(-ab[x].coverage, ab[x].overhang))[0]]
                 if best_hit.bridge.hit1.g.hitlen < 6000 or best_hit.bridge.hit2.g.hitlen < 6000 and best_hit.overhang > -15000:

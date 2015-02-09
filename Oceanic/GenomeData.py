@@ -14,7 +14,7 @@ from . import Stats
 class GenomeData:
     def __init__(self, args):
         self.haplotypes = {}
-        
+
         print("Loading genome...")
         overlap_db = self.open_database(args.overlaps)
         self.overlaps = overlap_db.cursor()
@@ -34,7 +34,7 @@ class GenomeData:
         self.errors = self.load_errors(args.errors)
 
         self.gapnum = 1
-
+        
     def open_database(self, dbfile):
         try:
             if isfile(dbfile):
