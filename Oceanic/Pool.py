@@ -75,12 +75,24 @@ class Pool:
                     if merger.bridge(a, b):
                         repeat = True
                         break
-            merger.merge(a)
+        merger.merge()
         other.cleanup()
 
     def extend(self):
         for raft in self.rafts:
             raft.extend()
+    
+    def tie(self, hit, rope):
+        for raft in self.rafts:
+            knot = raft.tie(hit, rope)
+            if knot:
+                return knot
+        else:
+            return None
+    
+    def turn_hooks(self, end):
+        for raft in self:
+            raft.turn_hooks(end)
 
 
 if __name__ == '__main__':

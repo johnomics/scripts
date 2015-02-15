@@ -49,12 +49,12 @@ def reassemble(chromosomes, genome, args):
     pool = ThreadPool(args.threads)
     pool.map(lambda x: chromosomes[x].assemble(genome, args), chromosomes.keys())
 
+    get_genome_stats(chromosomes)
+    
     assembly = []
     for chromosome in chromosomes:
         assembly += chromosomes[chromosome].get_scaffolds()
 
-    get_genome_stats(chromosomes)
-    
     deleted_blocks = 0
     deleted_length = 0
     for blocklist in assembly:

@@ -28,9 +28,9 @@ class Raft:
     def __len__(self):
         return len(self.logs)
     
-    def __contains__(self, start):
+    def __contains__(self, var):
         for log in self.logs:
-            if log[1] == start:
+            if log[0] == var or log[1] == var:
                 return True
         return False
 
@@ -89,48 +89,19 @@ class Raft:
         return len(self.marker_chain) > 1
 
     @property
-    def ranges(self):
-        if not self._ranges:
-            self._ranges = self.set_ranges()
-        return self._ranges
+    def hooks(self):
+        if not self._hooks:
+            self._hooks = self.forge_hooks()
+        return self._hooks
 
-    def set_ranges(self):
-        scaffold = start = end = None
-        ranges = []
-        for sb in self.manifest:
-            end = sb.end
-            if sb.scaffold != scaffold:
-                if scaffold is not None:
-                    ranges.append(Range(scaffold, start, end))
-                start = sb.start
-                scaffold = sb.scaffold
-            else:
-                end = sb.end
-        ranges.append(Range(scaffold, start, end))
-
-        return ranges
-        
-    def get_ranges(self, end):
-        first_reversed = self.ranges[0].reversed()
-        if self.ordered:
-            if end == 'first':
-                return [first_reversed]
-            elif end == 'last':
-                return [self.ranges[-1]]
-        else:
-            if len(self.ranges) == 1:
-                return [first_reversed, self.ranges[0]]
-            else:
-                return [first_reversed, self.ranges[-1]]
-        
     def empty(self):
         self.logs = []
         self.manifest = []
         self.update()
     
-    def discard(self, c_range):
+    def discard(self, hook):
         for log in self.logs:
-            self.genome.blocks[log[0]][log[1]].contained = c_range
+            self.genome.blocks[log[0]][log[1]].contained = hook
         self.empty()
         
     def replace(self, logs):
@@ -159,9 +130,12 @@ class Raft:
         for scaffold, start, direction in other.logs:
             self.append(scaffold, start, direction)
 
+    def trim(self, hook, overhang):
+        pass
+
     def update(self):
         self.collapse()
-        self._ranges = self.set_ranges()
+        self._hooks = self.forge_hooks()
 
     def collapse_consecutive(self):
         newsummary = []
@@ -246,10 +220,70 @@ class Raft:
                 for start in starts_to_extend:
                     self.append(first_scaffold, start, direction)
 
+    def forge_hooks(self):
+        scaffold = start = end = None
+        hooks = []
+        for sb in self.manifest:
+            end = sb.end
+            if sb.scaffold != scaffold:
+                if scaffold is not None:
+                    hooks.append(Hook(self, scaffold, start, end))
+                start = sb.start
+                scaffold = sb.scaffold
+            else:
+                end = sb.end
+        hooks.append(Hook(self, scaffold, start, end))
+
+        return hooks
+
+    def turn_hooks(self, end):
+        for hook in self.hooks:
+            hook.faces = []
+        
+        if self.ordered:
+            if end == 'first':
+                self.hooks[0].faces = [(self.hooks[0].end, self.hooks[0].start)]
+            elif end == 'last':
+                self.hooks[-1].faces = [(self.hooks[-1].start, self.hooks[-1].end)]
+        else:
+            if len(self.hooks) == 1:
+                self.hooks[0].faces = [(self.hooks[0].start, self.hooks[0].end), (self.hooks[0].end, self.hooks[0].start)]
+            else:
+                self.hooks[0].faces = [(self.hooks[0].end, self.hooks[0].start)]
+                self.hooks[-1].faces = [(self.hooks[-1].start, self.hooks[-1].end)]
+
+    def hook_knots(self, end, rope_name):
+        knots = {}
+        for hook in self.hooks:
+            if hook.faces:
+                for knot in hook.knots:
+                    if knot.rope.lookup[knot].scaffold == rope_name:
+                        knots[knot] = 1
+        return knots
+
+    def tie(self, hit, rope):
+        for hook in self.hooks:
+            knot = hook.tie(hit, rope)
+            if knot:
+                return knot
+        else:
+            return None
+
+    def get_springline(self, self_end, other):
+        other_end = 'last' if self_end == 'first' else 'first'
+        springline = None
+        for hook in self.hooks:
+            if hook.faces:
+                springline = hook.get_springline(other, other_end)
+        return springline
+
+
+
     class RaftBridge():
-        def __init__(self, self_range, self_overhang, other_range, other_overhang, pb_range, pb_overhang, bridge):
+        def __init__(self, other, self_range, self_overhang, other_range, other_overhang, pb_range, pb_overhang, bridge):
             self.self_range = self_range
             self.self_overhang = self_overhang
+            self.other = other
             self.other_range = other_range
             self.other_overhang = other_overhang
             self.pb_range = pb_range
@@ -276,7 +310,7 @@ class Raft:
             return self.bridge.hit1.g.hitlen + self.bridge.hit2.g.hitlen
 
     
-    def add_bridge(self, self_hit, self_range, self_range_i, other_range, other_range_i, bridge):
+    def add_bridge(self, other, self_hit, self_range, other_range, bridge):
 
         if self_hit == bridge.hit1:
             self_overhang, other_overhang, pb_overhang, pb_range = bridge.get_hit_overhangs(self_range, other_range)
@@ -284,16 +318,15 @@ class Raft:
             other_overhang, self_overhang, pb_overhang, pb_range = bridge.get_hit_overhangs(other_range, self_range)
             pb_range.reverse()
 
-        pb_range_i = repr(pb_range)
         cur_overhang = -10000000
-        if (self_range_i in self.bridges and other_range_i in self.bridges[self_range_i]
-            and pb_range_i in self.bridges[self_range_i][other_range_i]):
-            cur_overhang = self.bridges[self_range_i][other_range_i][pb_range_i].overhang
+        if (self_range in self.bridges and other_range in self.bridges[self_range]
+            and pb_range in self.bridges[self_range][other_range]):
+            cur_overhang = self.bridges[self_range][other_range][pb_range].overhang
         
         if cur_overhang < self_overhang + other_overhang:
-            self.bridges[self_range_i][other_range_i][pb_range_i] = self.RaftBridge(self_range, self_overhang,
-                                                                                    other_range, other_overhang,
-                                                                                    pb_range, pb_overhang, bridge)
+            self.bridges[self_range][other_range][pb_range] = self.RaftBridge(other, self_range, self_overhang,
+                                                                              other_range, other_overhang,
+                                                                              pb_range, pb_overhang, bridge)
 
 
 
@@ -380,21 +413,94 @@ class SummaryBlock:
         return '{}:{}-{} ({}, {} bp)'.format(self.scaffold, str(self.start), str(self.end), str(self.cm), str(self.length))
 
 
-class Range():
+class Hook():
+    def __init__(self, raft, scaffold, start, end, knots=None):
+        self.raft = raft
+        self.scaffold = scaffold
+        self.start = start
+        self.end = end
+        self.faces = []
+        self.knots = {} if knots is None else knots
+
+    def __repr__(self):
+        return "{0:16s}:{1:7d}-{2:7d} {3}".format(self.scaffold, self.start, self.end, self.faces)
+
+    def __lt__(self, other):
+        if self.scaffold < other.scaffold:
+            return self
+        elif self.start < other.start:
+            return self
+        else:
+            return other
+
+    def __iter__(self):
+        return iter(self.knots)
+
+    @property
+    def ropes(self):
+        return [k.rope for k in self.knots]
+
+    def order(self, start, end):
+        if start < end:
+            return start, end
+        else:
+            return end, start
+
+
+    def tie(self, hit, rope):
+        if hit.scaffold != self.scaffold:
+            return None
+        h_start, h_end = self.order(self.start, self.end)
+        t_start, t_end = self.order(hit.start, hit.end)
+        if h_start <= t_start and h_end >= t_end:
+            new_knot = RaftKnot(hit.scaffold, hit.start, hit.end, self, rope)
+            self.knots[new_knot] = True
+            return new_knot
+        else:
+            return None
+    
+    def untie(self, knot):
+        del self.knots[knot]
+    
+    def get_springline(self, other, other_end):
+        print(self)
+        springline = None
+        for knot in self.knots:
+            print(knot)
+            springline = knot.get_springline(other, other_end)
+        return springline
+        
+class Knot():
     def __init__(self, scaffold, start, end):
         self.scaffold = scaffold
         self.start = start
         self.end = end
+        self.length = max(self.start, self.end) - min(self.start, self.end) + 1
+    
+    def __repr__(self):
+        return '{}\t{}\t{}\t{}'.format(self.scaffold, self.start, self.end, self.length)
+
+class RaftKnot(Knot):
+    def __init__(self, scaffold, start, end, hook, rope):
+        self.hook = hook
+        self.rope = rope
+        super().__init__(scaffold, start, end)
 
     def __repr__(self):
-        return "{0:16s}:{1:7d}-{2:7d}".format(self.scaffold, self.start, self.end)
+        out = super().__repr__()
+        if self in self.rope.lookup:
+            out += '\ttied to {}'.format(self.rope.lookup[self])
+        return out
 
-    def reversed(self):
-        return Range(self.scaffold, self.end, self.start)
+    def untie(self):
+        self.hook.untie(self)
     
-    def reverse(self):
-        self.start, self.end = self.end, self.start
-
+    def get_springline(self, other, other_end):
+        springlines = self.rope.get_springlines(self, other, other_end)
+        for springline in springlines:
+            print(springline)
+        return springlines[0] if springlines else None
+        
 
 if __name__ == '__main__':
     pass

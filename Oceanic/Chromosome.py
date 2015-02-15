@@ -51,6 +51,7 @@ class Chromosome:
         for pool in self.pools:
             gt = pool.pooltype
             for raft in pool:
+                stats.length += raft.length
                 stats.log_num += len(raft.logs)
                 stats.pool_stats[gt].length += raft.length
                 stats.log_count[gt] += len(raft.logs)
@@ -141,12 +142,16 @@ class Chromosome:
         for pool in self.pools:
             pool.extend()
 
-#        for pool in self.pools:
+        for pool in self.pools:
+            print(pool)
+            
 #            pool.assemble(pool, merge.PacBioMerge, 'genome_overlaps')
-        self.run_merger([merge.OverlapMerge, merge.PacBioMerge])
-        self.connect(merge.OKMerge)
+#        self.run_merger([merge.OverlapMerge, merge.PacBioMerge])
+#        self.run_merger(merge.RopeMerge)
 
-        print(self)
+#        self.connect(merge.OKMerge)
+
+#        print(self)
         print(self.stats)
 
 

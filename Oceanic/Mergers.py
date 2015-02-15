@@ -6,6 +6,7 @@ from math import sqrt
 from operator import itemgetter
 
 from . import Raft as r
+from . import GenomeData as gd
 
 class Merger():
     
@@ -36,7 +37,7 @@ class MarkerMerge(Merger):
     def __init__(self, this, other, options=None):
         self.joins = []
 
-    def merge(self, a):
+    def merge(self):
         pass
 
     def bridge(self, a, b):
@@ -116,7 +117,164 @@ class MarkerMerge(Merger):
             new.reverse()
     
         return new
+
+class RopeMerge(Merger):
     
+    def __init__(self, this, other, options=None):
+        self.chromosome = this.chromosome
+        self.springlines = defaultdict(lambda:defaultdict(bool))
+
+        self.this = other
+        self.other = other
+        print(self.this)
+        if self.this != self.other:
+            print(self.other)
+
+        this.turn_hooks('last')
+        other.turn_hooks('first')
+        
+        self.ropes = defaultdict(self.Rope)
+
+        self.tie_ropes(this, other)
+
+        self.untangle_ropes()
+
+    class PBHit:
+        class ScaffoldHit:
+            def __init__(self, scaffold, start, end, hitlen, seqlen, pccov):
+                self.scaffold = scaffold
+                self.start = start
+                self.end = end
+                self.hitlen = hitlen
+                self.seqlen = seqlen
+                self.pccov = pccov
+
+        def __init__(self, hit):
+            rstart, rend, qstart, qend, rhitlen, qhitlen, self.pcid, rseqlen, qseqlen, \
+            rpccov, qpccov, rscaffold, qscaffold, self.hittype = hit
+        
+            self.pb = self.ScaffoldHit(rscaffold, rstart, rend, rhitlen, rseqlen, rpccov)
+            self.g  = self.ScaffoldHit(qscaffold, qstart, qend, qhitlen, qseqlen, qpccov)
+    
+        def __repr__(self):
+            return '''{0:16s} ({1:7d} bp) {2:7d} - {3:7d} ({4:10s} {5:7d} - {6:7d} ({7:7d} bp); {8:6.2f}%)'''.format(
+                self.g.scaffold, self.g.seqlen, self.g.start, self.g.end, self.pb.scaffold, self.pb.start, self.pb.end, self.pb.hitlen, self.pcid
+            )
+
+    class SpringLine():
+        def __init__(self, this_knot, other_knot):
+            self.this_knot = this_knot
+            self.other_knot = other_knot
+
+        def __repr__(self):
+            return repr(self.this_knot) + '\t----\t' + repr(self.other_knot)
+
+    class Rope():
+        def __init__(self, hit):
+            self.name = hit.pb.scaffold
+            self.length = hit.pb.seqlen
+            self.knots = []
+            self.lookup = defaultdict(r.Knot)
+        
+        def __repr__(self):
+            out = '{}\t{}\n'.format(self.name, self.length)
+            for knot in self.knots:
+                out += '{}\n'.format(repr(self.lookup[knot]))
+            return out
+
+        @property
+        def matching_hooks(self):
+            hooks = defaultdict(int)
+            for knot in self.knots:
+                hooks[self.lookup[knot].hook] += 1
+
+            return list(hooks.keys())
+
+        def tie(self, hit, pool_knot):
+            rope_knot = r.Knot(hit.scaffold, hit.start, hit.end)
+            self.knots.append(rope_knot)
+            self.lookup[rope_knot] = pool_knot
+            self.lookup[pool_knot] = rope_knot
+
+        def untie(self):
+            for knot in self.knots:
+                self.lookup[knot].untie()
+
+        def get_springlines(self, knot, raft, raft_end):
+            springlines = [RopeMerge.SpringLine(knot, other_knot) for other_knot in raft.hook_knots(raft_end, self.name)]
+            return springlines
+
+    def tie_ropes(self, this, other):
+        pool_scaffolds = this.scaffolds + other.scaffolds
+        statement = 'select * from pacbio_overlaps where qscaffold in ({})'.format(','.join('?'*len(pool_scaffolds)))
+    
+        for args in self.chromosome.overlaps.execute(statement, pool_scaffolds):
+            hit = self.PBHit(args)
+            self.tie_rope(self.ropes, hit, this, other)
+
+    def tie_rope(self, ropes, hit, this, other):
+
+        if hit.g.scaffold in this.scaffolds:
+            hit_pool = this
+        elif hit.g.scaffold in other.scaffolds:
+            hit_pool = other
+        else:
+            print("No scaffold match!")
+            return
+
+        if hit.pb.scaffold not in ropes:
+            ropes[hit.pb.scaffold] = self.Rope(hit)
+
+        pool_knot = hit_pool.tie(hit.g, ropes[hit.pb.scaffold])
+
+        if pool_knot:
+            ropes[hit.pb.scaffold].tie(hit.pb, pool_knot)
+
+    def untangle_ropes(self):
+        to_remove = []
+        for name in self.ropes:
+            if len(self.ropes[name].knots) <= 1:
+                to_remove.append(name)
+            elif len(self.ropes[name].matching_hooks) == 1:
+                to_remove.append(name)
+
+        for name in to_remove:
+            self.ropes[name].untie()
+            del self.ropes[name]
+
+    def get_springline(self, a, b):
+        a_springline = a.get_springline('last', b)
+        b_springline = b.get_springline('first', a)
+        if a_springline == b_springline and a_springline is not None:
+            return a_springline
+        else:
+            return False
+
+    def bridge(self, a, b):
+        if a == b or (a in self.springlines and b in self.springlines[a]):
+            return False
+            
+        print("Searching for bridge between A:")
+        print(a)
+        print("and B:")
+        print(b)
+        springline = self.get_springline(a, b)
+        print(springline)
+#        if springline.contains:
+#            springline.contains.raft.discard(springline.contains.hook)
+#        else:
+        self.springlines[a][b] = springline
+        self.springlines[b][a] = springline
+        return True
+
+
+    def merge(self):
+        for a in self.springlines:
+            for b in self.springlines[a]:
+                print(a)
+                print(b)
+                print(self.springlines[a][b])
+
 
 
 class OverlapMerge(Merger):
@@ -149,7 +307,7 @@ class OverlapMerge(Merger):
             self.r = self.ScaffoldHit(rscaffold, rstart, rend, rhitlen, rseqlen, rpccov)
             self.q = self.ScaffoldHit(qscaffold, qstart, qend, qhitlen, qseqlen, qpccov)
 
-    def merge(self, a):
+    def merge(self):
         pass
 
     class Container():
@@ -228,19 +386,20 @@ class OverlapMerge(Merger):
         if a == b:
             return False
 
-        a_ranges = a.get_ranges('last')
-        b_ranges = b.get_ranges('first')
-
-        for a_range in a_ranges:
-            for b_range in b_ranges:
-                if self.pass_scaffold_pair(a_range.scaffold, b_range.scaffold):
+        a_hooks = a.get_hooks('last')
+        b_hooks = b.get_hooks('first')
+        print(a)
+        print(b)
+        for a_hook in a_hooks:
+            for b_hook in b_hooks:
+                if self.pass_scaffold_pair(a_hook.scaffold, b_hook.scaffold):
                     continue
                 
-                a_container = self.Container(a_range)
-                b_container = self.Container(b_range)
+                a_container = self.Container(a_hook)
+                b_container = self.Container(b_hook)
 
-                for hit in (self.Hit(h) for h in self.hits[a_range.scaffold][b_range.scaffold]):
-                    if self.within(hit.r, a_range) and self.within(hit.q, b_range):
+                for hit in (self.Hit(h) for h in self.hits[a_hook.scaffold][b_hook.scaffold]):
+                    if self.within(hit.r, a_hook) and self.within(hit.q, b_hook):
                         a_container.add(hit.r)
                         b_container.add(hit.q)
                 if not a_container.positions and not b_container.positions:
@@ -249,11 +408,13 @@ class OverlapMerge(Merger):
                 a_container.get_coverage()
                 b_container.get_coverage()
                 
+                print(a_container)
+                print(b_container)
                 if a_container.contained:
-                    a.discard(b_range)
+                    a.discard(b_hook)
                     return False
                 if b_container.contained:
-                    b.discard(a_range)
+                    b.discard(a_hook)
                     return False
 
         return False
@@ -264,13 +425,14 @@ class PacBioMerge(Merger):
 
         self.this = this
         self.other = other
-        
+        self.genome = this.genome
         self.chromosome = this.chromosome
+
         self.tablename = tablename if tablename is not None else 'pacbio_overlaps'
         self.bridges = defaultdict(lambda: defaultdict(list))
-        
+
         self.genome_scaffolds = this.scaffolds + other.scaffolds
-        
+
         self.hits, self.pb_lengths = self.get_hits()
 
         self.bridges = self.get_bridges()
@@ -319,7 +481,7 @@ class PacBioMerge(Merger):
                 for gs2 in self.hits[pacbio]:
                     for hit1 in self.hits[pacbio][gs1]:
                         for hit2 in self.hits[pacbio][gs2]:
-                                bridges[gs1][gs2].append(self.Bridge(pacbio, self.pb_lengths[pacbio], hit1, hit2))    
+                                bridges[gs1][gs2].append(self.Bridge(pacbio, self.pb_lengths[pacbio], hit1, hit2))
         return bridges
 
 
@@ -365,9 +527,10 @@ class PacBioMerge(Merger):
                 return end, start
         
         def get_hit(self, end_range):
-            r_start, r_end = self.order(end_range.start, end_range.end)
 
+            r_start, r_end = self.order(end_range.start, end_range.end)
             hit = None
+            
             if self.hit1.g.scaffold == end_range.scaffold:
                 h_start, h_end = self.order(self.hit1.g.start, self.hit1.g.end)
                 if r_start < h_end and h_start < r_end:
@@ -417,10 +580,28 @@ class PacBioMerge(Merger):
             new = deepcopy(r)
             if new.end < new.start:
                 new.reverse()
-            range_dict[repr(new)].append(r)
+            range_dict[new].append(r)
         return range_dict
         
-        
+    def add_pacbio_block(self, pb_range, raft):
+        new_pb = gd.Block(pb_range.scaffold, pb_range.start, pb_range.end)
+        self.genome.blocks[pb_range.scaffold][pb_range.start] = new_pb
+
+        new_pb_direction = 1 if pb_range.start < pb_range.end else -1
+        raft.append(new_pb.scaffold, new_pb.start, new_pb_direction)
+        return
+
+    def bridge_rafts(self, a, b, rb):
+        a.trim(rb.self_range, rb.self_overhang)
+        b.trim(rb.other_range, rb.other_overhang)
+
+        self.add_pacbio_block(rb.pb_range, a)
+
+        a.merge(b)
+        b.empty()
+        return
+
+    
     def bridge(self, a, b):
         if a == b:
             return None
@@ -428,10 +609,10 @@ class PacBioMerge(Merger):
         a_ranges = self.get_range_dict(a.get_ranges('last'))
         b_ranges = self.get_range_dict(b.get_ranges('first'))
         
-        for a_range_i in a_ranges:
-            for a_range in a_ranges[a_range_i]:
-                for b_range_i in b_ranges:
-                    for b_range in b_ranges[b_range_i]:
+        for a_range_class in a_ranges:
+            for a_range in a_ranges[a_range_class]:
+                for b_range_class in b_ranges:
+                    for b_range in b_ranges[b_range_class]:
                         if self.skip_range_pair(a_range, b_range):
                             continue
                 
@@ -440,36 +621,16 @@ class PacBioMerge(Merger):
                             b_hit = bridge.get_hit(b_range)
                             if not a_hit or not b_hit:
                                 continue
-                            a.add_bridge(a_hit, a_range, a_range_i, b_range, b_range_i, bridge)
-
-        for a_range in sorted(a.bridges):
-            merged = False
-            for b_range in sorted(a.bridges[a_range]):
-                ab = a.bridges[a_range][b_range]
-                best_hit = ab[sorted(ab, key = lambda x:(-ab[x].coverage, ab[x].overhang))[0]]
-                if best_hit.bridge.hit1.g.hitlen < 6000 or best_hit.bridge.hit2.g.hitlen < 6000 and best_hit.overhang > -15000:
-                    continue
-
-                if not a.ordered and best_hit.self_range.end == a.start:
-                    a.reverse()
-                if not b.ordered and best_hit.other_range.end == b.end:
-                    b.reverse()
-
-                if best_hit.self_range.end == a.end and best_hit.other_range.end == b.start:
-                    new_chain = a.marker_chain + b.marker_chain
-                    if new_chain:
-                        a.merge(b)
-                        b.empty()
-                        merged=True
-                        break
-                        
-            if merged:
-                break
-
+                            a.add_bridge(b, a_hit, a_range, b_range, bridge)
         return None
-    
-    def merge(self, a):
-        pass
+
+    def merge(self):
+        for a in self.this.rafts:
+            for a_range in a.bridges:
+                for b_range in a.bridges[a_range]:
+                    for pb_range in a.bridges[a_range][b_range]:
+                        print(a.bridges[a_range][b_range][pb_range])
+                
 
 class OKMerge(Merger):
     def __init__(self, this, other, options=None):
@@ -489,7 +650,7 @@ class OKMerge(Merger):
 
         return True
         
-    def merge(self, a):
+    def merge(self):
         pass
 
 
