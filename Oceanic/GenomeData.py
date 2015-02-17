@@ -32,6 +32,10 @@ class GenomeData:
         
         print("Loading errors...")
         self.errors = self.load_errors(args.errors)
+        
+        self.revised = None
+        if args.revised:
+            self.revised = open(args.revised, 'w')
 
         self.gapnum = 1
         
@@ -57,32 +61,8 @@ class GenomeData:
 
         print("Original stats:", Stats.genome([len(sequences[scaffold]) for scaffold in sequences]))
 
-        delete_scaffolds = {}
-        
-        statement = 'select rscaffold, rseqlen, qscaffold, qseqlen from genome_overlaps where hittype=\"[IDENTITY]\"'
-        for (rscaffold, rseqlen, qscaffold, qseqlen, ) in self.overlaps.execute(statement):
-            if rseqlen <= qseqlen:
-                delete_scaffolds[qscaffold] = 1
-            else:
-                delete_scaffolds[rscaffold] = 1
-
-        for scaffold in sequences:
-            if scaffold in delete_scaffolds:
-                continue
-            statement = "select hittype from genome_overlaps where rscaffold=\"{}\"".format(scaffold)
-            skip = 0
-            for (hittype, ) in self.overlaps.execute(statement):
-                if hittype == '[CONTAINED]':
-                    skip = 1
-            if skip:
-                delete_scaffolds[scaffold] = 1
-        
-        for scaffold in delete_scaffolds:
-            del sequences[scaffold]
-
-        print("Remove contained scaffolds:", Stats.genome([len(sequences[scaffold]) for scaffold in sequences]))
-
         return sequences
+
 
     def load_annotation(self, gff):
         try:
@@ -110,7 +90,7 @@ class GenomeData:
         genome_length = 0
 
         # Load map blocks from database
-        for scaffold, start, end in self.db.execute("select scaffold, start, end from mapblocks"):
+        for scaffold, start, end in self.db.execute("select scaffold, start, end from scaffold_map"):
             if scaffold not in self.sequences:
                 continue
             if end < start:

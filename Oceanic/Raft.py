@@ -3,6 +3,10 @@
 from collections import defaultdict
 from copy import deepcopy
 
+from Bio import SeqIO
+from Bio.Seq import Seq
+from Bio.Alphabet import generic_dna
+
 class Raft:
     def __init__(self, bl_id, scaffold, start, chromosome):
         self.chromosome = chromosome
@@ -77,7 +81,10 @@ class Raft:
     
     @property
     def sequence(self):
-        return sum([m.sequence for m in self.manifest], Seq("", generic_dna))
+        sequence = sum([h.sequence for h in self.hooks], Seq("", generic_dna))
+        sequence.id = self.name
+        sequence.description = self.name
+        return sequence
 
     @property
     def marker_chain(self):
@@ -219,6 +226,16 @@ class Raft:
             else:
                 for start in starts_to_extend:
                     self.append(first_scaffold, start, direction)
+
+    def write(self):
+        if self.genome.revised:
+            SeqIO.write(self.sequence, self.genome.revised, "fasta")
+
+        scaffolds = []
+        for scaffold, start, direction in self.logs:
+            scaffolds.append(self.genome.blocks[scaffold][start])
+        return scaffolds
+
 
     def forge_hooks(self):
         scaffold = start = end = None
@@ -396,18 +413,6 @@ class SummaryBlock:
     def length(self):
         return max(self.start,self.end)-min(self.start,self.end)+1
 
-    @property
-    def sequence(self):
-        if self.start < self.end:
-            seq = genome.sequences[self.scaffold][self.start-1:self.end]
-            seq.id = '_'.join([self.scaffold, str(self.start), str(self.end)])
-        else:
-            seq = genome.sequences[self.scaffold][self.end-1:self.start][::-1]
-            seq.id = '_'.join([self.scaffold, str(self.start), str(self.end)])
-        seq.name = seq.id
-        seq.description = seq.id
-        return seq
-
         
     def __repr__(self):
         return '{}:{}-{} ({}, {} bp)'.format(self.scaffold, str(self.start), str(self.end), str(self.cm), str(self.length))
@@ -435,6 +440,14 @@ class Hook():
 
     def __iter__(self):
         return iter(self.knots)
+
+    @property
+    def sequence(self):
+        if self.start < self.end:
+            seq = self.raft.genome.sequences[self.scaffold][self.start-1:self.end]
+        else:
+            seq = self.raft.genome.sequences[self.scaffold][self.end-1:self.start].reverse_complement()
+        return seq
 
     @property
     def ropes(self):

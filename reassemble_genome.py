@@ -10,6 +10,8 @@ import Oceanic.GenomeData as gd
 import Oceanic.Chromosome as chrom
 import Oceanic.Stats as stats
 
+from Bio import SeqIO
+
 def get_genome_stats(chromosomes):
     genome_stats = stats.Stats("Genome")
 
@@ -28,7 +30,7 @@ def load_map(genome):
     placed_blocks_length = 0
 
     genome.db.execute("select distinct chromosome from scaffold_map order by chromosome")
-    chromosomes = {chromosome_name: chrom.Chromosome(chromosome_name, genome) for chromosome_name, in genome.db.fetchall()}
+    chromosomes = {chromosome_name: chrom.Chromosome(chromosome_name, genome) for chromosome_name, in genome.db.fetchall() if chromosome_name != 0}
 
     for name in chromosomes:
         mapped_blocks += chromosomes[name].mapped_blocks
@@ -41,6 +43,17 @@ def load_map(genome):
     return chromosomes
 
 
+def write_block(scaffold, start, genome):
+    end = genome.blocks[scaffold][start].end
+    if start < end:
+        seq = genome.sequences[scaffold][start-1:end]
+        seq.id = "{}_{}_{}".format(scaffold, start, end)
+    else:
+        seq = genome.sequences[scaffold][end-1:start].reverse_complement()
+        seq.id = "{}_{}_{}".format(scaffold, end, start)
+
+    seq.description = seq.id
+    SeqIO.write(seq, genome.revised, "fasta")
 
 def reassemble(chromosomes, genome, args):
 
@@ -53,7 +66,7 @@ def reassemble(chromosomes, genome, args):
     
     assembly = []
     for chromosome in chromosomes:
-        assembly += chromosomes[chromosome].get_scaffolds()
+        assembly += chromosomes[chromosome].write()
 
     deleted_blocks = 0
     deleted_length = 0
@@ -77,6 +90,8 @@ def reassemble(chromosomes, genome, args):
                 continue
             left_blocks += 1
             left_length += genome.blocks[scaffold][start].length
+            
+            write_block(scaffold, start, genome)
             assembly.append([genome.blocks[scaffold][start]])
 
     print("Contained {} blocks, length {}".format(contained_blocks, contained_length))
@@ -112,7 +127,8 @@ def get_args():
         -g GFF file
         -e errors file
         -t threads
-        -o overlaps''')
+        -o overlaps
+        -r revised''')
 
     parser.add_argument('-d', '--database', type=str, required=True)
     parser.add_argument('-f', '--fasta', type=str, required=True)
@@ -120,6 +136,7 @@ def get_args():
     parser.add_argument('-o', '--overlaps', type=str, required=True)
     parser.add_argument('-e', '--errors', type=str)
     parser.add_argument('-t', '--threads', type=int, default=1)
+    parser.add_argument('-r', '--revised', type=str)
 
     return parser.parse_args()
 

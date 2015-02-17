@@ -94,6 +94,11 @@ class Pool:
         for raft in self:
             raft.turn_hooks(end)
 
+    def write(self):
+        scaffolds = []
+        for raft in self:
+            scaffolds.append(raft.write())
+        return scaffolds
 
 if __name__ == '__main__':
     pass

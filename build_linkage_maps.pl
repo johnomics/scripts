@@ -78,7 +78,7 @@ my $blocklist = refine_markers( $args{input}, $args{corrections}, $metadata );
 print STDERR "MAKING LINKAGE MAPS\n";
 my ( $linkage_groups, $marker_blocks, $maternal_blocks ) = make_linkage_maps( $blocklist, $args{output}, $args{known} );
 
-output_marker_blocks( $linkage_groups, $marker_blocks, $maternal_blocks, $args{input}, $args{output} );
+output_marker_blocks( $linkage_groups, $marker_blocks, $maternal_blocks, $blocklist, $args{input}, $args{output} );
 
 print STDERR "Done\n";
 
@@ -875,12 +875,13 @@ sub output_rejected_markers {
 ## MAP GENOME
 
 sub output_marker_blocks {
-    my ( $linkage_groups, $marker_blocks, $maternal_blocks, $input, $output ) = @_;
+    my ( $linkage_groups, $marker_blocks, $maternal_blocks, $blocklist, $input, $output ) = @_;
 
     my ( $dbh, $insert_chromosome, $insert_scaffold ) = create_map_tables($input);
 
     my $chromosome_numbers = get_chromosome_numbers($linkage_groups);
 
+    my %filled_blocks;
     my %genome;
     for my $chromosome ( sort { $a <=> $b } keys %{$chromosome_numbers} ) {
         my $chromosome_print = $chromosome_numbers->{$chromosome};
@@ -896,11 +897,17 @@ sub output_marker_blocks {
                         $map->{$lg}{$cM}{$marker}{length}
                     );
 
-                    insert_scaffold_blocks( $marker_blocks->{$marker}, $chromosome, $cM, $insert_scaffold );
+                    insert_scaffold_blocks( $marker_blocks->{$marker}, $chromosome, $cM, $insert_scaffold, \%filled_blocks );
                 }
             }
         }
-        insert_scaffold_blocks($maternal_blocks->{$chromosome_print}, $chromosome, -1, $insert_scaffold );
+        insert_scaffold_blocks($maternal_blocks->{$chromosome_print}, $chromosome, -1, $insert_scaffold, \%filled_blocks );
+    }
+    
+    for my $block ( @{$blocklist} ) {
+        next if defined $filled_blocks{$block->{scaffold}}{$block->{start}};
+
+        $insert_scaffold->execute( 0, -1, $block->{scaffold}, $block->{start}, $block->{end}, $block->{length} );
     }
     
     $dbh->commit;
@@ -975,12 +982,13 @@ sub colour_clean_marker {
 }
 
 sub insert_scaffold_blocks {
-    my ( $blocks, $chromosome, $cM, $insert_scaffold ) = @_;
+    my ( $blocks, $chromosome, $cM, $insert_scaffold, $filled_blocks ) = @_;
     for my $scaffold ( sort keys %{$blocks} ) {
         for my $start ( sort { $a <=> $b } keys %{ $blocks->{$scaffold} } ) {
             my $end = $blocks->{$scaffold}{$start};
             my $length = $end - $start + 1;
             $insert_scaffold->execute( $chromosome, $cM, $scaffold, $start, $end, $length );
+            $filled_blocks->{$scaffold}{$start} = 1
         }
     }
     return;

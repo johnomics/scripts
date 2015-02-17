@@ -112,15 +112,10 @@ class Chromosome:
         self.markers[cm].update_previous(prev_cm)
         self.markers[cm].update_next(next_cm)
 
-    def get_scaffolds(self):
+    def write(self):
         scaffolds = []
         for pool in self:
-            for raft in pool:
-                scaffoldlist = []
-                
-                for scaffold, start, direction in raft.logs:
-                    scaffoldlist.append(self.genome.blocks[scaffold][start])
-                scaffolds.append(scaffoldlist)
+            scaffolds += pool.write()
         
         return scaffolds
     
@@ -142,8 +137,8 @@ class Chromosome:
         for pool in self.pools:
             pool.extend()
 
-        for pool in self.pools:
-            print(pool)
+#        for pool in self.pools:
+#            print(pool)
             
 #            pool.assemble(pool, merge.PacBioMerge, 'genome_overlaps')
 #        self.run_merger([merge.OverlapMerge, merge.PacBioMerge])
