@@ -60,7 +60,7 @@ def reassemble(chromosomes, genome, args):
     print("Reassembly...")
 
     pool = ThreadPool(args.threads)
-    pool.map(lambda x: chromosomes[x].assemble(genome, args), chromosomes.keys())
+    pool.map(lambda x: chromosomes[x].assemble(args), chromosomes.keys())
 
     get_genome_stats(chromosomes)
     

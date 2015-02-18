@@ -36,7 +36,7 @@ class Pool:
     
     @property
     def marker_chain(self):
-        for raft in self.rafts:
+        for raft in sorted(self.rafts, key=lambda x: x.length, reverse=True):
             return raft.marker_chain
         return ''
     

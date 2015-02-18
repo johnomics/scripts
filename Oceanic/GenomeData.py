@@ -98,6 +98,13 @@ class GenomeData:
             block_num += 1
             genome_length += end - start + 1
             blocks[scaffold][start] = Block(scaffold, start, end)
+        
+        for scaffold in self.sequences:
+            if scaffold not in blocks:
+                end = len(self.sequences[scaffold])
+                block_num += 1
+                genome_length += end
+                blocks[scaffold][1] = Block(scaffold, 1, end)
 
         # Store previous and next blocks
         for scaffold in blocks:

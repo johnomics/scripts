@@ -49,19 +49,13 @@ class MarkerMerge(Merger):
         start, target, a_forward, b_forward = self.orient(a,b)
         this_cm = scaffold[start].cm
         direction = 1 if start < target else -1
-    
+
         while True:
             if direction == 1:
                 start = scaffold[start].next_block
             else:
                 start = scaffold[start].prev_block
-            
-            if start == target:
-                bridge = self.merge_logs(bridge, a.logs)
-                bridge = self.merge_logs(bridge, b.logs)
-                self.do_join(a, b, bridge)
-                return True
-                
+
             if start == 0:
                 break
             
@@ -74,18 +68,29 @@ class MarkerMerge(Merger):
             if block_i_chr != a.chromosome.name: # This check comes after the cM check because chr==0 is OK
                 break
         
+            merge = False
             if block_i_cm == this_cm:
-                bridge.append((a.scaffold, start, direction))
+                merge = True
         
             if block_i_cm == a.chromosome.markers[this_cm].next_cm:
                 this_cm = a.chromosome.markers[this_cm].next_cm
-                bridge.append((a.scaffold, start, direction))
+                merge = True
         
             
             if block_i_cm == a.chromosome.markers[this_cm].prev_cm:
                 this_cm = a.chromosome.markers[this_cm].prev_cm
-                bridge.append((a.scaffold, start, direction))
+                merge = True
+                
             
+            if merge:
+                if start == target:
+                    bridge = self.merge_logs(bridge, a.logs)
+                    bridge = self.merge_logs(bridge, b.logs)
+                    self.do_join(a, b, bridge)
+                    return True
+                else:
+                    bridge.append((a.scaffold, start, direction))
+                
             if bridge and bridge[-1][1] == start:
                 continue
     
@@ -102,7 +107,7 @@ class MarkerMerge(Merger):
         
         a_forward = a.start <= a.last
         b_forward = b.start <= b.last
-        return a_near, b_near, a_forward, b_forward
+        return a.get_log_start(a_near), b.get_log_start(b_near), a_forward, b_forward
     
     def merge_logs(self, this, other):
         if not this:

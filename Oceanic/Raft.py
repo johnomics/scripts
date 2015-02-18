@@ -133,6 +133,13 @@ class Raft:
         self.manifest = [SummaryBlock(scaffold, start, self.genome.blocks[scaffold][start], direction)] + self.manifest
         self.update()
 
+    def get_log_start(self, pos):
+        for log in self.logs:
+            if pos >= log[1] and pos <= self.genome.blocks[log[0]][log[1]].end:
+                return log[1]
+        else:
+            return None
+
     def merge(self, other):
         for scaffold, start, direction in other.logs:
             self.append(scaffold, start, direction)
@@ -361,6 +368,19 @@ class MarkerChain:
 
         if not self.check():
             self.chain = None
+
+    def __getitem__(self, i):
+        return self.chain[i]
+
+    def __contains__(self, key):
+        for cm in self.chain:
+            if cm == key:
+                return True
+        else:
+            return False
+
+    def __repr__(self):
+        return repr(self.chain)
 
     def __len__(self):
         if self.chain == None:

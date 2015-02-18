@@ -128,18 +128,15 @@ class Chromosome:
         
         self.connect(mergeclass)
     
-    def assemble(self, genome, args):
+    def assemble(self, args):
         
         self.threadstart(args)
-        
-        self.run_merger(merge.MarkerMerge)
 
+        self.run_merger(merge.MarkerMerge)
+        
         for pool in self.pools:
             pool.extend()
 
-#        for pool in self.pools:
-#            print(pool)
-            
 #            pool.assemble(pool, merge.PacBioMerge, 'genome_overlaps')
 #        self.run_merger([merge.OverlapMerge, merge.PacBioMerge])
 #        self.run_merger(merge.RopeMerge)
@@ -149,20 +146,23 @@ class Chromosome:
 #        print(self)
         print(self.stats)
 
-
     def connect(self, mergeclass):
         p = 0
         if type(mergeclass) is not list:
             mergeclass = [mergeclass]
 
         while p < len(self.pools)-1:
-            for mc in mergeclass:
-                self.pools[p].assemble(self.pools[p+1], mc)
-                p = self.split(p)
-            if self.pools[p+1]:
-                p += 1
-            else:
-                del self.pools[p+1]
+            if not self.pools[p]:
+                del self.pools[p]
+                continue
+
+            q = p + 1
+            while q < len(self.pools):
+                for mc in mergeclass:
+                    self.pools[p].assemble(self.pools[q], mc)
+                q += 1
+            p = self.split(p)
+            p += 1
 
 
     def split(self, p):
@@ -175,7 +175,6 @@ class Chromosome:
             self.pools[p+1].add(raft)
             self.pools[p].remove(raft)
         return p+1
-
 
 class Marker:
     def __init__(self, cm, prev_cm=-1, next_cm=-1):
