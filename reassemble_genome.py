@@ -53,7 +53,12 @@ def write_block(scaffold, start, genome):
         seq.id = "{}_{}_{}".format(scaffold, end, start)
 
     seq.description = seq.id
-    SeqIO.write(seq, genome.revised, "fasta")
+    SeqIO.write(seq, genome.revised_fasta, "fasta")
+
+    if genome.revised_db:
+        genome.revised_db.execute("insert into scaffold_map values (?,?,?,?,?,?)",
+            [0, -1, scaffold, start, end, end-start+1])
+
 
 def reassemble(chromosomes, genome, args):
 
@@ -82,6 +87,7 @@ def reassemble(chromosomes, genome, args):
     left_length = 0
     contained_blocks = 0
     contained_length = 0
+    
     for scaffold in genome.blocks:
         for start in genome.blocks[scaffold]:
             if genome.blocks[scaffold][start].contained:
@@ -91,12 +97,17 @@ def reassemble(chromosomes, genome, args):
             left_blocks += 1
             left_length += genome.blocks[scaffold][start].length
             
-            write_block(scaffold, start, genome)
+            if genome.revised_fasta:
+                write_block(scaffold, start, genome)
+                
             assembly.append([genome.blocks[scaffold][start]])
+
+    if genome.revised_db:
+        genome.revised_conn.commit()
 
     print("Contained {} blocks, length {}".format(contained_blocks, contained_length))
     print("Left over {} blocks, length {}".format(left_blocks, left_length))
-    
+
     return assembly
 
 

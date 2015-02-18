@@ -33,12 +33,22 @@ class GenomeData:
         print("Loading errors...")
         self.errors = self.load_errors(args.errors)
         
-        self.revised = None
-        if args.revised:
-            self.revised = open(args.revised, 'w')
+        self.revised, self.revised_fasta, self.revised_db, self.revised_conn = self.open_revised(args.revised)
 
         self.gapnum = 1
         
+    def open_revised(self, revised):
+        fasta = None
+        if revised:
+            fasta = open(revised+".fa", 'w')
+            rconn = sql.connect(revised+".db")
+            db = rconn.cursor()
+            db.execute('drop table if exists scaffold_map')
+            db.execute('''create table scaffold_map
+                         (chromosome integer, cm real, scaffold text, start integer, end integer, length integer)''')
+
+        return revised, fasta, db, rconn
+
     def open_database(self, dbfile):
         try:
             if isfile(dbfile):

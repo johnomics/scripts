@@ -235,8 +235,11 @@ class Raft:
                     self.append(first_scaffold, start, direction)
 
     def write(self):
-        if self.genome.revised:
-            SeqIO.write(self.sequence, self.genome.revised, "fasta")
+        if self.genome.revised_fasta:
+            SeqIO.write(self.sequence, self.genome.revised_fasta, "fasta")
+            for sb in self.manifest:
+                self.chromosome.revised_db.execute("insert into scaffold_map values (?,?,?,?,?,?)",
+                      [self.chromosome.name, sb.cm, sb.scaffold, sb.start, sb.end, sb.length])
 
         scaffolds = []
         for scaffold, start, direction in self.logs:

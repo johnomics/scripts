@@ -114,8 +114,15 @@ class Chromosome:
 
     def write(self):
         scaffolds = []
+        
+        if self.genome.revised:
+            self.revised_conn = self.open_database(self.genome.revised+".db")
+            self.revised_db = self.revised_conn.cursor()
+        
         for pool in self:
             scaffolds += pool.write()
+        
+        self.revised_conn.commit()
         
         return scaffolds
     
