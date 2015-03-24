@@ -11,8 +11,7 @@ class Pool:
     def __repr__(self):
         output = 'Type: {}\n'.format(self.pooltype)
         for raft in self:
-            output += repr(raft) + '\n'
-            output += 'Length: {}\n'.format(raft.length)
+            output += repr(raft)
             output += '-----\n'
         output += '====='
         
@@ -77,6 +76,11 @@ class Pool:
                         break
         merger.merge()
         other.cleanup()
+
+    def removehap(self, hap):
+        for raft in [raft for raft in self.rafts if raft.haplotype == hap]:
+            raft.discard(hap)
+        self.cleanup()
 
     def extend(self):
         for raft in self.rafts:

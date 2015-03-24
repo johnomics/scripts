@@ -57,7 +57,7 @@ def write_block(scaffold, start, genome):
 
     if genome.revised_db:
         genome.revised_db.execute("insert into scaffold_map values (?,?,?,?,?,?)",
-            [0, -1, scaffold, start, end, end-start+1])
+            [0, -1, scaffold, min(start, end), max(start, end), end-start+1])
 
 
 def reassemble(chromosomes, genome, args):
@@ -139,7 +139,8 @@ def get_args():
         -e errors file
         -t threads
         -o overlaps
-        -r revised''')
+        -r revised
+        -a haplomerger''')
 
     parser.add_argument('-d', '--database', type=str, required=True)
     parser.add_argument('-f', '--fasta', type=str, required=True)
@@ -148,6 +149,7 @@ def get_args():
     parser.add_argument('-e', '--errors', type=str)
     parser.add_argument('-t', '--threads', type=int, default=1)
     parser.add_argument('-r', '--revised', type=str)
+    parser.add_argument('-a', '--haplomerger', type=str)
 
     return parser.parse_args()
 

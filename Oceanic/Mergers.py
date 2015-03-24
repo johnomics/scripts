@@ -49,6 +49,8 @@ class MarkerMerge(Merger):
         start, target, a_forward, b_forward = self.orient(a,b)
         this_cm = scaffold[start].cm
         direction = 1 if start < target else -1
+        
+        cm_dir = 0
 
         while True:
             if direction == 1:
@@ -72,13 +74,15 @@ class MarkerMerge(Merger):
             if block_i_cm == this_cm:
                 merge = True
         
-            if block_i_cm == a.chromosome.markers[this_cm].next_cm:
+            if block_i_cm == a.chromosome.markers[this_cm].next_cm and cm_dir in (0, 1):
                 this_cm = a.chromosome.markers[this_cm].next_cm
+                cm_dir = 1
                 merge = True
         
             
-            if block_i_cm == a.chromosome.markers[this_cm].prev_cm:
+            if block_i_cm == a.chromosome.markers[this_cm].prev_cm and cm_dir in (0, -1):
                 this_cm = a.chromosome.markers[this_cm].prev_cm
+                cm_dir = -1
                 merge = True
                 
             

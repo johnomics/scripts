@@ -18,7 +18,14 @@ class Raft:
         self.bridges = defaultdict(lambda:defaultdict(lambda:defaultdict(list)))
 
     def __repr__(self):
-        return '\n'.join([repr(m) for m in self.manifest])
+        output = ''
+        if self.marker_chain.chain is None:
+            output += 'To fix:\n'
+        if self.name in self.genome.haplotypes:
+            output += 'Haplotype {}\n'.format(self.genome.haplotypes[self.name])
+        output += '\n'.join([repr(m) for m in self.manifest]) + '\n'
+        output += 'Length: {}\n'.format(self.length)
+        return output
 
     def __hash__(self):
         return self.id
@@ -37,6 +44,13 @@ class Raft:
             if log[0] == var or log[1] == var:
                 return True
         return False
+
+    @property
+    def haplotype(self):
+        if self.name in self.genome.haplotypes:
+            return self.genome.haplotypes[self.name]
+        else:
+            return None
 
     @property
     def scaffolds(self):
@@ -106,9 +120,9 @@ class Raft:
         self.manifest = []
         self.update()
     
-    def discard(self, hook):
+    def discard(self, label):
         for log in self.logs:
-            self.genome.blocks[log[0]][log[1]].contained = hook
+            self.genome.blocks[log[0]][log[1]].contained = label
         self.empty()
         
     def replace(self, logs):
@@ -148,9 +162,30 @@ class Raft:
         pass
 
     def update(self):
+        self.remove_duplicates()
         self.collapse()
         self._hooks = self.forge_hooks()
 
+    def remove_duplicates(self):
+        dupes = defaultdict(int)
+        new_logs = []
+        for log in self.logs:
+            dupes[log] += 1
+            if dupes[log] <= 1:
+                new_logs.append(log)
+        self.logs = new_logs
+        
+
+        dupes = defaultdict(int)
+        new_manifest = []
+        for sb in self.manifest:
+            sbkey = '{}_{}'.format(sb.scaffold, sb.start)
+            dupes[sbkey] += 1
+            if dupes[sbkey] <= 1:
+                new_manifest.append(sb)
+        self.manifest = new_manifest
+
+        
     def collapse_consecutive(self):
         newsummary = []
         for i in range(0, len(self.manifest)):
@@ -191,7 +226,6 @@ class Raft:
             i += 1
         
         self.manifest = newsummary
-        
 
     def collapse(self):
         self.collapse_consecutive()
@@ -200,6 +234,7 @@ class Raft:
     def extend(self):
         self.extend_dir(0)
         self.extend_dir(-1)
+        self.update()
 
     def extend_dir(self, item):
         first_scaffold, first_start, direction = self.logs[item]
@@ -208,7 +243,7 @@ class Raft:
         starts_to_extend = []
         scaffold = self.genome.blocks[first_scaffold]
         chromosome = scaffold[first_start].chromosome
-        
+
         while True:
             if item == 0 and direction == 1 or item == -1 and direction == -1:
                 ext_start = scaffold[ext_start].prev_block
@@ -239,7 +274,7 @@ class Raft:
             SeqIO.write(self.sequence, self.genome.revised_fasta, "fasta")
             for sb in self.manifest:
                 self.chromosome.revised_db.execute("insert into scaffold_map values (?,?,?,?,?,?)",
-                      [self.chromosome.name, sb.cm, sb.scaffold, sb.start, sb.end, sb.length])
+                      [self.chromosome.name, sb.cm, sb.scaffold, min(sb.start, sb.end), max(sb.start, sb.end), sb.length])
 
         scaffolds = []
         for scaffold, start, direction in self.logs:

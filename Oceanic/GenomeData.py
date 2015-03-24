@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 
 import sys
+import gzip
+import re
 from os.path import isfile
 import sqlite3 as sql
 from collections import defaultdict
@@ -37,6 +39,9 @@ class GenomeData:
 
         self.gapnum = 1
         
+        print("Loading haplotypes...")
+        self.haplotypes = self.load_haplotypes(args.haplomerger)
+        
     def open_revised(self, revised):
         fasta = None
         if revised:
@@ -55,7 +60,7 @@ class GenomeData:
                 conn = sql.connect(dbfile)
             else:
                 raise IOError
-        except:
+        except IOError:
             print("Can't open database {}!".format(dbfile))
             sys.exit()
     
@@ -141,7 +146,7 @@ class GenomeData:
                         errors[(scaffold, int(start))] = -1
             else:
                 raise IOError
-        except:
+        except IOError:
             print("Can't open errors file!")
             sys.exit()
     
@@ -152,6 +157,27 @@ class GenomeData:
         self.blocks[newgapname][1] = Block(newgapname, 1, length)
         self.gapnum += 1
         return self.blocks[newgapname][1]
+    
+    def load_haplotypes(self, haplomerger):
+        haplotypes = {}
+        self.load_haplotype(haplotypes, haplomerger, "A")
+        self.load_haplotype(haplotypes, haplomerger, "B")
+        return haplotypes
+    
+    def load_haplotype(self, haplotypes, haplomerger, hap):
+        hapfile = haplomerger + "/assembly_hap" + hap + ".fa.gz"
+        try:
+            if isfile(hapfile):
+                with gzip.open(hapfile, 'rt') as hf:
+                    for line in hf:
+                        if line.startswith(">"):
+                            f = line[1:].split('_')
+                            name = f[0] + '_' + f[1] + '_' + f[2]
+                            haplotypes[name] = hap
+        except IOError:
+            print("Can't open haplotype file!", hapfile)
+            sys.exit()
+    
 
 class Block:
     def __init__(self, scaffold, start, end, prev_block=0, next_block=0, chromosome=0, cm=-1):

@@ -78,7 +78,7 @@ class Chromosome:
     def set_blocks(self):
         mapped_blocks = mapped_blocks_length = placed_blocks = placed_blocks_length = 0
 
-        for cm in sorted(self.markers) + [-1]:
+        for cm in sorted(self.markers):
             cm_blocks = pl.Pool(self)
             cm_block_id = 1
             statement = "select scaffold, start, end, length from scaffold_map where chromosome={} and cm={} order by scaffold, start, end".format(self.name, cm)
@@ -134,16 +134,18 @@ class Chromosome:
                 pool.assemble(pool, mc)
         
         self.connect(mergeclass)
-    
-    def assemble(self, args):
-        
-        self.threadstart(args)
 
+    def assemble(self, args):
+
+        self.threadstart(args)
+            
         self.run_merger(merge.MarkerMerge)
-        
+
         for pool in self.pools:
             pool.extend()
-
+#            pool.removehap('B')
+            print(pool)
+            
 #            pool.assemble(pool, merge.PacBioMerge, 'genome_overlaps')
 #        self.run_merger([merge.OverlapMerge, merge.PacBioMerge])
 #        self.run_merger(merge.RopeMerge)
@@ -170,7 +172,6 @@ class Chromosome:
                 q += 1
             p = self.split(p)
             p += 1
-
 
     def split(self, p):
         ordered_rafts = [raft for raft in self.pools[p] if raft.ordered]
