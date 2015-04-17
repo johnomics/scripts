@@ -138,14 +138,12 @@ def get_args():
         -g GFF file
         -e errors file
         -t threads
-        -o overlaps
         -r revised
         -a haplomerger''')
 
     parser.add_argument('-d', '--database', type=str, required=True)
     parser.add_argument('-f', '--fasta', type=str, required=True)
     parser.add_argument('-g', '--gff', type=str, required=True)
-    parser.add_argument('-o', '--overlaps', type=str, required=True)
     parser.add_argument('-e', '--errors', type=str)
     parser.add_argument('-t', '--threads', type=int, default=1)
     parser.add_argument('-r', '--revised', type=str)

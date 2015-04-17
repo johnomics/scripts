@@ -26,8 +26,6 @@ class Chromosome:
         return iter(self.pools)
 
     def threadstart(self, args):
-        overlap_db = self.open_database(args.overlaps)
-        self.overlaps = overlap_db.cursor()
         conn = self.open_database(args.database)
         self.db = conn.cursor()
 
@@ -144,15 +142,10 @@ class Chromosome:
         for pool in self.pools:
             pool.extend()
 #            pool.removehap('B')
-            print(pool)
-            
-#            pool.assemble(pool, merge.PacBioMerge, 'genome_overlaps')
-#        self.run_merger([merge.OverlapMerge, merge.PacBioMerge])
-#        self.run_merger(merge.RopeMerge)
 
 #        self.connect(merge.OKMerge)
 
-#        print(self)
+        print(self)
         print(self.stats)
 
     def connect(self, mergeclass):

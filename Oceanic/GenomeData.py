@@ -18,8 +18,6 @@ class GenomeData:
         self.haplotypes = {}
 
         print("Loading genome...")
-        overlap_db = self.open_database(args.overlaps)
-        self.overlaps = overlap_db.cursor()
         
         self.sequences = self.load_genome(args.fasta)
         
@@ -39,8 +37,11 @@ class GenomeData:
 
         self.gapnum = 1
         
-        print("Loading haplotypes...")
-        self.haplotypes = self.load_haplotypes(args.haplomerger)
+        if args.haplomerger:
+            print("Loading haplotypes...")
+            self.haplotypes = self.load_haplotypes(args.haplomerger)
+        else:
+            self.haplotypes = {}
         
     def open_revised(self, revised):
         fasta = None

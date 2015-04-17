@@ -77,10 +77,6 @@ class Pool:
         merger.merge()
         other.cleanup()
 
-    def removehap(self, hap):
-        for raft in [raft for raft in self.rafts if raft.haplotype == hap]:
-            raft.discard(hap)
-        self.cleanup()
 
     def extend(self):
         for raft in self.rafts:
