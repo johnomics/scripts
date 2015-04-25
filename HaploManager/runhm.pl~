@@ -60,21 +60,6 @@ my $options_okay = GetOptions(
     'g'                 => \$g,
 );
 
-
-croak "No output directory! Please specify -o $OS_ERROR\n" if $outputdir eq "";
-
-if ( !-d $outputdir ) {
-    croak "No config directory! Please specify -c $OS_ERROR\n" if $configdir eq "";
-    croak "Config directory $configdir does not exist!\n" if !-d $configdir;
-    dircopy $configdir, $outputdir;
-}
-
-if ( !-e "$outputdir/genome.fa" ) {
-    croak "No FASTA file! Please specify -f $OS_ERROR\n" if $input eq "";
-    croak "FASTA file $input does not exist!\n" if !-e $input;
-    copy $input, "$outputdir/genome.fa";
-}
-
 my %misassemblies;
 if ( $misassemblies and -e $misassemblies ) {
     open my $misfh, '<', $misassemblies or croak "Can't open misassemblies file $misassemblies $OS_ERROR\n";
@@ -89,6 +74,23 @@ if ( $misassemblies and -e $misassemblies ) {
           { scaffold => $scaffold, start => $start, end => $end, type => $type, details => $details };
     }
     close $misfh;
+}
+
+edit_new_scaffolds( $prefix, $misassemblies );
+exit;
+
+croak "No output directory! Please specify -o $OS_ERROR\n" if $outputdir eq "";
+
+if ( !-d $outputdir ) {
+    croak "No config directory! Please specify -c $OS_ERROR\n" if $configdir eq "";
+    croak "Config directory $configdir does not exist!\n" if !-d $configdir;
+    dircopy $configdir, $outputdir;
+}
+
+if ( !-e "$outputdir/genome.fa" ) {
+    croak "No FASTA file! Please specify -f $OS_ERROR\n" if $input eq "";
+    croak "FASTA file $input does not exist!\n" if !-e $input;
+    copy $input, "$outputdir/genome.fa";
 }
 
 my ( $filename, $dirs, $suffix ) = fileparse( $input, qr/\.[^.]*/ );
@@ -222,9 +224,10 @@ sub edit_new_scaffolds {
         
         my $partend = $scflength+$partlength;
         if (defined $misassemblies{$scfnum}) {
+            print "$scfnum\t$scflength\t$partend\t$portion";
             foreach my $mis (@{$misassemblies{$scfnum}}) {
-                if ($mis->{start} < $scflength + $partlength and $mis->{end} > $scflength+1) {
-                    $f[-1] = "-1\n";
+                if ($mis->{start} < $scflength + $partlength and $mis->{end} > $scflength) {
+                    $f[-1] = -1
                 }
             }
         }

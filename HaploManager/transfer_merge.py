@@ -5,11 +5,13 @@ import sys
 import pathlib
 import argparse
 import sqlite3 as sql
-from collections import defaultdict
+from collections import defaultdict, namedtuple
 from operator import itemgetter
 
+Haplotype = namedtuple('Haplotype', 'name start end strand')
+
 class Part():
-    def __init__(self, oldname, oldstart, oldend, newname, newstart, newend, strand, parttype):
+    def __init__(self, oldname, oldstart, oldend, newname, newstart, newend, strand, parttype, haplist):
         self.oldname = oldname
         self.oldstart = int(oldstart)
         self.oldend = int(oldend)
@@ -18,13 +20,19 @@ class Part():
         self.newend = int(newend)
         self.strand = int(strand)
         self.parttype = parttype
+        self.haplotype = None
+        if haplist:
+            self.haplotype = Haplotype(haplist[0], haplist[1], haplist[2], haplist[3])
 
     @property
     def length(self):
         return self.oldend - self.oldstart + 1
     
     def __repr__(self):
-        return '{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}'.format(self.oldname, self.oldstart, self.oldend, self.newname, self.newstart, self.newend, self.strand, self.parttype)
+        out = '{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}'.format(self.oldname, self.oldstart, self.oldend, self.newname, self.newstart, self.newend, self.strand, self.parttype)
+        if self.haplotype:
+            out += '\t{}\t{}\t{}\t{}'.format(self.haplotype.name, self.haplotype.start, self.haplotype.end, self.haplotype.strand)
+        return out
 
 
 def load_genome(mergedgenome):
@@ -32,10 +40,10 @@ def load_genome(mergedgenome):
     try:
         with open(mergedgenome, 'r') as g:
             for line in g:
-                oldname, oldstart, oldend, newname, newstart, newend, strand, parttype = line.rstrip().split('\t')
+                oldname, oldstart, oldend, newname, newstart, newend, strand, parttype, *args = line.rstrip().split('\t')
                 if strand == '0':
                     strand = '1'
-                genome[oldname].append(Part(oldname, oldstart, oldend, newname, newstart, newend, strand, typename))
+                genome[oldname].append(Part(oldname, oldstart, oldend, newname, newstart, newend, strand, parttype, args))
     except IOError:
         print("Failed to load genome file {}".format(mergedgenome))
         sys.exit()
@@ -62,7 +70,7 @@ def get_parts(scaffold, start, end, genome):
             newstart = part.newstart + end_offset
             newend = part.newend - start_offset
         newlength = newend - newstart + 1
-        parts.append([part.newname, newstart, newend, newlength, part.strand, part.parttype, comment])
+        parts.append([part.newname, newstart, newend, newlength, part.strand, part.parttype, comment, part.haplotype])
     return parts
 
 def order(start, end):
@@ -74,9 +82,9 @@ def order(start, end):
 def transfer_genome(new, draft, output, prefix):
 
     transfer = []
-    for scaffold in draft:
+    for scaffold in sorted(draft):
         for part in draft[scaffold]:
-            if part.parttype == 'haplotype' or part.parttype == 'removed':
+            if part.parttype == 'haplotype': # or part.parttype == 'removed':
                 transfer.append(part)
                 continue
                 
@@ -86,7 +94,10 @@ def transfer_genome(new, draft, output, prefix):
             start = part.oldstart
             for p in parts:
                 end = start + p[3] - 1
-                transfer.append(Part(part.oldname, start, end, p[0], p[1], p[2], part.strand * p[4], p[5]))
+                if p[5] == 'haplotype':
+                    origname, origstart, origend, scfstart, scfend, slicestart, sliceend = p[6].split('\t')
+                    end = start + int(sliceend) - int(slicestart)
+                transfer.append(Part(part.oldname, start, end, p[0], p[1], p[2], part.strand * p[4], p[5], p[7]))
                 start = end + 1
     
     for scaffold in new:

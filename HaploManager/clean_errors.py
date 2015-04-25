@@ -161,7 +161,8 @@ def clean_linkage_map(database, errorarg, genome):
 
         if scaffold not in genome:
             genome[scaffold] = []
-        genome[scaffold].append(MapPart(scaffold, start, end, chromosome, cm))
+        if start not in errors[scaffold]:
+            genome[scaffold].append(MapPart(scaffold, start, end, chromosome, cm))
     
     for scaffold in sorted(errors):
         for start in sorted(errors[scaffold]):

@@ -75,7 +75,9 @@ def load_genome(mergedgenome):
     try:
         with open(mergedgenome, 'r') as g:
             for line in g:
-                oldname, oldstart, oldend, newname, newstart, newend, strand, typename = line.rstrip().split('\t')
+                oldname, oldstart, oldend, newname, newstart, newend, strand, typename, *args = line.rstrip().split('\t')
+                if typename in ["full", "part"]:
+                    typename = "retained"
                 genome[oldname].append(Part(oldname, oldstart, oldend, newname, newstart, newend, strand, typename))
     except IOError:
         print("Failed to load genome file {}".format(mergedgenome))
@@ -207,8 +209,10 @@ def write_new_map(linkage_map, genome, prefix, output):
     new_map = []
 
     for scaffold in linkage_map:
+
         for part in linkage_map[scaffold].mapparts:
             new_parts, haps = get_parts(scaffold, part.start, part.end, genome)
+
         
             for np in new_parts:
                 np.chromosome = part.chromosome
@@ -299,6 +303,8 @@ def fill_maternal_only_cms(mapparts):
     for i in range(len(mapparts)-2):
         for o in ([i, i+1, i+2], [i+2, i+1, i]):
             mp1, mp2, mp3 = mapparts[o[0]], mapparts[o[1]], mapparts[o[2]]
+            if mp1.oldname != mp2.oldname or mp1.oldname != mp3.oldname or mp2.oldname != mp3.oldname:
+                continue
             if (mp1.chromosome == 0 and mp1.cm == -1 and
                 mp2.chromosome != 0 and mp2.cm == -1 and
                 mp3.chromosome != 0 and mp3.cm != -1):
@@ -348,7 +354,7 @@ def write_new_gff(genes, genome, prefix):
             stats['total'] += 1
             start, end = gene
             new_parts, haps = get_parts(scaffold, start, end, genome)
-            
+
             if len(new_parts) == 1 and not haps:
                 if new_parts[0].parttype == 'removed':
                     stats['removed'] += 1

@@ -37,16 +37,24 @@ class Part():
         return '{}\t{}'.format(self.scaffold_name, self.scaffold_len)
 
 class OutPart:
-    def __init__(self, end, new_name, new_start, new_end, strand, parttype):
+    def __init__(self, start, end, new_name, new_start, new_end, strand, parttype, haplotype=None):
+        self.start = start
         self.end = end
         self.new_name = new_name
         self.new_start = new_start
         self.new_end = new_end
         self.strand = strand
         self.type = parttype
+        self.haplotype = haplotype
     
     def __repr__(self):
-        return '{}\t{}\t{}\t{}\t{}\t{}'.format(self.end, self.new_name, self.new_start, self.new_end, self.strand, self.type)
+        out = '{}\t{}\t{}\t{}\t{}\t{}'.format(self.end, self.new_name, self.new_start, self.new_end, self.strand, self.type)
+        if self.haplotype:
+            out += '\t' + self.haplotype.haplorepr()
+        return out
+    
+    def haplorepr(self):
+        return '{}\t{}\t{}\t{}'.format(self.new_name, self.new_start, self.new_end, self.strand)
 
 def load_scaffolds(prefix, new, old_genome, new_genome):
     new_scaffolds_file = "hm.new_scaffolds_updated"
@@ -82,12 +90,14 @@ def load_scaffolds(prefix, new, old_genome, new_genome):
                 active_portion = part.active_portion_manual if part.active_portion_manual != '0' else part.active_portion
                 scaffold = part.scaffold1 if active_portion == '1' else part.scaffold2
                 curend = curstart + scaffold.length - 1
-                new_genome[part.scaffold_name][curstart] = OutPart(curend, scaffold.name, scaffold.start, scaffold.end, scaffold.strand, 'merged')
+                new_genome[part.scaffold_name][curstart] = OutPart(curstart, curend, scaffold.name, scaffold.start, scaffold.end, scaffold.strand, 'merged')
                 
-                old_genome[scaffold.name][scaffold.start] = OutPart(scaffold.end, part.scaffold_name, curstart, curend, scaffold.strand, "active")
+                old_genome[scaffold.name][scaffold.start] = OutPart(scaffold.start, scaffold.end, part.scaffold_name, curstart, curend, scaffold.strand, "active")
                 hapscaffold = part.scaffold1 if active_portion == '2' else part.scaffold2
                 if hapscaffold.name != "0":
-                    old_genome[hapscaffold.name][hapscaffold.start] = OutPart(hapscaffold.end, part.scaffold_name, curstart, curend, hapscaffold.strand, "haplotype")
+                    old_genome[hapscaffold.name][hapscaffold.start] = OutPart(hapscaffold.start, hapscaffold.end, part.scaffold_name, curstart, curend, 
+                                                                              hapscaffold.strand, "haplotype",
+                                                                              new_genome[part.scaffold_name][curstart])
 
                 curstart = curend + 1
 
@@ -151,8 +161,8 @@ def load_unpaired(prefix, new, old_genome, new_genome):
                 new_start = 1
                 new_end = overlap.length
                 
-                new_genome[new_name][new_start] = OutPart(new_end, overlap.name, overlap.start, overlap.end, overlap.strand, refined_type)
-                old_genome[overlap.name][overlap.start] = OutPart(overlap.end, new_name, new_start, new_end, overlap.strand, refined_type)
+                new_genome[new_name][new_start] = OutPart(new_start, new_end, overlap.name, overlap.start, overlap.end, overlap.strand, refined_type)
+                old_genome[overlap.name][overlap.start] = OutPart(overlap.start, overlap.end, new_name, new_start, new_end, overlap.strand, refined_type)
                 
     except IOError:
         print("Failed to load unpaired file {}".format(unpaired_path))

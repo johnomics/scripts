@@ -16,6 +16,7 @@ from termcolor import colored
 Gap = namedtuple('Gap', 'scaffold start end')
 Marker = namedtuple('Marker', 'maternal paternal intercross')
 Gene = namedtuple('Gene', 'start end attributes')
+Portion = namedtuple('Portion', 'scaffold start end strand length')
 
 class MapPart:
     def __init__(self, scaffold, start, end, chromosome, cm, parttype, comment=""):
@@ -49,14 +50,19 @@ class Correction:
     def __repr__(self):
         return '{}\t{}\t{}\t{}\t{}'.format(self.scaffold, self.start, self.end, self.breaktype, self.details)
         
-def load_corrections(correctfile):
+def load_corrections(correctfile, scaffolds):
+    if not correctfile:
+        return []
     corrections = defaultdict(lambda:defaultdict(Correction))
     try:
         with open(correctfile, 'r') as c:
             for line in c:
                 mode, scaffold, start, end, breaktype, *args = line.rstrip().split('\t')
+                details = ""
                 if args:
                     details = args[0]
+                if end == 'End':
+                    end = scaffolds[scaffold][max(scaffolds[scaffold])].end
                 corrections[scaffold][int(start)] = Correction(scaffold, start, end, breaktype, details)
         return corrections
     except IOError:
@@ -100,8 +106,10 @@ def load_agp(agp):
         print("Can't open AGP file", agp)
         sys.exit()
 
+Haplotype = namedtuple("Haplotype", "hapname hapstart hapend hapstrand name start end strand")
+
 class Merge:
-    def __init__(self, scaffold, start, end, new, newstart, newend, strand, parttype):
+    def __init__(self, scaffold, start, end, new, newstart, newend, strand, parttype, hap=None):
         self.scaffold = scaffold
         self.start = int(start)
         self.end = int(end)
@@ -110,17 +118,23 @@ class Merge:
         self.newend = int(newend)
         self.strand = strand
         self.parttype = parttype
+        self.hap = None
+        if hap:
+            self.hap = Haplotype(hap[0], hap[1], hap[2], hap[3], None, None, None, None)
         
     def __repr__(self):
-        return '{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}'.format(self.scaffold, self.start, self.end, self.new, self.newstart, self.newend, self.strand, self.parttype)
+        out = '{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}'.format(self.scaffold, self.start, self.end, self.new, self.newstart, self.newend, self.strand, self.parttype)
+        if self.hap:
+            out += '\t{}\t{}\t{}\t{}'.format(self.hap.hapname, self.hap.hapstart, self.hap.hapend, self.hap.hapstrand)
+        return out
         
 def load_merged(merged):
     merged_scaffolds = defaultdict(lambda: defaultdict(Merge))
     try:
         with open(merged, 'r') as m:
             for line in m:
-                scaffold, start, end, new, newstart, newend, strand, parttype = line.rstrip().split('\t')
-                merged_scaffolds[scaffold][int(start)] = Merge(scaffold, start, end, new, newstart, newend, strand, parttype)                
+                scaffold, start, end, new, newstart, newend, strand, parttype, *args = line.rstrip().split('\t')
+                merged_scaffolds[scaffold][int(start)] = Merge(scaffold, start, end, new, newstart, newend, strand, parttype, args)
         return merged_scaffolds
     except IOError:
         print("Can't open merged TSV file", merged)
@@ -128,6 +142,8 @@ def load_merged(merged):
 
 def load_gff(gff):
     genes = defaultdict(list)
+    if not gff:
+        return genes
     try:
         with open(gff) as g:
             for line in g:
@@ -174,6 +190,37 @@ def load_linkage_map(database):
 
     return genome, linkage_map
 
+
+def merge_broken(broken_scaffolds, genome, corrections, scaffolds):
+    
+    broken = 0
+    for old in sorted(broken_scaffolds):
+        if len(broken_scaffolds[old]) > 1:
+            broken += 1
+            carryon = False
+            for new in broken_scaffolds[old]:
+                if new in genome:
+                    carryon = True
+            if not carryon:
+                return
+            print(old)
+            for new in sorted(broken_scaffolds[old]):
+                print("\t", new)
+                if new in genome:
+                    for p in genome[new]:
+                        print("\t\t", p)
+                        if new in corrections and p.start in corrections[new]:
+                            print(colored("\t\t\t" + repr(corrections[new][p.start]), 'red', attrs=['bold']))
+                else:
+                    print("\t\tMissing!")
+                for start in sorted(scaffolds[new]):
+                    print(colored("\t\t\t" + repr(scaffolds[new][start]), 'blue', attrs=['bold']))
+            for new in sorted(broken_scaffolds[old]):
+                if new in corrections:
+                    for start in corrections[new]:
+                        print("\t\t", corrections[new][start])
+
+
 def set_up_links(linkage_map):
     for chromosome in linkage_map:
         cms = sorted(linkage_map[chromosome].keys())
@@ -182,6 +229,63 @@ def set_up_links(linkage_map):
                 linkage_map[chromosome][cm].prev_cm = cms[i-1]
             if i < len(cms)-1:
                 linkage_map[chromosome][cm].next_cm = cms[i+1]
+
+class Part:
+    def __init__(self, scaffold, start, end, active, passive):
+        self.scaffold = scaffold
+        self.start = start
+        self.end = end
+        self.active = active
+        self.passive = passive
+
+    def __repr__(self):
+        active = "{}\t{}\t{}\t{}\t{}".format(self.active.scaffold, self.active.start, self.active.end, self.active.strand, self.active.length)
+        passive = "{}\t{}\t{}\t{}\t{}".format(self.passive.scaffold, self.passive.start, self.passive.end, self.passive.strand, self.passive.length)
+        return "{}\t{}\t{}\t{}\t{}".format(self.scaffold, self.start, self.end, active, passive)
+
+def load_hm_new_scaffolds(pacbio):
+    new_scaffolds = defaultdict(list)
+    
+    if not pacbio:
+        return new_scaffolds
+    
+    try:
+        with open(pacbio, 'r') as pb:
+            curid = -1
+            scfnum = 0
+            part_start = 1
+            for line in pb:
+                if line.startswith(("#","\n")):
+                    continue
+                f = line.rstrip().split('\t')
+                if curid == -1:
+                    curid = f[0]
+                if f[0] != curid:
+                    scfnum += 1
+                    curid = f[0]
+                    part_start = 1
+                active_portion = f[-2] if f[-2] != '0' else f[4]
+                if active_portion not in ['1', '2']:
+                    print("Invalid active portion!")
+                    print(line)
+
+                portion1 = Portion(f[5], int(f[8]), int(f[9]), int(f[10]), int(f[11]))
+                portion2 = Portion(f[12], int(f[15]), int(f[16]), int(f[17]), int(f[18]))
+                if active_portion == '1':
+                    active, passive = portion1, portion2
+                else:
+                    active, passive = portion2, portion1
+
+                part_end = part_start + active.length - 1
+                new_scaffolds[scfnum].append(Part(scfnum, part_start, part_end, active, passive))
+                part_start = part_end + 1
+
+        return new_scaffolds
+        
+    except IOError:
+        print("Cannot open PacBio new scaffolds file!", pacbio)
+        sys.exit()
+
 
 def find_scaffold_misassemblies(scaffold, genome, linkage_map, corrections):
     misparts = defaultdict(lambda: defaultdict(MapPart))
@@ -243,9 +347,29 @@ def output_merged_parts(gap, merged):
             print(colored(merged[gap.scaffold][start], 'blue', attrs=['bold']))
         else:
             print(merged[gap.scaffold][start])
-    
+
+def output_haplotypes(gap, merged, misparts):
+    hapdict = {}
+    haps = []
+    for start in sorted(misparts[gap.scaffold]):
+        scaffold, s1,e1, s2,e2, start, end, strand = misparts[gap.scaffold][start].comment.split('\t')
+        if scaffold in merged:
+            for start in sorted(merged[scaffold]):
+                if merged[scaffold][start].hap:
+                    hap = repr(merged[scaffold][start])
+                    if hap in hapdict:
+                        continue
+                    hapdict[hap] = 1
+                    haps.append(hap)
+    for hap in haps:
+        print(hap)
+
+
 def output_genes(gap, genes):
     gene_found = False
+    if gap.scaffold not in genes:
+        return
+
     for g in genes[gap.scaffold]:
         if gap.start <= g.start <= gap.end or gap.start <= g.end <= gap.end:
             print("Gene", g.start, g.end, g.attributes)
@@ -284,6 +408,9 @@ def print_marker(part, markers):
     
 def output_markers(group, gap, markers, agp_parts, ci):
 
+    if not ci:
+        return
+
     top_marker = markers[group[0].chromosome][group[0].cm]
     bottom_marker = markers[group[-1].chromosome][group[-1].cm]
     print_marker(group[0], markers)
@@ -307,12 +434,50 @@ def output_markers(group, gap, markers, agp_parts, ci):
     print_marker(group[0], markers)
     print_marker(group[-1], markers)
 
-def find_misassemblies(genome, linkage_map, scaffolds, merged, genes, corrections, snps):
+def output_new_scaffolds(g, new_scaffolds):
     
-    snpdb, snpio = open_input_database(snps)
+    if 'x' in g.scaffold:
+        return
+
+    scaffold_num = -1
+    name_match = re.compile(r'(.+)Sc(\d+)').match(g.scaffold)
+    if name_match:
+        scaffold_num = int(name_match.group(2))
+
+    misparts = []
+    if scaffold_num in new_scaffolds:
+        for part in new_scaffolds[scaffold_num]:
+            if g.start <= part.start <= g.end or g.start <= part.end <= g.end:
+                misparts.append(part)
+
+    i = 0
+    while i < len(misparts)-1:
+        if i <= len(misparts)-2:
+            j = i+1
+            if misparts[i].active.scaffold != misparts[j].active.scaffold and misparts[i].passive.scaffold == misparts[j].passive.scaffold:
+                print(misparts[i])
+                print(misparts[j])
+                breakpoint = misparts[j].passive.end if misparts[j].passive.strand == -1 else misparts[j].passive.start+1
+                print("P\t{}\t{}\t{}".format(misparts[j].passive.scaffold, 'B', breakpoint))
+        if i <= len(misparts)-3:
+            k = i+2
+            if misparts[i].passive.scaffold == misparts[j].active.scaffold == misparts[k].passive.scaffold:
+                print(misparts[i])
+                print(misparts[j])
+                print(misparts[k])
+                print("P\t{}\t{}\t{}-{}".format(misparts[j].active.scaffold, 'R', misparts[j].active.start+1, misparts[j].active.end))
+
+        i += 1
+
+def find_misassemblies(genome, linkage_map, scaffolds, merged, genes, corrections, snps, new_scaffolds):
     
-    markers = load_chromosome_map(snpio)
-    
+    if snps:
+        snpdb, snpio = open_input_database(snps)
+        markers = load_chromosome_map(snpio)
+    else:
+        snpio = None
+        markers = []
+
     for scaffold in sorted(genome):
         misparts, misgroups = find_scaffold_misassemblies(scaffold, genome, linkage_map, corrections)
         
@@ -322,38 +487,14 @@ def find_misassemblies(genome, linkage_map, scaffolds, merged, genes, correction
                 if group[1].start == group[-2].end + 1:
                     g = Gap(scaffold, group[0].start, group[1].end)
                 else:
-                    g = Gap(scaffold, group[1].start, group[-2].end)
+                    g = Gap(scaffold, group[0].start, group[-1].end)
                 agp_parts = output_agp_parts(g, scaffolds)
                 output_merged_parts(g, merged)
+                output_haplotypes(g, merged, misparts)
                 output_genes(g, genes)
                 output_markers(group, g, markers, agp_parts, snpio)
+                output_new_scaffolds(g, new_scaffolds)
             print("-------")
-            
-
-
-def merge_broken(broken_scaffolds, genome, corrections, scaffolds):
-    
-    broken = 0
-    for old in sorted(broken_scaffolds):
-        if len(broken_scaffolds[old]) > 1:
-            broken += 1
-            print(old)
-            for new in sorted(broken_scaffolds[old]):
-                print("\t", new)
-                if new in genome:
-                    for p in genome[new]:
-                        print("\t\t", p)
-                        if new in corrections and p.start in corrections[new]:
-                            print(colored("\t\t\t" + repr(corrections[new][p.start]), 'red', attrs=['bold']))
-                else:
-                    print("\t\tMissing!")
-                for start in sorted(scaffolds[new]):
-                    print(colored("\t\t\t" + repr(scaffolds[new][start]), 'blue', attrs=['bold']))
-            for new in sorted(broken_scaffolds[old]):
-                if new in corrections:
-                    for start in corrections[new]:
-                        print("\t\t", corrections[new][start])
-
 
 def get_args():
     parser = argparse.ArgumentParser(description='''Output new database containing old linkage information on new HaploMerger output
@@ -364,14 +505,16 @@ def get_args():
         -m merged
         -g gff
         -c corrections
+        -p pacbio_new_scaffolds
         ''')
 
     parser.add_argument('-d', '--database', type=str, required=True)
-    parser.add_argument('-s', '--snps', type=str, required=True)
     parser.add_argument('-a', '--agp', type=str, required=True)
     parser.add_argument('-m', '--merged', type=str, required=True)
-    parser.add_argument('-g', '--gff', type=str, required=True)
-    parser.add_argument('-c', '--corrections', type=str, required=True)
+    parser.add_argument('-c', '--corrections', type=str, required=False)
+    parser.add_argument('-g', '--gff', type=str, required=False)
+    parser.add_argument('-s', '--snps', type=str, required=False)
+    parser.add_argument('-p', '--pacbio', type=str, required=False)
 
     return parser.parse_args()
 
@@ -379,9 +522,9 @@ if __name__ == '__main__':
     
     args = get_args()
 
-    corrections = load_corrections(args.corrections)
-    
     scaffolds, broken_scaffolds = load_agp(args.agp)
+
+    corrections = load_corrections(args.corrections, scaffolds)
 
     genes = load_gff(args.gff)
     
@@ -389,8 +532,10 @@ if __name__ == '__main__':
     
     genome, linkage_map = load_linkage_map(args.database)
 
-#    merge_broken(broken_scaffolds, genome, corrections, scaffolds)
+    merge_broken(broken_scaffolds, genome, corrections, scaffolds)
     
     set_up_links(linkage_map)
     
-    find_misassemblies(genome, linkage_map, scaffolds, merged, genes, corrections, args.snps)
+    new_scaffolds = load_hm_new_scaffolds(args.pacbio)
+    
+    find_misassemblies(genome, linkage_map, scaffolds, merged, genes, corrections, args.snps, new_scaffolds)
