@@ -6,6 +6,7 @@ import re
 from os.path import isfile
 import sqlite3 as sql
 from collections import defaultdict
+from termcolor import colored
 
 from Bio import SeqIO
 from Bio.SeqFeature import SeqFeature, FeatureLocation, ExactPosition
@@ -16,6 +17,7 @@ from . import Stats
 class GenomeData:
     def __init__(self, args):
         self.haplotypes = {}
+        self.refuse = []
 
         print("Loading genome...")
         
@@ -33,7 +35,10 @@ class GenomeData:
         print("Loading errors...")
         self.errors = self.load_errors(args.errors)
         
-        self.revised, self.revised_fasta, self.revised_db, self.revised_conn = self.open_revised(args.revised)
+        print("Cleaning assembly...")
+        self.origparts, self.newparts, self.offcuts = self.clean_assembly(self.sequences, self.blocks, args.original, args.prefix)
+
+        self.revised, self.revised_fasta, self.revised_tsv, self.revised_db, self.revised_conn = self.open_revised(args.revised)
 
         self.gapnum = 1
         
@@ -45,15 +50,19 @@ class GenomeData:
         
     def open_revised(self, revised):
         fasta = None
+        tsv = None
+        db = None
+        rconn = None
         if revised:
             fasta = open(revised+".fa", 'w')
+            tsv = open(revised+".tsv", 'w')
             rconn = sql.connect(revised+".db")
             db = rconn.cursor()
             db.execute('drop table if exists scaffold_map')
             db.execute('''create table scaffold_map
                          (chromosome integer, cm real, scaffold text, start integer, end integer, length integer)''')
 
-        return revised, fasta, db, rconn
+        return revised, fasta, tsv, db, rconn
 
     def open_database(self, dbfile):
         try:
@@ -125,11 +134,11 @@ class GenomeData:
         # Store previous and next blocks
         for scaffold in blocks:
             positions = sorted(blocks[scaffold].keys())
-            for i in range(0, len(positions)-1):
+            for i, pos in enumerate(positions):
                 if i > 0:
-                    blocks[scaffold][positions[i]].prev_block = blocks[scaffold][positions[i-1]].start
+                    blocks[scaffold][pos].prev_block = blocks[scaffold][positions[i-1]].start
                 if i < len(positions)-1:
-                    blocks[scaffold][positions[i]].next_block = blocks[scaffold][positions[i+1]].start
+                    blocks[scaffold][pos].next_block = blocks[scaffold][positions[i+1]].start
 
         print("Loaded {} blocks, length {}".format(block_num, genome_length))
         return blocks
@@ -153,6 +162,78 @@ class GenomeData:
     
         return errors
 
+    def clean_assembly(self, sequences, blocks, tsv, prefix):
+        
+        origparts = defaultdict(list)
+        newparts = defaultdict(list)
+        try:
+            if isfile(tsv):
+                with open(tsv) as tsv:
+                    for line in tsv:
+                        part = OrigPart(line)
+                        origparts[part.oldname].append(part)
+                        newparts[part.newname].append(part)
+        except IOError:
+            print("Can't open original TSV file!")
+            sys.exit()
+
+        self.delete_scaffolding_only(newparts, prefix, sequences, blocks)        
+        offcuts = self.mark_offcuts(newparts, origparts, prefix)
+                
+        return origparts, newparts, offcuts
+    
+    def delete_scaffolding_only(self, newparts, prefix, sequences, blocks):
+        deleted = 0
+        deleted_length = 0
+        for new in newparts:
+            scaffolding_only = True
+            for part in newparts[new]:
+                if prefix not in part.oldname:
+                    scaffolding_only = False
+            if scaffolding_only and new in sequences:
+                deleted += 1
+                deleted_length += len(sequences[new])
+                del sequences[new]
+                del blocks[new]
+        
+        print("Cleaned up {} scaffolds, length {}".format(deleted, deleted_length))
+
+    def mark_offcuts(self, newparts, origparts, prefix):
+        offcuts = defaultdict(lambda: defaultdict(list))
+        retained_scaffolds = []
+        for new in newparts:
+            newpart = newparts[new][0]
+            if len(newparts[new]) == 1 and prefix not in newpart.oldname and newpart.parttype == 'retained':
+                old = newpart.oldname
+                if len(origparts[old]) > 1:
+                    newpart.parttype = 'offcut'
+                    for origpart in origparts[old]:
+                        if origpart.newname == new:
+                            origpart.parttype = 'offcut'
+                        else:
+                            if origpart.parttype == 'active':
+                                offcuts[new][origpart.newname] = 1
+                            elif origpart.parttype == 'haplotype':
+                                if origpart.haptrail == '-':
+                                    offcuts[new][origpart.newname] = 1
+                                else:
+                                    for trailhap in origpart.haptrail.split(','):
+                                        name, start, end = trailhap.split(':')
+                                        offcuts[new][name] = 1
+
+        offcut_length = sum([newparts[x][0].length for x in offcuts])
+        print("Found {} offcuts, length {}".format(len(offcuts), offcut_length))
+            
+        return offcuts
+
+        
+    def are_neighbours(self, a, b):
+        for ai in a[0], a[1]:
+            for bi in b[0], b[1]:
+                if abs(int(ai)-int(bi)) == 1:
+                    return True
+        return False
+        
     def add_gap(self, length = 100):
         newgapname = 'Gap' + str(self.gapnum)
         self.blocks[newgapname][1] = Block(newgapname, 1, length)
@@ -178,7 +259,19 @@ class GenomeData:
         except IOError:
             print("Can't open haplotype file!", hapfile)
             sys.exit()
+
+class OrigPart:
+    def __init__(self, line):
+        self.oldname, self.oldstart, self.oldend, self.newname, self.newstart, self.newend, self.strand, self.parttype, *args = line.rstrip().split('\t')
+        self.comment = ''
+        self.oldstart, self.oldend, self.newstart, self.newend = int(self.oldstart), int(self.oldend), int(self.newstart), int(self.newend)
+        if args:
+            self.comment = '\t'.join(args)
+            self.hapname, self.hapstart, self.hapend, self.hapstrand, self.haptrail = args
+        self.length = self.oldend-self.oldstart+1
     
+    def __repr__(self):
+        return "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}".format(self.oldname, self.oldstart, self.oldend, self.newname, self.newstart, self.newend, self.strand, self.parttype, self.comment)
 
 class Block:
     def __init__(self, scaffold, start, end, prev_block=0, next_block=0, chromosome=0, cm=-1):
@@ -189,7 +282,6 @@ class Block:
         self.next_block = next_block
         self.chromosome = str(chromosome)
         self.cm = cm
-        self.contained = None
     
     @property
     def length(self):

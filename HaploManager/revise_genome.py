@@ -412,11 +412,11 @@ if __name__ == '__main__':
     scaffolds, broken_scaffolds = load_broken_scaffolds(args.agp, args.real_breakages)
 
     corrections = load_corrections(args.corrections, genome, scaffolds)
-    
+
     newnumber = merge_broken(broken_scaffolds, genome, scaffolds, corrections, transfer, log, args.prefix, args.number)
     
     log.write("After merge, genome has {} scaffolds, {} bp long\n".format(len(genome), sum([len(genome[s]) for s in genome])))
-    
+
     correct_genome(newnumber, genome, scaffolds, transfer, corrections, log, args.prefix)
 
     log.write("After correction, genome has {} scaffolds, {} bp long\n".format(len(genome), sum([len(genome[s]) for s in genome])))

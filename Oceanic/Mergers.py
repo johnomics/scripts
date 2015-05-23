@@ -269,9 +269,6 @@ class RopeMerge(Merger):
         print(b)
         springline = self.get_springline(a, b)
         print(springline)
-#        if springline.contains:
-#            springline.contains.raft.discard(springline.contains.hook)
-#        else:
         self.springlines[a][b] = springline
         self.springlines[b][a] = springline
         return True
@@ -295,6 +292,17 @@ class OKMerge(Merger):
         if self.this.pooltype != 'ok' or self.other.pooltype != 'ok':
             return False
 
+        i = j = None
+        for n, p in enumerate(self.this.chromosome.pools):
+            if self.this is p:
+                i = n
+            elif self.other is p:
+                j = n
+
+        for n in range(i+1, j):
+            if len(self.this.chromosome.pools[n]) != 0 or self.this.chromosome.pools[n].pooltype in ['other', 'orient']:
+                return False
+        
         newgap = self.this.genome.add_gap()
         a.append(newgap.scaffold, newgap.start, 1)
         

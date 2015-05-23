@@ -73,39 +73,66 @@ def reassemble(chromosomes, genome, args):
     for chromosome in chromosomes:
         assembly += chromosomes[chromosome].write()
 
+    assembled_blocks = 0
+    assembled_length = 0
+    for blocklist in assembly:
+        for block in blocklist:
+            assembled_blocks += 1
+            assembled_length += block.length
+            del genome.blocks[block.scaffold][block.start]
+            if not genome.blocks[block.scaffold]:
+                del genome.blocks[block.scaffold]
+
+    print("Assembled {} blocks, length {}".format(assembled_blocks, assembled_length))
+
     deleted_blocks = 0
     deleted_length = 0
-    for blocklist in assembly:
+    for blocklist in genome.refuse:
         for block in blocklist:
             deleted_blocks += 1
             deleted_length += block.length
             del genome.blocks[block.scaffold][block.start]
+            if not genome.blocks[block.scaffold]:
+                del genome.blocks[block.scaffold]
 
     print("Deleted {} blocks, length {}".format(deleted_blocks, deleted_length))
 
     left_blocks = 0
     left_length = 0
-    contained_blocks = 0
-    contained_length = 0
-    
+    offcut_blocks = 0
+    offcut_length = 0
     for scaffold in genome.blocks:
-        for start in genome.blocks[scaffold]:
-            if genome.blocks[scaffold][start].contained:
-                contained_blocks += 1
-                contained_length += genome.blocks[scaffold][start].length
-                continue
-            left_blocks += 1
-            left_length += genome.blocks[scaffold][start].length
+#        print(scaffold)
+#        for start in sorted(genome.blocks[scaffold]):
+#            print(genome.blocks[scaffold][start])
+#        if scaffold in genome.sequences:
+#            for feature in genome.sequences[scaffold].features:
+#                if feature.type == 'gene':
+#                    print('\t' + repr(feature))
+        if scaffold in genome.offcuts:
+#            print(scaffold, 'Offcut')
+            for start in genome.blocks[scaffold]:
+                offcut_blocks += 1
+                offcut_length += genome.blocks[scaffold][start].length
+        else:
+            for start in genome.blocks[scaffold]:
+                left_blocks += 1
+                left_length += genome.blocks[scaffold][start].length
             
-            if genome.revised_fasta:
-                write_block(scaffold, start, genome)
+                if genome.revised_fasta:
+                    write_block(scaffold, start, genome)
                 
-            assembly.append([genome.blocks[scaffold][start]])
+                assembly.append([genome.blocks[scaffold][start]])
 
     if genome.revised_db:
         genome.revised_conn.commit()
+    
+    if genome.revised_tsv:
+        for origscaffold in sorted(genome.origparts):
+            for part in genome.origparts[origscaffold]:
+                genome.revised_tsv.write('{}\n'.format(repr(part)))
 
-    print("Contained {} blocks, length {}".format(contained_blocks, contained_length))
+    print("Removed {} unmapped offcuts, length {}".format(offcut_blocks, offcut_length))
     print("Left over {} blocks, length {}".format(left_blocks, left_length))
 
     return assembly
@@ -139,7 +166,9 @@ def get_args():
         -e errors file
         -t threads
         -r revised
-        -a haplomerger''')
+        -a haplomerger
+        -o original TSV
+        -p prefix''')
 
     parser.add_argument('-d', '--database', type=str, required=True)
     parser.add_argument('-f', '--fasta', type=str, required=True)
@@ -148,6 +177,8 @@ def get_args():
     parser.add_argument('-t', '--threads', type=int, default=1)
     parser.add_argument('-r', '--revised', type=str)
     parser.add_argument('-a', '--haplomerger', type=str)
+    parser.add_argument('-o', '--original', type=str)
+    parser.add_argument('-p', '--prefix', type=str)
 
     return parser.parse_args()
 

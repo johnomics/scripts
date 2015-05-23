@@ -286,6 +286,30 @@ def load_hm_new_scaffolds(pacbio):
         print("Cannot open PacBio new scaffolds file!", pacbio)
         sys.exit()
 
+def get_linkage_trio(parts, i):
+    trio = []
+    part = 1
+    while len(trio) < 3 and i+part <= len(parts)-1:
+        if parts[i+part].cm != -1 and (not trio or parts[i+part].cm != trio[-1][1]):
+            trio.append((parts[i+part].chromosome,parts[i+part].cm))
+        part += 1
+    if len(trio) < 3:
+        trio = []
+    return trio
+    
+def find_linkage_errors(scaffold, genome, linkage_map):
+    last_trio = []
+    for i in range(0, len(genome[scaffold])-2):
+        trio = get_linkage_trio(genome[scaffold], i)
+        if not trio:
+            return
+        if trio[0] == trio[2] and trio[0] != trio[1]:
+            if trio == last_trio:
+                continue
+            print("Linkage error:", scaffold, trio)
+            last_trio = trio
+    return
+
 
 def find_scaffold_misassemblies(scaffold, genome, linkage_map, corrections):
     misparts = defaultdict(lambda: defaultdict(MapPart))
@@ -479,6 +503,7 @@ def find_misassemblies(genome, linkage_map, scaffolds, merged, genes, correction
         markers = []
 
     for scaffold in sorted(genome):
+        find_linkage_errors(scaffold, genome, linkage_map)
         misparts, misgroups = find_scaffold_misassemblies(scaffold, genome, linkage_map, corrections)
         
         if misgroups:

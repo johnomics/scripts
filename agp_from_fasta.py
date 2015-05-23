@@ -5,6 +5,7 @@
 
 import argparse
 import re
+from Bio import SeqIO
 
 parser = argparse.ArgumentParser(description='''Generate AGP file from one-line FASTA file.
     (written for Hmel haplotype scaffolds))
@@ -14,9 +15,6 @@ parser = argparse.ArgumentParser(description='''Generate AGP file from one-line 
 parser.add_argument('-f', '--fastafile', type=str, required=True)
 
 args=parser.parse_args()
-
-header_re = re.compile(r'^>(.+)$')
-seq_re = re.compile(r'([ACGT]+)?(N+)?', re.IGNORECASE)
 
 def make_part(seq, scaffold, pos, partnum, type):
     length = len(seq)
@@ -33,30 +31,25 @@ def make_part(seq, scaffold, pos, partnum, type):
     partnum += 1
     return(part, pos, partnum)
 
-try:
-    with open(args.fastafile, 'r') as fasta:
-        agpname = args.fastafile + ".agp"
-        with open(agpname, 'w') as agp:
 
-            scaffold = ""
-            partnum = 1
+header_re = re.compile(r'^>(.+)$')
+seq_re = re.compile(r'([ACGT]+)?(N+)?', re.IGNORECASE)
+
+try:
+    agpname = args.fastafile + ".agp"
+    with open(agpname, 'w') as agp:
+        for record in SeqIO.parse(args.fastafile, "fasta"):
+            scaffold = record.id
             pos = 1
-            for line in fasta:
-                line = line.rstrip()
-                header_found = header_re.match(line)
-                if header_found:
-                    scaffold = header_found.group(1)
-                    partnum = 1
-                    pos = 1
-                else:
-                    for m in seq_re.finditer(line):
-                        (seq, ns) = m.groups()
-                        if seq:
-                            (part, pos, partnum) = make_part(seq, scaffold, pos, partnum, 'W')
-                            agp.write(part)
-                        if ns:
-                            (part, pos, partnum) = make_part(ns, scaffold, pos, partnum, 'N')
-                            agp.write(part)
+            partnum = 1
+            for m in seq_re.finditer(str(record.seq)):
+                (seq, ns) = m.groups()
+                if seq:
+                    (part, pos, partnum) = make_part(seq, scaffold, pos, partnum, 'W')
+                    agp.write(part)
+                if ns:
+                    (part, pos, partnum) = make_part(ns, scaffold, pos, partnum, 'N')
+                    agp.write(part)
 
 except IOError:
         print("Cannot open file " + args.fastafile + "!")

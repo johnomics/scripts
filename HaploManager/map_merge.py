@@ -54,7 +54,7 @@ class OutPart:
         return out
     
     def haplorepr(self):
-        return '{}\t{}\t{}\t{}'.format(self.new_name, self.new_start, self.new_end, self.strand)
+        return '{}\t{}\t{}\t{}\t{}'.format(self.new_name, self.new_start, self.new_end, self.strand, '-')
 
 def load_scaffolds(prefix, new, old_genome, new_genome):
     new_scaffolds_file = "hm.new_scaffolds_updated"
@@ -91,7 +91,6 @@ def load_scaffolds(prefix, new, old_genome, new_genome):
                 scaffold = part.scaffold1 if active_portion == '1' else part.scaffold2
                 curend = curstart + scaffold.length - 1
                 new_genome[part.scaffold_name][curstart] = OutPart(curstart, curend, scaffold.name, scaffold.start, scaffold.end, scaffold.strand, 'merged')
-                
                 old_genome[scaffold.name][scaffold.start] = OutPart(scaffold.start, scaffold.end, part.scaffold_name, curstart, curend, scaffold.strand, "active")
                 hapscaffold = part.scaffold1 if active_portion == '2' else part.scaffold2
                 if hapscaffold.name != "0":

@@ -21,6 +21,8 @@ class Raft:
         output = ''
         if self.marker_chain.chain is None:
             output += 'To fix:\n'
+        if self.scaffold in self.genome.offcuts:
+            output += 'Offcut to {}\n'.format(','.join(self.genome.offcuts[self.scaffold]))
         if self.name in self.genome.haplotypes:
             output += 'Haplotype {}\n'.format(self.genome.haplotypes[self.name])
         output += '\n'.join([repr(m) for m in self.manifest]) + '\n'
@@ -44,6 +46,12 @@ class Raft:
             if log[0] == var or log[1] == var:
                 return True
         return False
+
+    @property
+    def offcuts(self):
+        if self.scaffold in self.genome.offcuts:
+            return self.genome.offcuts[self.scaffold]
+        return None
 
     @property
     def haplotype(self):
@@ -92,7 +100,15 @@ class Raft:
         for m in self.manifest:
             length += m.length
         return length
-    
+
+    @property
+    def mappedlength(self):
+        length = 0
+        for m in self.manifest:
+            if m.cm != -1:
+                length += m.length
+        return length
+
     @property
     def sequence(self):
         sequence = sum([h.sequence for h in self.hooks], Seq("", generic_dna))
@@ -119,12 +135,11 @@ class Raft:
         self.logs = []
         self.manifest = []
         self.update()
-    
-    def discard(self, label):
-        for log in self.logs:
-            self.genome.blocks[log[0]][log[1]].contained = label
+
+    def discard(self):
+        self.genome.refuse.append(self.summary())
         self.empty()
-        
+
     def replace(self, logs):
         self.empty()
         for scaffold, start, direction in logs:
@@ -275,7 +290,10 @@ class Raft:
             for sb in self.manifest:
                 self.chromosome.revised_db.execute("insert into scaffold_map values (?,?,?,?,?,?)",
                       [self.chromosome.name, sb.cm, sb.scaffold, min(sb.start, sb.end), max(sb.start, sb.end), sb.length])
-
+        
+        return self.summary()
+    
+    def summary(self):
         scaffolds = []
         for scaffold, start, direction in self.logs:
             scaffolds.append(self.genome.blocks[scaffold][start])
@@ -286,14 +304,12 @@ class Raft:
         scaffold = start = end = None
         hooks = []
         for sb in self.manifest:
-            end = sb.end
             if sb.scaffold != scaffold:
                 if scaffold is not None:
                     hooks.append(Hook(self, scaffold, start, end))
                 start = sb.start
                 scaffold = sb.scaffold
-            else:
-                end = sb.end
+            end = sb.end
         hooks.append(Hook(self, scaffold, start, end))
 
         return hooks
@@ -500,8 +516,17 @@ class Hook():
         return iter(self.knots)
 
     @property
-    def sequence(self):
+    def length(self):
         if self.start < self.end:
+            return self.end - self.start + 1
+        else:
+            return self.start - self.end + 1
+    
+    @property
+    def sequence(self):
+        if 'Gap' in self.scaffold:
+            seq = 'N' * self.length
+        elif self.start < self.end:
             seq = self.raft.genome.sequences[self.scaffold][self.start-1:self.end]
         else:
             seq = self.raft.genome.sequences[self.scaffold][self.end-1:self.start].reverse_complement()

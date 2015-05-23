@@ -20,7 +20,7 @@ class Chromosome:
         self.mapped_blocks, self.mapped_blocks_length, self.placed_blocks, self.placed_blocks_length = self.set_blocks()
         
     def __repr__(self):
-        return('\n'.join([self.name, repr(self.pools), repr(self.markers)]))
+        return('\n'.join([self.name, repr(self.pools)]))
 
     def __iter__(self):
         return iter(self.pools)
@@ -136,17 +136,85 @@ class Chromosome:
     def assemble(self, args):
 
         self.threadstart(args)
-            
+        
         self.run_merger(merge.MarkerMerge)
 
         for pool in self.pools:
             pool.extend()
-#            pool.removehap('B')
 
-#        self.connect(merge.OKMerge)
+        within_markers = []
+        for pool in self.pools:
+            for raft in pool:
+                markers = raft.marker_chain
+                if markers:
+                    within = markers[1:(len(markers)-1)]
+                    within_markers += within
+        within_markers = set(within_markers)
+
+        for pool in self.pools:
+            for raft in pool:
+                markers = raft.marker_chain
+                if not markers:
+                    continue
+                remove = sum((1 for marker in markers if marker in within_markers))
+                if remove == len(markers):
+                    for pool_match in self.pools:
+                        for raft_match in pool_match:
+                            if raft_match is raft:
+                                continue
+                            match_markers = raft_match.marker_chain
+                            if match_markers and markers[0] in match_markers and raft.scaffold != raft_match.scaffold:
+                                raft.discard()
+            pool.cleanup()
+        
+        self.remove_empty_pools()
+
+        for i, pool in enumerate(self.pools):
+            for raft in pool:
+                remove = False
+                if raft.offcuts:
+                    for offcut in raft.offcuts:
+                        if offcut in pool.scaffolds or i > 0 and offcut in self.pools[i-1].scaffolds or i < len(self.pools)-1 and offcut in self.pools[i+1].scaffolds:
+                            remove = True
+                if remove:
+                    raft.discard()
+            pool.cleanup()
+
+        self.remove_empty_pools()
+            
+        self.connect(merge.OKMerge)
 
         print(self)
         print(self.stats)
+
+# Data frame for graphical output
+        with open('scaffold_map_{}.tsv'.format(self.name), 'w') as smfile:
+            for i, pool in enumerate(self.pools):
+                k = 1
+                for raft in pool:
+                    smfile.write("{}\t{}\t{}\t{}\t{}\n".format(self.name, i+1, pool.pooltype, k, raft.mappedlength))
+                    k += 1
+        
+        with open('chromosome_map_{}.tsv'.format(self.name), 'w') as cmfile:
+            chrommap = {}
+            for i, pool in enumerate(self.pools):
+                for raft in pool:
+                    for sb in raft.manifest:
+                        if sb.cm == -1:
+                            continue
+                        if sb.cm not in chrommap:
+                            chrommap[sb.cm] = 0
+                        chrommap[sb.cm] += sb.length
+            cmstart = 1
+            for cm in sorted(chrommap):
+                cmend = cmstart + chrommap[cm] - 1
+                cmfile.write("{}\t{}\t{}\t{}\t{}\n".format(self.name, cm, cmstart, cmend, chrommap[cm]))
+                cmstart = cmend + 1
+
+    def remove_empty_pools(self):
+        for i in reversed(range(len(self.pools))):
+            if not self.pools[i].rafts:
+                del self.pools[i]
 
     def connect(self, mergeclass):
         p = 0

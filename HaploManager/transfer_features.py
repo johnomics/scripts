@@ -145,17 +145,23 @@ def load_errors(errorarg):
         print("Can't open error file {}".format(errorarg))
         sys.exit(1)
 
+class GFF:
+    def __init__(self, line):
+        self.scaffold, self.source, self.featuretype, self.start, self.end, self.score, self.strand, self.phase, self.attributes = line.rstrip().split('\t')
+        self.start = int(self.start)
+        self.end = int(self.end)
+    
+    def __repr__(self):
+        return '{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n'.format(self.scaffold, self.source, self.featuretype, self.start, self.end, self.score, self.strand, self.phase, self.attributes)
+
 def load_gff(gff):
-    genes = defaultdict(list)
+    genes = []
     try:
         with open(gff) as g:
             for line in g:
                 if line.startswith('#'):
                     continue
-                f = line.rstrip().split('\t')
-                scaffold, source, featuretype, start, end, score, strand, phase, attributes = f
-                if featuretype == 'gene':
-                    genes[scaffold].append((int(start), int(end)))
+                genes.append(GFF(line))
     except IOError:
         print("Failed to load GFF file {}".format(gff))
     
@@ -205,14 +211,13 @@ def get_parts(scaffold, start, end, genome):
     return parts, haps
 
 def write_new_map(linkage_map, genome, prefix, output):
-    conn_out, co = open_output_database(output)
+    conn_out, co = open_output_database(output + "_map.db")
     new_map = []
 
     for scaffold in linkage_map:
 
         for part in linkage_map[scaffold].mapparts:
             new_parts, haps = get_parts(scaffold, part.start, part.end, genome)
-
         
             for np in new_parts:
                 np.chromosome = part.chromosome
@@ -340,32 +345,61 @@ def blockmerge(a,b):
         a.comment.slice_start = b.comment.slice_start
     
 
-def write_new_gff(genes, genome, prefix):
+def write_new_gff(genes, genome, prefix, output):
 
-    stats = {}
-    stats['active'] = 0
-    stats['haplotype'] = 0
-    stats['removed'] = 0
-    stats['overlapped'] = 0
-    stats['broken'] = 0
-    stats['total'] = 0
-    for scaffold in genes:
-        for gene in genes[scaffold]:
-            stats['total'] += 1
-            start, end = gene
-            new_parts, haps = get_parts(scaffold, start, end, genome)
-
-            if len(new_parts) == 1 and not haps:
-                if new_parts[0].parttype == 'removed':
-                    stats['removed'] += 1
+    stats = defaultdict(int)
+    
+    genestatus = {}
+    brokenfile = open(output + '_broken.gff', 'w')
+    with open(output + ".gff", 'w') as gff:
+        for feature in genes:
+            new_parts, haps = get_parts(feature.scaffold, feature.start, feature.end, genome)
+            
+            if feature.featuretype == 'gene':
+                genename = feature.attributes[feature.attributes.find("ID=")+3:feature.attributes.find(";")]
+                stats['total'] += 1                
+                if len(new_parts) == 1 and not haps:
+                    if new_parts[0].parttype == 'removed':
+                        status = 'removed'
+                    else:
+                        status = 'active'
+                elif not new_parts and len(haps) == 1:
+                    status = 'haplotype'
+                elif len(new_parts) == 1 and len(haps) == 1 and new_parts[0].oldname == haps[0].oldname:
+                    status = 'overlapped'
                 else:
-                    stats['active'] += 1
-            elif not new_parts and len(haps) == 1:
-                stats['haplotype'] += 1
-            elif len(new_parts) == 1 and len(haps) == 1 and new_parts[0].oldname == haps[0].oldname:
-                stats['overlapped'] += 1
+                    status = 'broken'
+                stats[status] += 1
+                genestatus[genename] = status
+            
+            if genename in feature.attributes and genestatus[genename] not in ['broken','overlapped']:
+                print(feature)
+                if new_parts:
+                    for part in new_parts:
+                        print(part)
+                if haps:
+                    for part in haps:
+                        print(part)
+                part = new_parts[0] if new_parts else haps[0]
+                strand = feature.strand
+                if part.strand == 1:
+                    offset = part.oldstart - part.newstart
+                    start = offset + feature.start
+                    end = offset + feature.end
+                elif part.strand == -1:
+                    offset = part.oldend + part.newstart
+                    start = offset - feature.start
+                    end = offset - feature.end
+                    if feature.strand == '+':
+                        strand = '-'
+                    elif feature.strand == '-':
+                        strand = '+'
+                start, end = min(start, end), max(start, end)
+                output_feature = "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n".format(part.oldname, feature.source, feature.featuretype, start, end, feature.score, strand, feature.phase, feature.attributes)
+                print(output_feature)
+                gff.write(output_feature)
             else:
-                stats['broken'] += 1
+                brokenfile.write(repr(feature))
     
     print('Active genes:\t{:>5}\t{:5.2f} %'.format(stats['active'], stats['active']/stats['total']*100))
     print('Haplo  genes:\t{:>5}\t{:5.2f} %'.format(stats['haplotype'], stats['haplotype']/stats['total']*100))
@@ -403,4 +437,4 @@ if __name__ == '__main__':
     write_new_map(linkage_map, genome, args.prefix, args.output)
 
     genes = load_gff(args.gff)
-    write_new_gff(genes, genome, args.prefix)
+    write_new_gff(genes, genome, args.prefix, args.output)

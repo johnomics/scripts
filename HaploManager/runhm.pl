@@ -48,6 +48,7 @@ my $outputdir       = "";
 my $prefix          = "";
 my $scaffold_prefix = "";
 my $misassemblies   = "";
+my $badmerges       = "";
 my $g;
 
 my $options_okay = GetOptions(
@@ -57,9 +58,9 @@ my $options_okay = GetOptions(
     'prefix=s'          => \$prefix,
     'scaffold_prefix=s' => \$scaffold_prefix,
     'misassemblies=s'   => \$misassemblies,
+    'badmerges=s'       => \$badmerges,
     'g'                 => \$g,
 );
-
 
 croak "No output directory! Please specify -o $OS_ERROR\n" if $outputdir eq "";
 
@@ -91,6 +92,17 @@ if ( $misassemblies and -e $misassemblies ) {
     close $misfh;
 }
 
+my %badmerges;
+if ( $badmerges and -e $badmerges ) {
+    open my $bmfh, '<', $badmerges or croak "Can't open bad merges file $badmerges $OS_ERROR\n";
+    while ( my $badmergeline = <$bmfh> ) {
+        chomp $badmergeline;
+        my ( $a, $b ) = split "\t", $badmergeline;
+        $badmerges{$a}{$b} = 1;
+        $badmerges{$b}{$a} = 1;
+    }
+}
+
 my ( $filename, $dirs, $suffix ) = fileparse( $input, qr/\.[^.]*/ );
 chdir $outputdir;
 
@@ -106,7 +118,11 @@ print $log "HaploMerger run log\n";
 print $log "Genome: $input\n";
 print $log "Config directory: $configdir\n";
 print $log "Output directory: $outputdir\n";
-print $log "Prefix: $prefix\n";
+print $log "Prefix: '$prefix'\n";
+print $log "Scaffold prefix: '$scaffold_prefix'\n";
+print $log "Misassemblies: $misassemblies\n";
+print $log "Run G: ";
+print $log ( $g ? "Yes" : "No" ), "\n";
 
 my $start_time = localtime;
 my $start      = time;
@@ -117,9 +133,12 @@ my $unpaired_file  = "unpaired.fa.gz";
 
 ( $optimized_file, $unpaired_file, $log, my $next_start ) = run_abc( $log, $start );
 
+( $optimized_file, $unpaired_file, $log, $next_start ) = run_e( $log, $next_start, \%badmerges )
+  if $badmerges ne "";
+
 ( $optimized_file, $unpaired_file, $log, $next_start ) =
-  run_f( $log, $next_start, $outputdir, $scaffold_prefix, \%misassemblies )
-  if $scaffold_prefix;
+  run_f( $log, $next_start, $scaffold_prefix, \%misassemblies )
+  if $scaffold_prefix ne "";
 
 output_final_genome( $outputdir, $optimized_file, $unpaired_file, $prefix );
 
@@ -161,13 +180,28 @@ sub run_abc {
     ( "optiNewScaffolds.fa.gz", "unpaired.fa.gz", $log, $next_start );
 }
 
+sub run_e {
+    my ($log, $start, $badmerges ) = @_;
+    my $next_start = $start;
+    
+    edit_nodes($badmerges);
+    chdir "genome.genomex.result";
+    system "ln -s hm.sc_portions hm.sc_portions_edited" if ! -l "hm.sc_portions_edited";
+    system "ln -s hm.assembly_errors hm.assembly_errors_edited" if ! -l "hm.assembly_errors_edited";
+    chdir "..";
+    
+    if ( -e "genome.genomex.result/hm.nodes_edited" ) {
+        system "./hm.batchE.refine_haplomerger_updating_nodes_and_portions genome >> runhm.out 2>&1";
+        $next_start = output_duration( "E", $log, $next_start );
+    }
+    ( "optiNewScaffolds.fa.gz", "unpaired.fa.gz", $log, $next_start)
+}
+
 sub run_f {
-    my ( $log, $start, $outputdir, $scaffold_prefix, $misassemblies ) = @_;
+    my ( $log, $start, $scaffold_prefix, $misassemblies ) = @_;
     my $next_start = $start;
 
     edit_new_scaffolds( $scaffold_prefix, $misassemblies );
-
-    copy "genome.genomex.result/optiNewScaffolds.fa.gz", "genome.genomex.result/optiNewScaffolds_unrefined.fa.gz";
 
     if ( -e "genome.genomex.result/hm.new_scaffolds_edited" ) {
         system "./hm.batchF.refine_haplomerger_connections_and_Ngap_fillings genome >> runhm.out 2>&1";
@@ -177,16 +211,47 @@ sub run_f {
     ( "optiNewScaffolds.fa.gz", "unpaired.fa.gz", $log, $next_start );
 }
 
+sub edit_nodes {
+    my ($badmerges) = @_;
+    
+    my $nodes_file = "genome.genomex.result/hm.nodes";
+    open my $nodes, '<', $nodes_file or croak "Can't open nodes file!\n";
+    open my $edited, '>', "genome.genomex.result/hm.nodes_edited" or croak "Can't open edited nodes file!\n";
+
+    while (my $portion = <$nodes>) {
+        if ($portion =~ /^#/ or $portion =~ /^$/) {
+            print $edited $portion;
+            next;
+        }
+        chomp $portion;
+        my @f = split "\t", $portion;
+        if ((defined $badmerges->{$f[0]} and defined $badmerges->{$f[0]}{$f[1]}) or (defined $badmerges->{$f[1]} and defined $badmerges->{$f[1]}{$f[0]})) {
+            $f[-1] = 1;
+        }
+        my $edit = join "\t", @f;
+        $edit .= "\n";
+        
+        print $edited $edit;
+    }
+    close $nodes;
+    close $edited;
+}
+
 sub edit_new_scaffolds {
     my ( $scaffold_prefix, $misassemblies ) = @_;
 
-    open my $new_scaffolds, '<', "genome.genomex.result/hm.new_scaffolds"
+    my $new_scaffolds_file = "genome.genomex.result/hm.new_scaffolds";
+    if ( -e "genome.genomex.result/hm.new_scaffolds_updated" ) {    # If batchE has been run
+        $new_scaffolds_file = "genome.genomex.result/hm.new_scaffolds_updated";
+    }
+
+    open my $new_scaffolds, '<', $new_scaffolds_file
       or croak "Can't open new scaffolds file!\n";
     open my $edited, '>', "genome.genomex.result/hm.new_scaffolds_edited"
       or croak "Can't open edited new scaffolds file!\n";
 
-    my $scfnum = 0;
-    my $curid  = -1;
+    my $scfnum    = 0;
+    my $curid     = -1;
     my $scflength = 0;
     while ( my $portion = <$new_scaffolds> ) {
         if ( $portion =~ /^#/ or $portion =~ /^$/ ) {
@@ -198,7 +263,7 @@ sub edit_new_scaffolds {
         $curid = $f[0] if $curid == -1;
         if ( $f[0] != $curid ) {
             $scfnum++;
-            $curid = $f[0];
+            $curid     = $f[0];
             $scflength = 0;
         }
         my $scaffold1 = $f[5];
@@ -213,17 +278,17 @@ sub edit_new_scaffolds {
                 $active_portion = 1;
             }
         }
-        
+
         $f[-2] = $active_portion if $active_portion;
-        
+
         $active_portion = $f[-2] ? $f[-2] : $f[4];
-        
+
         my $partlength = $active_portion == 1 ? $f[11] : $f[18];
-        
-        my $partend = $scflength+$partlength;
-        if (defined $misassemblies{$scfnum}) {
-            foreach my $mis (@{$misassemblies{$scfnum}}) {
-                if ($mis->{start} < $scflength + $partlength and $mis->{end} > $scflength+1) {
+
+        my $partend = $scflength + $partlength;
+        if ( defined $misassemblies{$scfnum} ) {
+            foreach my $mis ( @{ $misassemblies{$scfnum} } ) {
+                if ( $mis->{start} < $scflength + $partlength and $mis->{end} > $scflength + 1 ) {
                     $f[-1] = "-1\n";
                 }
             }
@@ -266,6 +331,8 @@ sub output_final_genome {
         close $finalgenome;
 
         system "summarizeAssembly.py $outname.fa > $outname.summary";
+
+        system "agp_from_fasta.py -f $outname.fa";
     }
     chdir "..";
 }
