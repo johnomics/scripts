@@ -40,7 +40,7 @@ class Raft:
     
     def __len__(self):
         return len(self.logs)
-    
+        
     def __contains__(self, var):
         for log in self.logs:
             if log[0] == var or log[1] == var:

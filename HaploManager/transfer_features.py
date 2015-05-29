@@ -210,7 +210,7 @@ def get_parts(scaffold, start, end, genome):
             parts.append(newpart)
     return parts, haps
 
-def write_new_map(linkage_map, genome, prefix, output):
+def write_new_map(linkage_map, genome, output):
     conn_out, co = open_output_database(output + "_map.db")
     new_map = []
 
@@ -343,71 +343,72 @@ def blockmerge(a,b):
         a.comment.oldstart = b.comment.oldstart
         a.comment.start = b.comment.start
         a.comment.slice_start = b.comment.slice_start
-    
 
-def write_new_gff(genes, genome, prefix, output):
+def get_gene_status(feature, stats, new_parts, haps):
+    stats['total'] += 1                
+    if len(new_parts) == 1 and not haps:
+        if new_parts[0].parttype == 'removed':
+            status = 'removed'
+        else:
+            status = 'active'
+    elif not new_parts and len(haps) == 1:
+        status = 'haplotype'
+    elif len(new_parts) == 1 and len(haps) == 1 and new_parts[0].oldname == haps[0].oldname:
+        status = 'overlapped'
+    elif not new_parts and not haps:
+        status = 'missing'
+    else:
+        status = 'broken'
+    stats[status] += 1
+    return status
+
+def transfer_gff_feature(feature, new_parts, haps):
+    part = new_parts[0] if new_parts else haps[0]
+    strand = feature.strand
+    if part.strand == -1:
+        if feature.strand == '+':
+            strand = '-'
+        elif feature.strand == '-':
+            strand = '+'
+    output_feature = "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n".format(part.oldname, feature.source, feature.featuretype, part.oldstart, part.oldend, feature.score, strand, feature.phase, feature.attributes)
+    return output_feature        
+
+def write_new_gff(genes, genome, output):
 
     stats = defaultdict(int)
     
     genestatus = {}
+    gfffile = open(output + ".gff", 'w')
     brokenfile = open(output + '_broken.gff', 'w')
-    with open(output + ".gff", 'w') as gff:
-        for feature in genes:
-            new_parts, haps = get_parts(feature.scaffold, feature.start, feature.end, genome)
-            
-            if feature.featuretype == 'gene':
-                genename = feature.attributes[feature.attributes.find("ID=")+3:feature.attributes.find(";")]
-                stats['total'] += 1                
-                if len(new_parts) == 1 and not haps:
-                    if new_parts[0].parttype == 'removed':
-                        status = 'removed'
-                    else:
-                        status = 'active'
-                elif not new_parts and len(haps) == 1:
-                    status = 'haplotype'
-                elif len(new_parts) == 1 and len(haps) == 1 and new_parts[0].oldname == haps[0].oldname:
-                    status = 'overlapped'
-                else:
-                    status = 'broken'
-                stats[status] += 1
-                genestatus[genename] = status
-            
-            if genename in feature.attributes and genestatus[genename] not in ['broken','overlapped']:
-                print(feature)
-                if new_parts:
-                    for part in new_parts:
-                        print(part)
-                if haps:
-                    for part in haps:
-                        print(part)
-                part = new_parts[0] if new_parts else haps[0]
-                strand = feature.strand
-                if part.strand == 1:
-                    offset = part.oldstart - part.newstart
-                    start = offset + feature.start
-                    end = offset + feature.end
-                elif part.strand == -1:
-                    offset = part.oldend + part.newstart
-                    start = offset - feature.start
-                    end = offset - feature.end
-                    if feature.strand == '+':
-                        strand = '-'
-                    elif feature.strand == '-':
-                        strand = '+'
-                start, end = min(start, end), max(start, end)
-                output_feature = "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n".format(part.oldname, feature.source, feature.featuretype, start, end, feature.score, strand, feature.phase, feature.attributes)
-                print(output_feature)
-                gff.write(output_feature)
+    removefile = open(output + '_removed.gff', 'w')
+    genename = None
+    for feature in genes:
+        new_parts, haps = get_parts(feature.scaffold, feature.start, feature.end, genome)
+        if feature.featuretype == 'gene':
+            genename = feature.attributes[feature.attributes.find("ID=")+3:feature.attributes.find(";")]
+            status = get_gene_status(feature, stats, new_parts, haps)
+            genestatus[genename] = status
+        if genename in feature.attributes and genestatus[genename] not in ['broken','overlapped', 'missing']:
+            output_feature = transfer_gff_feature(feature, new_parts, haps)
+            if genestatus[genename] is 'active':
+                gfffile.write(output_feature)
             else:
-                brokenfile.write(repr(feature))
+                removefile.write(output_feature) # Haplotypes and removed genes
+        else:
+            brokenfile.write(repr(feature))
+
+    print_stat('Active', stats['active'], stats['total'])
+    print_stat('Haplo', stats['haplotype'], stats['total'])
+    print_stat('Remove', stats['removed'], stats['total'])
+    print_stat('Ovlp', stats['overlapped'], stats['total'])
+    print_stat('Broken', stats['broken'], stats['total'])
+    print_stat('Missing', stats['missing'], stats['total'])
     
-    print('Active genes:\t{:>5}\t{:5.2f} %'.format(stats['active'], stats['active']/stats['total']*100))
-    print('Haplo  genes:\t{:>5}\t{:5.2f} %'.format(stats['haplotype'], stats['haplotype']/stats['total']*100))
-    print('Remove genes:\t{:>5}\t{:5.2f} %'.format(stats['removed'], stats['removed']/stats['total']*100))
-    print('Ovlp   genes:\t{:>5}\t{:5.2f} %'.format(stats['overlapped'], stats['overlapped']/stats['total']*100))
-    print('Broken genes:\t{:>5}\t{:5.2f} %'.format(stats['broken'], stats['broken']/stats['total']*100))
     print('Total  genes:\t{:>5}'.format(stats['total']))
     
+def print_stat(text, stat, total):
+    print ('{:<7} genes:\t{:>5}\t{:5.2f} %'.format(text, stat, stat/total*100))
+
 def get_args():
     parser = argparse.ArgumentParser(description='''Output new database containing old linkage information on new HaploMerger output
     
@@ -415,7 +416,6 @@ def get_args():
         -g gff
         -d database
         -e errors
-        -p prefix
         -o output
         ''')
 
@@ -423,7 +423,6 @@ def get_args():
     parser.add_argument('-g', '--gff', type=str, required=True)
     parser.add_argument('-d', '--database', type=str, required=True)
     parser.add_argument('-e', '--errors', type=str, required=False)
-    parser.add_argument('-p', '--prefix', type=str, required=True)
     parser.add_argument('-o', '--output', type=str, required=True)
     return parser.parse_args()
 
@@ -434,7 +433,7 @@ if __name__ == '__main__':
     genome = load_genome(args.mergedgenome)
     
     linkage_map = load_linkage_map(args.database, args.errors, genome)
-    write_new_map(linkage_map, genome, args.prefix, args.output)
+    write_new_map(linkage_map, genome, args.output)
 
     genes = load_gff(args.gff)
-    write_new_gff(genes, genome, args.prefix, args.output)
+    write_new_gff(genes, genome, args.output)

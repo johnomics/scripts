@@ -49,6 +49,7 @@ my $prefix          = "";
 my $scaffold_prefix = "";
 my $misassemblies   = "";
 my $badmerges       = "";
+my $annotation      = "";
 my $g;
 
 my $options_okay = GetOptions(
@@ -59,6 +60,7 @@ my $options_okay = GetOptions(
     'scaffold_prefix=s' => \$scaffold_prefix,
     'misassemblies=s'   => \$misassemblies,
     'badmerges=s'       => \$badmerges,
+    'annotation=s'      => \$annotation,
     'g'                 => \$g,
 );
 
@@ -101,6 +103,21 @@ if ( $badmerges and -e $badmerges ) {
         $badmerges{$a}{$b} = 1;
         $badmerges{$b}{$a} = 1;
     }
+    close $bmfh;
+}
+
+my %genes;
+if ($annotation and -e $annotation) {
+    open my $gff, '<', $annotation or croak "Can't open annotation file $annotation $OS_ERROR\n";
+    while (my $featureline = <$gff>) {
+        chomp $featureline;
+        my ($scaffold, $source, $featuretype, $start, $end, $score, $strand, $phase, $attributes) = split "\t", $featureline;
+        if ($featuretype eq 'gene') {
+            $genes{$scaffold}{$start}{end} = $end;
+            $genes{$scaffold}{$start}{attributes} = $attributes;            
+        }
+    }
+    close $gff;
 }
 
 my ( $filename, $dirs, $suffix ) = fileparse( $input, qr/\.[^.]*/ );
@@ -137,8 +154,8 @@ my $unpaired_file  = "unpaired.fa.gz";
   if $badmerges ne "";
 
 ( $optimized_file, $unpaired_file, $log, $next_start ) =
-  run_f( $log, $next_start, $scaffold_prefix, \%misassemblies )
-  if $scaffold_prefix ne "";
+  run_f( $log, $next_start, $scaffold_prefix, \%misassemblies, \%genes )
+  if $scaffold_prefix ne "" or %genes;
 
 output_final_genome( $outputdir, $optimized_file, $unpaired_file, $prefix );
 
@@ -184,28 +201,31 @@ sub run_e {
     my ($log, $start, $badmerges ) = @_;
     my $next_start = $start;
     
-    edit_nodes($badmerges);
-    chdir "genome.genomex.result";
-    system "ln -s hm.sc_portions hm.sc_portions_edited" if ! -l "hm.sc_portions_edited";
-    system "ln -s hm.assembly_errors hm.assembly_errors_edited" if ! -l "hm.assembly_errors_edited";
-    chdir "..";
+    if (! -e "genome.genomex.result/hm.nodes_edited" ) {
+        edit_nodes($badmerges);
+        chdir "genome.genomex.result";
+        system "ln -s hm.sc_portions hm.sc_portions_edited" if ! -l "hm.sc_portions_edited";
+        system "ln -s hm.assembly_errors hm.assembly_errors_edited" if ! -l "hm.assembly_errors_edited";
+        chdir "..";
     
-    if ( -e "genome.genomex.result/hm.nodes_edited" ) {
-        system "./hm.batchE.refine_haplomerger_updating_nodes_and_portions genome >> runhm.out 2>&1";
-        $next_start = output_duration( "E", $log, $next_start );
+        if ( -e "genome.genomex.result/hm.nodes_edited" ) {
+            system "./hm.batchE.refine_haplomerger_updating_nodes_and_portions genome >> runhm.out 2>&1";
+            $next_start = output_duration( "E", $log, $next_start );
+        }
     }
     ( "optiNewScaffolds.fa.gz", "unpaired.fa.gz", $log, $next_start)
 }
 
 sub run_f {
-    my ( $log, $start, $scaffold_prefix, $misassemblies ) = @_;
+    my ( $log, $start, $scaffold_prefix, $misassemblies, $genes ) = @_;
     my $next_start = $start;
 
-    edit_new_scaffolds( $scaffold_prefix, $misassemblies );
-
-    if ( -e "genome.genomex.result/hm.new_scaffolds_edited" ) {
-        system "./hm.batchF.refine_haplomerger_connections_and_Ngap_fillings genome >> runhm.out 2>&1";
-        $next_start = output_duration( "F", $log, $next_start );
+    if (! -e "genome.genomex.result/hm.new_scaffolds_edited") {
+        edit_new_scaffolds( $scaffold_prefix, $misassemblies, $genes );        
+        if ( -e "genome.genomex.result/hm.new_scaffolds_edited" ) {
+            system "./hm.batchF.refine_haplomerger_connections_and_Ngap_fillings genome >> runhm.out 2>&1";
+            $next_start = output_duration( "F", $log, $next_start );
+        }
     }
 
     ( "optiNewScaffolds.fa.gz", "unpaired.fa.gz", $log, $next_start );
@@ -238,7 +258,7 @@ sub edit_nodes {
 }
 
 sub edit_new_scaffolds {
-    my ( $scaffold_prefix, $misassemblies ) = @_;
+    my ( $scaffold_prefix, $misassemblies, $genes ) = @_;
 
     my $new_scaffolds_file = "genome.genomex.result/hm.new_scaffolds";
     if ( -e "genome.genomex.result/hm.new_scaffolds_updated" ) {    # If batchE has been run
@@ -253,24 +273,32 @@ sub edit_new_scaffolds {
     my $scfnum    = 0;
     my $curid     = -1;
     my $scflength = 0;
-    while ( my $portion = <$new_scaffolds> ) {
-        if ( $portion =~ /^#/ or $portion =~ /^$/ ) {
-            print $edited $portion;
+
+    my @portions;
+    while (my $portion = <$new_scaffolds>) {        
+        my @f = ($portion =~ /^#/ or $portion =~ /^$/) ? ($portion) : split "\t", $portion;
+        push @portions, \@f;
+    }
+
+    for my $p (0..@portions-1) {
+        my @f = @{$portions[$p]};
+        if (@f == 1) {
+            print $edited $f[0];
             next;
         }
-
-        my @f = split "\t", $portion;
+        
         $curid = $f[0] if $curid == -1;
         if ( $f[0] != $curid ) {
             $scfnum++;
             $curid     = $f[0];
             $scflength = 0;
         }
+
         my $scaffold1 = $f[5];
         my $scaffold2 = $f[12];
 
         my $active_portion = 0;
-        if ( $scaffold1 ne '0' and $scaffold2 ne '0' ) {
+        if ( $scaffold_prefix ne "" and $scaffold1 ne '0' and $scaffold2 ne '0' ) {
             if ( $scaffold1 =~ /^$scaffold_prefix/ and $scaffold2 !~ /^$scaffold_prefix/ ) {
                 $active_portion = 2;
             }
@@ -281,7 +309,12 @@ sub edit_new_scaffolds {
 
         $f[-2] = $active_portion if $active_portion;
 
+        if ($genes) {
+            find_broken_genes($p, \@portions, $genes);
+        }
+
         $active_portion = $f[-2] ? $f[-2] : $f[4];
+
 
         my $partlength = $active_portion == 1 ? $f[11] : $f[18];
 
@@ -303,6 +336,50 @@ sub edit_new_scaffolds {
     close $edited;
 }
 
+sub find_broken_genes {
+    my ($p, $portions, $genes) = @_;
+    my $this = get_portion_region($p, $portions);
+    return if !$this;
+    my $scfgenes = $genes->{$this->{scaffold}};
+    for $start (keys %{$scfgenes}) {
+        my $end = $scfgenes->{$start}{end};
+        my $neighbour = $p;
+        if ($start < $this->{start} and $this->{start} <= $end) {
+            $neighbour = $this->{dir} == 1 ? $p-1 : $p+1;
+        }
+        if ($start <= $this->{end} and $this->{end} < $end) {
+            $neighbour = $this->{dir} == 1 ? $p+1 : $p-1;
+        }
+        next if $neighbour == $p;
+        my $np = get_portion_region($neighbour, $portions);
+        if ($this->{scaffold} ne $np->{scaffold}) {
+            $portions->[$neighbour][-2] = $np->{active} == 1 ? 2 : 1;
+        }
+    }
+}
+
+sub get_portion_region {
+    my ($p, $portions) = @_;
+    return if !defined $portions->[$p];
+    my @f = @{$portions->[$p]};
+    return if (@f == 1);
+    my $active_portion = $f[-2] ? $f[-2] : $f[4];
+    my %region;
+    $region{active} = $active_portion;
+    if ($active_portion == 1) {
+        $region{scaffold} = $f[5];
+        $region{start}    = $f[8] + 1;
+        $region{end}      = $f[9];
+        $region{dir}      = $f[10];
+    }
+    elsif ($active_portion == 2) {
+        $region{scaffold} = $f[12];
+        $region{start}    = $f[15] + 1;
+        $region{end}      = $f[16];
+        $region{dir}      = $f[17];
+    }
+    return \%region;
+}
 sub run_g {
     my ( $log, $start ) = @_;
     my $next_start = $start;

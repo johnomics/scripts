@@ -111,7 +111,7 @@ def load_refined():
     if not os.path.isfile(refined_file):
         print("Can't find _hm.unincorpRefiner.log, no refined types will be output")
         return refined_types
-        
+
     try:
         with open(refined_file) as r:
             for line in r:

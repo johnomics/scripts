@@ -301,7 +301,6 @@ def merge_broken(broken_scaffolds, genome, agp, corrections, transfer, log, pref
                     pass
     return newnumber+1
 
-
 def make_new_scaffold(scaffold, start, end, newnumber, genome, transfer, log, prefix):
     newname = prefix + str(newnumber)
     log.write('\tMaking {} from {} {} and {}\n'.format(newname, scaffold, start, end))
@@ -309,8 +308,6 @@ def make_new_scaffold(scaffold, start, end, newnumber, genome, transfer, log, pr
     length = end-start+1
     genome[newname] = genome[scaffold][start-1:end]
     genome[newname].id = genome[newname].name = genome[newname].description = newname
-
-    # Transfer
     for tstart in sorted(transfer[scaffold]):
         tr = transfer[scaffold][tstart]
         if start > tr.newend or end < tr.newstart:
@@ -320,15 +317,22 @@ def make_new_scaffold(scaffold, start, end, newnumber, genome, transfer, log, pr
         offset = partstart - tr.newstart
         partlen = partend - partstart + 1
         newstart = partstart-start+1
-        transfer[newname][newstart] = Transfer(tr.oldname, tr.oldstart + offset, partlen + offset, newname, newstart, partend-start+1, tr.strand, tr.parttype)
+        transfer[newname][newstart] = Transfer(tr.oldname, tr.oldstart + offset, partlen + offset, newname, newstart, partend-start+1, tr.strand, tr.parttype)    
+    
     newnumber += 1
     return newname, newnumber
 
 def delete_scaffold(scaffold, genome, transfer, corrections, log):
     log.write("Deleting {}\n".format(scaffold))
     del genome[scaffold]
-    del transfer[scaffold]
     del corrections[scaffold]
+
+    starts = list(transfer[scaffold])
+    for start in starts:
+        if transfer[scaffold][start].parttype is not 'removed':
+            del transfer[scaffold][start]
+    if not transfer[scaffold]:
+        del transfer[scaffold]
 
 def correct_genome(newnumber, genome, scaffolds, transfer, corrections, log, prefix):
     
@@ -371,14 +375,24 @@ def output_genome(genome, scaffolds, transfer, output):
             for scaffold in sorted(genome):
                 SeqIO.write(genome[scaffold], fasta, "fasta")
 
+        tsv_output = []
+        for scaffold in transfer:
+            for start in transfer[scaffold]:
+                tsv_output.append(transfer[scaffold][start])
+
         with open (output + ".tsv", 'w') as tsv:
-            for scaffold in sorted(transfer):
-                for start in sorted(transfer[scaffold], key = lambda x: transfer[scaffold][x].newstart):
-                    tsv.write(repr(transfer[scaffold][start]) + '\n')
+            transfers = sorted(tsv_output, key = lambda x:(x.oldname,x.oldstart))
+            for i, transfer in enumerate(transfers):
+                tsv.write(repr(transfer)+'\n')
+                if i < len(transfers) - 1 and transfer.oldname == transfers[i+1].oldname and transfer.oldend+1 != transfers[i+1].oldstart:
+                    remstart = transfer.oldend+1
+                    remend = transfers[i+1].oldstart-1
+                    remtransfer = Transfer(transfer.oldname, remstart, remend, transfer.oldname, remstart, remend, 1, 'removed')
+                    tsv.write(repr(remtransfer)+'\n')
     except IOError:
         print("Can't write output files")
         sys.exit()
-    
+
 def get_args():
     parser = argparse.ArgumentParser(description='''Output TSV of new scaffolds from draft genome, correcting misassemblies
         -f fasta
