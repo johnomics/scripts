@@ -70,15 +70,16 @@ class Raft:
         
     @property
     def name(self):
-        summarydict = defaultdict(list)
-        scaffolds = []
+        summarylist = []
+        cur_scaffold = ""
         for m in self.manifest:
-            if m.scaffold not in summarydict:
-                scaffolds.append(m.scaffold)
-            summarydict[m.scaffold].append((m.start,m.end))
+            if m.scaffold != cur_scaffold:
+                cur_scaffold = m.scaffold
+                summarylist.append([])
+            summarylist[-1].append((m.scaffold, m.start, m.end))
         names = []
-        for scaffold in scaffolds:
-            names.append('{}_{}_{}'.format(scaffold, summarydict[scaffold][0][0], summarydict[scaffold][-1][-1]))
+        for scaffold in summarylist:
+            names.append('{}_{}_{}'.format(scaffold[0][0], scaffold[0][1], scaffold[-1][2]))
         name = '-'.join(names)
         return name
 
@@ -136,8 +137,8 @@ class Raft:
         self.manifest = []
         self.update()
 
-    def discard(self):
-        self.genome.refuse.append(self.summary())
+    def discard(self, reason):
+        self.genome.refuse.append((self.summary(), reason))
         self.empty()
 
     def replace(self, logs):

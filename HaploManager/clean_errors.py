@@ -135,17 +135,18 @@ def update_stats(s, length, chromosome):
         s.blocks_covered += 1
         s.bases_covered += length
     
-def clean_linkage_map(database, errorarg, genome):
+def clean_linkage_map(database, errorarg, reversearg, genome):
 
     conn_in, ci = open_input_database(database)
     
     errors = load_errors(errorarg)
-
+    
+    cms = load_chromosome_map(ci)
     s = Stats()
 
     genome = {}
     for chromosome, cm, scaffold, start, end, length, *args in ci.execute('select * from scaffold_map order by scaffold, start'):
-
+        
         if scaffold in errors and start in errors[scaffold]:
             if errors[scaffold][start] == "D":
                 del errors[scaffold][start]
@@ -169,6 +170,12 @@ def clean_linkage_map(database, errorarg, genome):
             end, chromosome, cm = errors[scaffold][start].split(',')
             genome[scaffold].append(MapPart(scaffold, start, end, chromosome, cm))
             update_stats(s, int(end)-int(start)+1, chromosome)
+            
+            chromosome, cm = int(chromosome), float(cm)
+            if cm not in cms[chromosome]:
+                cms[chromosome][cm] = cm
+
+    cms = do_reverse(cms, reversearg)
 
     for scaffold in genome:
         genome[scaffold].sort(key = lambda x:x.start)
@@ -177,12 +184,12 @@ def clean_linkage_map(database, errorarg, genome):
         for p in genome[scaffold]:
             comment = '{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}'.format(p.scaffold, p.start, p.end, p.start, p.end, p.start, p.end, 1)
             co.execute('insert into scaffold_map values (?,?,?,?,?,?,?,?)', 
-                        [p.chromosome, p.cm, p.scaffold, p.start, p.end, p.length, "active", comment])
+                        [p.chromosome, cms[p.chromosome][p.cm], p.scaffold, p.start, p.end, p.length, "active", comment])
 
     print("Loaded  {} blocks and {} bases".format(s.blocks_loaded, s.bases_loaded))
     print("Covered {} blocks and {} bases".format(s.blocks_covered, s.bases_covered))
     print("Errors  {} blocks and {} bases".format(s.error_blocks, s.error_bases))
-    return
+    return conn_in, ci, cms
 
 def open_input_database(database):
     try:
@@ -197,6 +204,56 @@ def open_input_database(database):
     except sql.Error:
         print("SQL error")
         sys.exit(1)
+
+def load_reverse_file(reversearg):
+
+    reverses = {}
+    if not reversearg:
+        return reverses
+
+    try:
+        if not os.path.isfile(reversearg):
+            raise IOError
+        with open(reversearg, 'r') as r:
+            for line in r:
+                chromosome = line.rstrip()
+                reverses[int(chromosome)]=True
+    except IOError:
+        print("Can't open error file {}".format(reversearg))
+        sys.exit(1)
+
+    return reverses
+    
+def do_reverse(cms, reversearg):
+
+    reverses = load_reverse_file(reversearg)
+    
+    for chrom in cms:
+        if chrom in reverses:
+            maxcm = max(cms[chrom])
+            for cm in cms[chrom]:
+                if cm == -1.0:
+                    continue
+                revcm = format(maxcm - cm, '.3f')
+                cms[chrom][cm] = revcm
+
+    return cms
+
+
+def load_chromosome_map(ci):
+
+    query = ci.execute('select distinct chromosome from chromosome_map')
+    chromosomes = [x[0] for x in query.fetchall()]
+    
+    cms = defaultdict(lambda: defaultdict(int))
+    cms[0][-1.0] = -1.0
+    for chrom in chromosomes:
+        query = ci.execute('select distinct cm from chromosome_map where chromosome == {}'.format(chrom))
+        cms[chrom][-1.0] = -1.0
+        for cm in [x[0] for x in query.fetchall()]:
+            cms[chrom][cm] = cm
+
+    return cms
 
 
 def load_errors(errorarg):
@@ -233,6 +290,19 @@ def open_output_database(output):
         print(sqle)
         sys.exit(1)
 
+def transfer_chromosome_map(ci, co, cms):
+    try:
+        co.execute('drop table if exists chromosome_map')
+        co.execute('''create table chromosome_map
+                     (chromosome integer, print text, cm real, original text, clean text, length integer)''')
+        
+        chrommap = ci.execute('select * from chromosome_map')
+        for (chromosome, chromprint, cm, original, clean, length) in chrommap.fetchall():
+            cm = cms[chromosome][cm] # Reverse chromosomes where necessary
+            co.execute('insert into chromosome_map values (?,?,?,?,?,?)', [chromosome, chromprint, cm, original, clean, length])
+    except sql.Error as sqle:
+        print(sqle)
+        sys.exit(1)
 
 def get_args():
     parser = argparse.ArgumentParser(description='''Output new database containing old linkage information on new HaploMerger output
@@ -240,18 +310,25 @@ def get_args():
         -d database
         -e errors
         -o output
+        -r reverses
         ''')
 
     parser.add_argument('-d', '--database', type=str, required=True)
     parser.add_argument('-e', '--errors', type=str, required=True)
     parser.add_argument('-o', '--output', type=str, required=True)
+    parser.add_argument('-r', '--reverses', type=str, required=False)
     return parser.parse_args()
 
 if __name__ == '__main__':
     
     args = get_args()
 
-    conn, co = open_output_database(args.output)
-    clean_linkage_map(args.database, args.errors, co)
-    conn.commit()
-    conn.close()
+    conn_out, co = open_output_database(args.output)
+
+    conn_in, ci, cms = clean_linkage_map(args.database, args.errors, args.reverses, co)
+
+    transfer_chromosome_map(ci, co, cms)
+
+    conn_in.close()
+    conn_out.commit()
+    conn_out.close()

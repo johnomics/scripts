@@ -80,6 +80,9 @@ class GenomeData:
         try:
             with open(fasta, 'r') as f:
                 sequences = SeqIO.to_dict(SeqIO.parse(f, "fasta"))
+                for scaffold in sequences:
+                    sequences[scaffold].seq = sequences[scaffold].seq.upper()
+
         except IOError:
             print("Can't load genome from file {}!".format(fasta))
             sys.exit()
@@ -115,7 +118,9 @@ class GenomeData:
         genome_length = 0
 
         # Load map blocks from database
-        for scaffold, start, end in self.db.execute("select scaffold, start, end from scaffold_map"):
+        for scaffold, start, end, parttype in self.db.execute("select scaffold, start, end, parttype from scaffold_map"):
+            if parttype not in ['active', 'retained']:
+                continue
             if scaffold not in self.sequences:
                 continue
             if end < start:
@@ -163,9 +168,14 @@ class GenomeData:
         return errors
 
     def clean_assembly(self, sequences, blocks, tsv, prefix):
-        
+
         origparts = defaultdict(list)
         newparts = defaultdict(list)
+        offcuts = defaultdict(lambda: defaultdict(list))
+        
+        if not tsv:
+            return origparts, newparts, offcuts
+
         try:
             if isfile(tsv):
                 with open(tsv) as tsv:
@@ -177,12 +187,12 @@ class GenomeData:
             print("Can't open original TSV file!")
             sys.exit()
 
-        self.delete_scaffolding_only(newparts, prefix, sequences, blocks)        
+        self.delete_scaffolding_only(newparts, origparts, prefix, sequences, blocks)
         offcuts = self.mark_offcuts(newparts, origparts, prefix)
                 
         return origparts, newparts, offcuts
     
-    def delete_scaffolding_only(self, newparts, prefix, sequences, blocks):
+    def delete_scaffolding_only(self, newparts, origparts, prefix, sequences, blocks):
         deleted = 0
         deleted_length = 0
         for new in newparts:
@@ -195,6 +205,12 @@ class GenomeData:
                 deleted_length += len(sequences[new])
                 del sequences[new]
                 del blocks[new]
+                for part in newparts[new]:
+                    if part.parttype == 'haplotype':
+                        continue
+                    for oldpart in origparts[part.oldname]:
+                        if part == oldpart:
+                            oldpart.parttype = 'removed'
         
         print("Cleaned up {} scaffolds, length {}".format(deleted, deleted_length))
 
@@ -271,7 +287,10 @@ class OrigPart:
         self.length = self.oldend-self.oldstart+1
     
     def __repr__(self):
-        return "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}".format(self.oldname, self.oldstart, self.oldend, self.newname, self.newstart, self.newend, self.strand, self.parttype, self.comment)
+        output = "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}".format(self.oldname, self.oldstart, self.oldend, self.newname, self.newstart, self.newend, self.strand, self.parttype)
+        if self.comment:
+            output += "\t{}".format(self.comment)
+        return output
 
 class Block:
     def __init__(self, scaffold, start, end, prev_block=0, next_block=0, chromosome=0, cm=-1):

@@ -63,7 +63,7 @@ def get_parts(scaffold, start, end, genome):
         slice_length = slice_end - slice_start + 1
 
         comment = '{}\t{}\t{}\t{}\t{}\t{}\t{}'.format(part.oldname, part.oldstart, part.oldend, start, end, slice_start, slice_end)
-        if part.parttype == 'haplotype':
+        if part.parttype in ['haplotype', 'gap']:
             newstart = part.newstart
             newend = part.newend
         else:
@@ -88,6 +88,8 @@ def order(start, end):
 def get_trailhap(name, start, end, new):
     happarts = get_parts(name, start, end, new)
     trail = []
+    if not happarts:
+        print(name, start, end)
     for p in happarts:
         trail.append('{}:{}:{}'.format(p[0],p[1],p[2]))
     return ','.join(trail)
@@ -97,10 +99,9 @@ def transfer_genome(new, draft, output, prefix):
     transfer = []
     for scaffold in sorted(draft):
         for part in draft[scaffold]:
-
             newstart, newend = order(part.newstart, part.newend)
 
-            if part.parttype == 'haplotype':
+            if part.parttype in ['haplotype','gap']:
                 if part.haplotype.trail == '-':
                     trailhap = get_trailhap(part.newname, newstart, newend, new)
                 else:
@@ -118,20 +119,22 @@ def transfer_genome(new, draft, output, prefix):
                 continue
 
             parts = get_parts(part.newname, newstart, newend, new)
-            
             if not parts:
                 transfer.append(part)
                 continue
 
-
-            start = part.oldstart
+            start = part.oldstart if part.strand == 1 else part.oldend
             for p in parts:
-                end = start + p[3] - 1
-                if p[5] == 'haplotype':
+                offset = p[3] - 1
+                if p[5] in ['haplotype', 'gap']:
                     origname, origstart, origend, scfstart, scfend, slicestart, sliceend = p[6].split('\t')
-                    end = start + int(sliceend) - int(slicestart)
-                transfer.append(Part(part.oldname, start, end, p[0], p[1], p[2], part.strand * p[4], p[5], p[7]))
-                start = end + 1
+                    offset = int(sliceend) - int(slicestart)
+                
+                end = start + offset if part.strand == 1 else start - offset
+                outstart, outend = order(start, end)
+                transfer.append(Part(part.oldname, outstart, outend, p[0], p[1], p[2], part.strand * p[4], p[5], p[7]))
+
+                start = end + part.strand
 
     for scaffold in new:
         if prefix and scaffold.startswith(prefix):

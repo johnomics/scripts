@@ -3,6 +3,11 @@
 library(grid)
 
 
+genetic.colours<-c(rgb(244,165,130,max=255),rgb(5,113,176,max=255)) # from plot_genome_scaffolds.R
+
+geneticcolour<-function(x) ifelse(x == "blue", genetic.colours[2], ifelse(x=="red", genetic.colours[1], ifelse(x=="magenta", "red", "black")))
+
+
 bd.length<-602276
 
 rad.bd.snps.full<-read.delim("rad_bd_snps_full.tsv",stringsAsFactors=FALSE)
@@ -30,14 +35,14 @@ plot.snps<-function(snplist,ranges,min=0.1) {
         unit(rep(snplist$Position,2),"native"),
         unit(c(snp.pos-0.05,snp.pos+0.05),"native"),
         id=rep(1:length(snplist$Position),2),
-        gp=gpar(col=as.character(snplist$Colour))
+        gp=gpar(col=as.character(geneticcolour(snplist$Colour)))
     )
     
     grid.polyline(
         unit(c(ranges$Start,ranges$End),"native"),
         unit(rep(0.9,length(ranges$Start)*2),"native"),
         id=rep(1:length(ranges$Start),2),
-        gp=gpar(col=as.character(ranges$Colour))
+        gp=gpar(col=as.character(geneticcolour(ranges$Colour)))
     )
     popViewport() #snpset.view
 }

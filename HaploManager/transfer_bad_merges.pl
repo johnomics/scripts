@@ -59,16 +59,10 @@ while ( my $bmline = <$bmfh> ) {
             my $newmerge = "$bm1t\t$bm2t\n";
             next if defined $output_dict{$newmerge};
             print $newbmfh $newmerge;
+            $output_dict{$newmerge}++;
         }
     }
 }
 
 close $bmfh;
 close $newbmfh;
-
-
-sub get_transfers {
-    my ( $bm, $transfers ) = @_;
-    croak "Can't find scaffold $bm in transfers!" if !defined $transfers->{$bm};
-    keys %{ $transfers->{$bm} };
-}

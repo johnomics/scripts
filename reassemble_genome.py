@@ -11,6 +11,7 @@ import Oceanic.Chromosome as chrom
 import Oceanic.Stats as stats
 
 from Bio import SeqIO
+from Bio.Seq import Seq
 
 def get_genome_stats(chromosomes):
     genome_stats = stats.Stats("Genome")
@@ -37,28 +38,86 @@ def load_map(genome):
         mapped_blocks_length += chromosomes[name].mapped_blocks_length
         placed_blocks += chromosomes[name].placed_blocks
         placed_blocks_length += chromosomes[name].placed_blocks_length
-        
-    print("Map blocks {} length {} of which {} blocks placed, length {}".format(mapped_blocks, mapped_blocks_length, placed_blocks, placed_blocks_length))
 
+    print("Map blocks {} length {} of which {} blocks placed, length {}".format(mapped_blocks, mapped_blocks_length, placed_blocks, placed_blocks_length))
     return chromosomes
 
+def collapse_unmapped_blocks(unmapped, stats):
+    outblocks = []
+    prevend = -1
+    curstart = 0
+    
+    for start in unmapped:
+        stats['blocks'] += 1
+        stats['length'] += unmapped[start].length
 
-def write_block(scaffold, start, genome):
-    end = genome.blocks[scaffold][start].end
-    if start < end:
-        seq = genome.sequences[scaffold][start-1:end]
-        seq.id = "{}_{}_{}".format(scaffold, start, end)
+    i = 0
+    while i < len(unmapped)-1:
+        starts = sorted(unmapped)
+        ui = unmapped[starts[i]]
+        ui.prev_block, ui.next_block = 0, 0
+        uj = unmapped[starts[i+1]]
+        uj.prev_block, uj.next_block = 0, 0
+        if ui.chromosome == uj.chromosome and ui.cm == uj.cm and ui.end+1 == uj.start:
+            ui.end = uj.end
+            del unmapped[starts[i+1]]
+            continue
+        i += 1
+
+
+def write_unmapped_scaffold(outblocks, scaffold, stats, unmapped_output, genome):
+
+    seq = Seq('')
+    dbblocks = []
+    mapped = False
+    for block in outblocks:
+        if genome.revised_db:
+            dbblocks.append([block.chromosome, block.cm, scaffold, block.start, block.end, block.length])
+            if block.chromosome != '0':
+                mapped = True
+        if genome.revised_fasta:
+            seq += genome.sequences[scaffold][block.start-1:block.end]
+
+
+    stats['scaffolds'] += 1
+
+    scaffold_start, scaffold_end = outblocks[0].start, outblocks[-1].end
+    scaffold_length = scaffold_end - scaffold_start + 1
+    stats['scaffold_length'] += scaffold_length
+
+    if seq.features or mapped and len(dbblocks) > 1:
+        unmapped_output.append([gd.Block(scaffold, scaffold_start, scaffold_end)])
+
+        stats['written_scaffolds'] += 1
+        stats['written_length'] += scaffold_length
+        if genome.revised_db:
+            for block in dbblocks:
+                genome.revised_db.execute("insert into scaffold_map values (?,?,?,?,?,?)", block)
+        if genome.revised_fasta:
+            seq.id = "{}_{}_{}".format(scaffold, scaffold_start, scaffold_end)
+            seq.description = seq.id
+            SeqIO.write(seq, genome.revised_fasta, "fasta")
     else:
-        seq = genome.sequences[scaffold][end-1:start].reverse_complement()
-        seq.id = "{}_{}_{}".format(scaffold, end, start)
+        stats['discard_scaffolds'] += 1
+        stats['discard_length'] += scaffold_length
 
-    seq.description = seq.id
-    SeqIO.write(seq, genome.revised_fasta, "fasta")
+def process_unmapped_scaffold(unmapped, scaffold, stats, genome):
 
-    if genome.revised_db:
-        genome.revised_db.execute("insert into scaffold_map values (?,?,?,?,?,?)",
-            [0, -1, scaffold, min(start, end), max(start, end), end-start+1])
+    collapse_unmapped_blocks(unmapped, stats)
+    
+    unmapped_output = []
+    outblocks = []
+    starts = sorted(unmapped)
+    for i, start in enumerate(starts):
+        end = unmapped[start].end
 
+        outblocks.append(unmapped[start])
+
+        if i == len(starts)-1 or end+1 != unmapped[starts[i+1]].start:
+            write_unmapped_scaffold(outblocks, scaffold, stats, unmapped_output, genome)
+            outblocks = []
+
+    return unmapped_output
 
 def reassemble(chromosomes, genome, args):
 
@@ -66,15 +125,24 @@ def reassemble(chromosomes, genome, args):
 
     pool = ThreadPool(args.threads)
     pool.map(lambda x: chromosomes[x].assemble(args), chromosomes.keys())
-
     get_genome_stats(chromosomes)
     
+    gap_blocks = gap_length = total_blocks = total_length = 0
+    for scaffold in genome.blocks:
+        for start in genome.blocks[scaffold]:
+            total_blocks += 1
+            total_length += genome.blocks[scaffold][start].length
+            if "Gap" in scaffold:
+                gap_blocks += 1
+                gap_length += genome.blocks[scaffold][start].length
+    print("Added {} gaps, length {}".format(gap_blocks, gap_length))
+    print("Total blocks now {}, length {}".format(total_blocks, total_length))
+
     assembly = []
     for chromosome in chromosomes:
         assembly += chromosomes[chromosome].write()
 
-    assembled_blocks = 0
-    assembled_length = 0
+    assembled_blocks = assembled_length = 0
     for blocklist in assembly:
         for block in blocklist:
             assembled_blocks += 1
@@ -85,44 +153,55 @@ def reassemble(chromosomes, genome, args):
 
     print("Assembled {} blocks, length {}".format(assembled_blocks, assembled_length))
 
-    deleted_blocks = 0
-    deleted_length = 0
-    for blocklist in genome.refuse:
+    remainder_blocks = remainder_length = 0
+    for scaffold in genome.blocks:
+        for start in genome.blocks[scaffold]:
+            remainder_blocks += 1
+            remainder_length += genome.blocks[scaffold][start].length
+    print("Remainder: {} blocks, length {}".format(remainder_blocks, remainder_length))
+
+    deleted_blocks = deleted_length = 0
+    for (blocklist, reason) in genome.refuse:
         for block in blocklist:
             deleted_blocks += 1
             deleted_length += block.length
+            for part in genome.newparts[block.scaffold]:
+                if part.parttype not in  ['haplotype', reason] and \
+                   (block.start >= part.newstart and block.end <= part.newend):
+                    part.parttype = reason
+
             del genome.blocks[block.scaffold][block.start]
             if not genome.blocks[block.scaffold]:
                 del genome.blocks[block.scaffold]
 
     print("Deleted {} blocks, length {}".format(deleted_blocks, deleted_length))
 
-    left_blocks = 0
-    left_length = 0
-    offcut_blocks = 0
-    offcut_length = 0
-    for scaffold in genome.blocks:
-#        print(scaffold)
-#        for start in sorted(genome.blocks[scaffold]):
-#            print(genome.blocks[scaffold][start])
-#        if scaffold in genome.sequences:
-#            for feature in genome.sequences[scaffold].features:
-#                if feature.type == 'gene':
-#                    print('\t' + repr(feature))
+
+    unmapped_stats = {}
+    unmapped_stats['blocks'] = 0
+    unmapped_stats['length'] = 0
+    unmapped_stats['scaffolds'] = 0
+    unmapped_stats['scaffold_length'] = 0
+    unmapped_stats['written_scaffolds'] = 0
+    unmapped_stats['written_length'] = 0
+    unmapped_stats['discard_scaffolds'] = 0
+    unmapped_stats['discard_length'] = 0
+
+    left_blocks = left_length = offcut_blocks = offcut_length = 0
+    for scaffold in sorted(genome.blocks):
         if scaffold in genome.offcuts:
-#            print(scaffold, 'Offcut')
             for start in genome.blocks[scaffold]:
                 offcut_blocks += 1
                 offcut_length += genome.blocks[scaffold][start].length
+                for part in genome.newparts[scaffold]:
+                    for oldpart in genome.origparts[part.oldname]:
+                        if part == oldpart:
+                            oldpart.parttype = "offcut_unmapped_removed"
         else:
-            for start in genome.blocks[scaffold]:
-                left_blocks += 1
-                left_length += genome.blocks[scaffold][start].length
-            
-                if genome.revised_fasta:
-                    write_block(scaffold, start, genome)
-                
-                assembly.append([genome.blocks[scaffold][start]])
+            length = 0
+            unmapped_output = process_unmapped_scaffold(genome.blocks[scaffold], scaffold, unmapped_stats, genome)
+            for unmapped_scaffold in unmapped_output:
+                assembly.append(unmapped_scaffold)
 
     if genome.revised_db:
         genome.revised_conn.commit()
@@ -133,12 +212,16 @@ def reassemble(chromosomes, genome, args):
                 genome.revised_tsv.write('{}\n'.format(repr(part)))
 
     print("Removed {} unmapped offcuts, length {}".format(offcut_blocks, offcut_length))
-    print("Left over {} blocks, length {}".format(left_blocks, left_length))
+    if unmapped_stats['scaffold_length'] != unmapped_stats['length']:
+        print("unmapped stats don't match! {} {}".format(unmapped_stats['scaffold_length'], unmapped_stats['length']))
+    print("Left over    {} blocks in {} scaffolds, length {}".format(unmapped_stats['blocks'], unmapped_stats['scaffolds'], unmapped_stats['length']))
+    print("    of which {} scaffolds were written,   length {}".format(unmapped_stats['written_scaffolds'], unmapped_stats['written_length']))
+    print("    and      {} scaffolds were discarded, length {}".format(unmapped_stats['discard_scaffolds'], unmapped_stats['discard_length']))
 
     return assembly
 
 
-def output(assembly):
+def output(assembly, chromosomes, revised):
     
     print("Output...")
     
@@ -155,7 +238,21 @@ def output(assembly):
         genome_length += scaffold_length
         scaffold_lengths.append(scaffold_length)
     print("Blocks:{}\t".format(blocks), stats.genome(scaffold_lengths))
+    
+    sm = open(revised+'_scaffold_map.tsv', 'w')
+    sm.write("Chromosome\tPool\tType\tID\tLength\n")
 
+    cm = open(revised+'_chromosome_map.tsv', 'w')
+    cm.write("Chromosome\tcM\tStart\tEnd\tLength\n")
+    for c in chromosomes:
+        for mapline in chromosomes[c].scaffold_map:
+            sm.write(mapline)
+        for mapline in chromosomes[c].chromosome_map:
+            cm.write(mapline)
+    sm.close()
+    cm.close()
+    
+    
 
 def get_args():
     parser = argparse.ArgumentParser(description='''Output new FASTA file based on linkage map.
@@ -189,8 +286,8 @@ if __name__ == '__main__':
 
     genome = gd.GenomeData(args)
 
-    chromosomes = load_map(genome)
+#    chromosomes = load_map(genome)
 
-    assembly = reassemble(chromosomes, genome, args)
+#    assembly = reassemble(chromosomes, genome, args)
 
-    output(assembly)
+    output(assembly, chromosomes, args.revised)

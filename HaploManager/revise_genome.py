@@ -237,12 +237,13 @@ def merge_transfer(a, b, newname, transfer):
             at = transfer[a][start]
             transfer[newname][start] = Transfer(a, start, at.newend, newname, start, at.newend, at.strand, at.parttype)
         del transfer[a]
+    
+    gapend = transfer[newname][max(transfer[newname])].newend+100
 
-    lastend = transfer[newname][max(transfer[newname])].newend + 100
     for start in sorted(transfer[b]):
         bt = transfer[b][start]
-        newstart = lastend+start
-        newend = lastend + bt.newend
+        newstart = gapend+start
+        newend = gapend + bt.newend
         transfer[newname][newstart] = Transfer( b, start, bt.newend, newname, newstart, newend, bt.strand, bt.parttype)
 
     del transfer[b]
@@ -384,11 +385,17 @@ def output_genome(genome, scaffolds, transfer, output):
             transfers = sorted(tsv_output, key = lambda x:(x.oldname,x.oldstart))
             for i, transfer in enumerate(transfers):
                 tsv.write(repr(transfer)+'\n')
-                if i < len(transfers) - 1 and transfer.oldname == transfers[i+1].oldname and transfer.oldend+1 != transfers[i+1].oldstart:
-                    remstart = transfer.oldend+1
-                    remend = transfers[i+1].oldstart-1
-                    remtransfer = Transfer(transfer.oldname, remstart, remend, transfer.oldname, remstart, remend, 1, 'removed')
-                    tsv.write(repr(remtransfer)+'\n')
+                if i < len(transfers) - 1:
+                    if transfer.oldname == transfers[i+1].oldname and transfer.oldend+1 != transfers[i+1].oldstart:
+                        remstart = transfer.oldend+1
+                        remend = transfers[i+1].oldstart-1
+                        remtransfer = Transfer(transfer.oldname, remstart, remend, transfer.oldname, remstart, remend, 1, 'removed')
+                        tsv.write(repr(remtransfer)+'\n')
+                    if transfer.newname == transfers[i+1].newname and transfer.newend+1 != transfers[i+1].newstart:
+                        gapstart = transfer.newend+1
+                        gapend = transfers[i+1].newstart-1
+                        gaptransfer = Transfer(transfer.newname, gapstart, gapend, transfer.newname, gapstart, gapend, 1, 'active')
+                        tsv.write(repr(gaptransfer)+'\n')
     except IOError:
         print("Can't write output files")
         sys.exit()

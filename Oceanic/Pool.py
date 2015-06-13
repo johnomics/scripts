@@ -9,7 +9,7 @@ class Pool:
         self.rafts = set()
 
     def __repr__(self):
-        output = 'Type: {}\n'.format(self.pooltype)
+        output = 'Chromosome {}\nType: {}\n'.format(self.chromosome.name, self.pooltype)
         for raft in self:
             output += repr(raft)
             output += '-----\n'

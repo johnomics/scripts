@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+from . import GenomeData as gd
 from . import Pool as pl
 from . import Raft as r
 from . import Stats as s
@@ -9,6 +10,7 @@ import multiprocessing
 import sys
 from os.path import isfile
 import sqlite3 as sql
+from collections import defaultdict
 
 class Chromosome:
     def __init__(self, name, genome):
@@ -16,6 +18,8 @@ class Chromosome:
         self.markers = {}
         self.set_markers(genome.db)
         self.pools = []
+        self.scaffold_map = []
+        self.chromosome_map = []
         self.genome = genome
         self.mapped_blocks, self.mapped_blocks_length, self.placed_blocks, self.placed_blocks_length = self.set_blocks()
         
@@ -76,6 +80,7 @@ class Chromosome:
     def set_blocks(self):
         mapped_blocks = mapped_blocks_length = placed_blocks = placed_blocks_length = 0
 
+        scaffold_cms = defaultdict(lambda: defaultdict(int))
         for cm in sorted(self.markers):
             cm_blocks = pl.Pool(self)
             cm_block_id = 1
@@ -89,13 +94,27 @@ class Chromosome:
                 mapped_blocks_length += length
                 self.genome.blocks[scaffold][start].add_marker(self.name,cm)
 
+                scaffold_cms[scaffold][cm] = 1
+
                 if cm != -1:
                     placed_blocks += 1
                     placed_blocks_length += length
+                
                 cm_blocks.add(r.Raft(cm_block_id, scaffold, start, self))
                 cm_block_id += 1
+
             if cm != -1:
                 self.pools.append(cm_blocks)
+
+#        chromosome_only_scaffolds = []
+#        for scaffold in scaffold_cms:
+#             if len(scaffold_cms[scaffold]) == 1 and -1 in scaffold_cms[scaffold]:
+#                 chromosome_only_scaffolds.append(scaffold)
+        
+#        for scaffold in chromosome_only_scaffolds:
+#            statement = "select * from scaffold_map where scaffold='{}'".format(scaffold)
+#            for args in self.genome.db.execute(statement):
+#                print("\t".join([str(x) for x in args]))
 
         return mapped_blocks, mapped_blocks_length, placed_blocks, placed_blocks_length
 
@@ -123,7 +142,46 @@ class Chromosome:
         self.revised_conn.commit()
         
         return scaffolds
-    
+
+    def update_tsv(self):
+        parts = {}
+        for pool in self.pools:
+            edges = []
+            for raft in pool.rafts:
+                edges += sorted([raft.start, raft.end])
+                for edge in sorted([raft.start, raft.end]):
+                    i = 0
+                    while i < len(self.genome.newparts[raft.scaffold]):
+                        part = self.genome.newparts[raft.scaffold][i]
+                        oldname = part.oldname # the Part referenced by part changes later, so copy name here
+                        if part.parttype != 'haplotype' and part.newstart < edge < part.newend:
+                            if edge == raft.start:
+                                edge = edge - 1
+                            offset = edge - part.newstart
+                            if part.strand == '1':
+                                oldedge = part.oldstart + offset
+                                part1 = gd.OrigPart("\t".join([oldname, str(part.oldstart), str(oldedge), part.newname, str(part.newstart), str(edge), part.strand, part.parttype]))
+                                part2 = gd.OrigPart("\t".join([oldname, str(oldedge+1), str(part.oldend), part.newname, str(edge+1), str(part.newend), part.strand, part.parttype]))
+                            else:
+                                oldedge = part.oldend - offset - 1
+                                part1 = gd.OrigPart("\t".join([oldname, str(oldedge+1), str(part.oldend), part.newname, str(part.newstart), str(edge), part.strand, part.parttype]))
+                                part2 = gd.OrigPart("\t".join([oldname, str(part.oldstart), str(oldedge), part.newname, str(edge+1), str(part.newend), part.strand, part.parttype]))
+                            origi = -1
+                            for j, oldpart in enumerate(self.genome.origparts[oldname]):
+                                if oldpart.oldname == oldname and oldpart.oldstart == part.oldstart:
+                                    origi = j
+                                    break
+                            self.genome.newparts[raft.scaffold][i] = part1
+                            self.genome.newparts[raft.scaffold].insert(i+1, part2)
+                            if origi != -1:
+                                self.genome.origparts[oldname].insert(origi+1, part2)
+                                self.genome.origparts[oldname][origi] = part1
+                            else:
+                                print("Can't find old part in original TSV: {}\n{}\n{}".format(raft.scaffold, part1, part2))
+                            break
+                        i += 1
+
+        
     def run_merger(self, mergeclass):
         if type(mergeclass) is not list:
             mergeclass = [mergeclass]
@@ -136,11 +194,13 @@ class Chromosome:
     def assemble(self, args):
 
         self.threadstart(args)
-        
+
         self.run_merger(merge.MarkerMerge)
 
         for pool in self.pools:
             pool.extend()
+
+        self.update_tsv()
 
         within_markers = []
         for pool in self.pools:
@@ -164,7 +224,7 @@ class Chromosome:
                                 continue
                             match_markers = raft_match.marker_chain
                             if match_markers and markers[0] in match_markers and raft.scaffold != raft_match.scaffold:
-                                raft.discard()
+                                raft.discard("within_removed")
             pool.cleanup()
         
         self.remove_empty_pools()
@@ -177,40 +237,44 @@ class Chromosome:
                         if offcut in pool.scaffolds or i > 0 and offcut in self.pools[i-1].scaffolds or i < len(self.pools)-1 and offcut in self.pools[i+1].scaffolds:
                             remove = True
                 if remove:
-                    raft.discard()
+                    raft.discard("offcut_mapped_removed")
             pool.cleanup()
 
         self.remove_empty_pools()
             
         self.connect(merge.OKMerge)
 
+        self.remove_empty_pools()
+
         print(self)
         print(self.stats)
 
-# Data frame for graphical output
-        with open('scaffold_map_{}.tsv'.format(self.name), 'w') as smfile:
-            for i, pool in enumerate(self.pools):
-                k = 1
-                for raft in pool:
-                    smfile.write("{}\t{}\t{}\t{}\t{}\n".format(self.name, i+1, pool.pooltype, k, raft.mappedlength))
-                    k += 1
-        
-        with open('chromosome_map_{}.tsv'.format(self.name), 'w') as cmfile:
-            chrommap = {}
-            for i, pool in enumerate(self.pools):
-                for raft in pool:
-                    for sb in raft.manifest:
-                        if sb.cm == -1:
-                            continue
-                        if sb.cm not in chrommap:
-                            chrommap[sb.cm] = 0
-                        chrommap[sb.cm] += sb.length
-            cmstart = 1
-            for cm in sorted(chrommap):
-                cmend = cmstart + chrommap[cm] - 1
-                cmfile.write("{}\t{}\t{}\t{}\t{}\n".format(self.name, cm, cmstart, cmend, chrommap[cm]))
-                cmstart = cmend + 1
+        self.make_plot()
 
+    def make_plot(self):
+        # Data frame for graphical output
+        for i, pool in enumerate(self.pools):
+            k = 1
+            for raft in sorted(pool, key=lambda r:r.length, reverse=True):
+                self.scaffold_map.append("{}\t{}\t{}\t{}\t{}\n".format(self.name, i+1, pool.pooltype, k, raft.mappedlength))
+                k += 1
+        
+        chrommap = {}
+        for i, pool in enumerate(self.pools):
+            for raft in pool:
+                for sb in raft.manifest:
+                    if sb.cm == -1:
+                        continue
+                    if sb.cm not in chrommap:
+                        chrommap[sb.cm] = 0
+                    chrommap[sb.cm] += sb.length
+
+        cmstart = 1
+        for cm in sorted(chrommap):
+            cmend = cmstart + chrommap[cm] - 1
+            self.chromosome_map.append("{}\t{}\t{}\t{}\t{}\n".format(self.name, cm, cmstart, cmend, chrommap[cm]))
+            cmstart = cmend + 1
+        
     def remove_empty_pools(self):
         for i in reversed(range(len(self.pools))):
             if not self.pools[i].rafts:

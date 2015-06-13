@@ -46,38 +46,39 @@ draw.linkage.map<-function(chrmap) {
     return(geneticvp)
 }
 
-draw.physical.map<-function(scfmap) {
+draw.physical.map<-function(scfmap, chr, baseline, scale=1) {
     chrscf <- scfmap[scfmap$Chromosome==chr,]
-    maxlengths <- tapply(chrscf$Length, chrscf$Pool, sum)
+    poollengths <- tapply(chrscf$Length, chrscf$Pool, sum)
     parts <- tapply(chrscf$ID, chrscf$Pool, max)
     chrmaxparts <- max(parts)
-    chrsize <- sum(maxlengths)
-    cumlen <- cumsum(maxlengths)
+    chrsize <- sum(poollengths)
+    cumlen <- cumsum(poollengths)
     names(cumlen) <- NULL
     starts <- c(0, cumlen[1:(length(cumlen)-1)])
 
-    physicalvp<-viewport(0.05,0.2,width=0.95,height=0.7,xscale=c(0, chrsize+1000000),just=c("left","bottom"))
+    physicalvp<-viewport(0.05,baseline,width=0.95*scale,height=0.35,xscale=c(0, chrsize+1000000),just=c("left","bottom"))
     pushViewport(physicalvp)
 
     # physical scale
     mb.onemil.tick<-seq(8000,chrsize+8000,1000000)
     chrmb<-ceiling(chrsize/1000000)
-    grid.text(sprintf("%2d", 0:chrmb), unit(mb.onemil.tick, "native"), 0.1, just="right")
-    grid.text("Mb", unit(chrsize+500000,"native"), 0.1, just="right")
-    grid.lines(unit(c(0,chrsize), "native"), c(0.2,0.2), gp=gpar(lwd=4, col="grey",lineend="round"))
+    grid.text(sprintf("%2d", 0:chrmb), unit(mb.onemil.tick, "native"), 0.15, just="right")
+    grid.text("Mb", unit(chrsize+500000,"native"), 0.15, just="right")
+    grid.lines(unit(c(0,chrsize), "native"), c(0.25,0.25), gp=gpar(lwd=4, col="grey",lineend="round"))
     grid.polyline(
         unit(c(mb.onemil.tick,mb.onemil.tick),"native"),
-        c(rep(0.15,chrmb),rep(0.2,chrmb)),
+        c(rep(0.2,chrmb),rep(0.25,chrmb)),
         id=rep(1:chrmb,2),
         gp=gpar(col="grey",lwd=3,lineend="round")
     )
 
-    scfcol<-sapply(scfmap$Type, function(x){if (x=="ok") "green4" else if (x=="orient") "orange" else "red"})
-    scfxpos<-sapply(scfmap$Type, function(x){if (x=="ok") 0.25 else if (x=="orient") 0.3 else 0.35})
-    offset = (scfmap$ID-1)*(0.3/chrmaxparts)
+    scfmapbylength <- scfmap[with(scfmap, order(Length)),]
+    scfcol<-sapply(scfmapbylength$Type, function(x){if (x=="ok") "green4" else if (x=="orient") "orange" else "red"})
+    scfxpos<-sapply(scfmapbylength$Type, function(x){if (x=="ok") 0.3 else if (x=="orient") 0.35 else 0.4})
+    offset = (scfmapbylength$ID-1)*((baseline+0.2)/chrmaxparts)
 
     grid.polyline(
-        unit(c(starts[scfmap$Pool],starts[scfmap$Pool]+scfmap$Length),"native"),
+        unit(c(starts[scfmapbylength$Pool],starts[scfmapbylength$Pool]+scfmapbylength$Length),"native"),
         unit(c(scfxpos+offset,scfxpos+offset),"native"),
         id=rep(1:nrow(scfmap),2),
         gp=gpar(col=scfcol,lwd=2,lineend="butt")
@@ -108,7 +109,7 @@ connect.maps<-function(chrmap, geneticvp, physicalvp) {
     )
 }
 
-plotchrom<-function(chr,chrmap, scfmap) {
+plotchrom<-function(chr,chrmap, revisedmap, draftmap) {
 
     grid.newpage()
 
@@ -117,23 +118,36 @@ plotchrom<-function(chr,chrmap, scfmap) {
     draw.header(chr)
 
     geneticvp<-draw.linkage.map(chrmap)
+
+    draft_size <- sum(draftmap[draftmap$Chromosome==chr,]$Length)
+    revised_size <- sum(revisedmap[revisedmap$Chromosome==chr,]$Length)
     
-    physicalvp<-draw.physical.map(scfmap)
-    
-    connect.maps(chrmap, geneticvp, physicalvp)
+    if (draft_size > revised_size) {
+        draft_scale <- 1
+        revised_scale <- revised_size / draft_size
+    }
+    else {
+        draft_scale <- draft_size / revised_size
+        revised_scale <- 1
+    }
+    draft<-draw.physical.map(draftmap, chr, 0.55, draft_scale)
+
+    revisedvp<-draw.physical.map(revisedmap, chr, 0.2, revised_scale)
+        
+    connect.maps(chrmap, geneticvp, revisedvp)
     
     popViewport()
 }
 
 read.delim(args[2])->scfmap
 read.delim(args[3])->chrmap
-
+read.delim(args[4])->draftmap
 
 
 pdf(args[1], width=11.69, height=8.27)
 
-for (chr in 1:21) {
-    plotchrom(chr, chrmap[chrmap$Chromosome==chr,], scfmap[scfmap$Chromosome==chr,])
+for (chr in 1:max(chrmap$Chromosome)) {
+    plotchrom(chr, chrmap[chrmap$Chromosome==chr,], scfmap[scfmap$Chromosome==chr,], draftmap[draftmap$Chromosome==chr,])
 }
 
 dev.off()

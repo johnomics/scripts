@@ -5,6 +5,7 @@ import sys
 import pathlib
 import argparse
 import glob
+import re
 import sqlite3 as sql
 from pprint import pprint
 from Bio import SeqIO
@@ -106,9 +107,10 @@ def load_linkage_map(database, errorarg, genome):
         if scaffold not in linkage_map:
             linkage_map[scaffold] = MapScaffold()
             for part in genome[scaffold]:
-                linkage_map[scaffold].append(scaffold, part.oldstart, part.oldend, part.length, 0, -1)
+                if part.parttype in ['active', 'retained']:
+                    linkage_map[scaffold].append(scaffold, part.oldstart, part.oldend, part.length, 0, -1)
 
-    return linkage_map
+    return linkage_map, ci
 
 def open_input_database(database):
     try:
@@ -159,7 +161,7 @@ def load_gff(gff):
     try:
         with open(gff) as g:
             for line in g:
-                if line.startswith('#'):
+                if line.startswith('#') or 'contig' in line:
                     continue
                 genes.append(GFF(line))
     except IOError:
@@ -173,7 +175,7 @@ def open_output_database(output):
         db = conn.cursor()
         db.execute('drop table if exists scaffold_map')
         db.execute('''create table scaffold_map
-                     (chromosome integer, cm real, scaffold text, start integer, end integer, length integer, type text, comments text)''')
+                     (chromosome integer, cm real, scaffold text, start integer, end integer, length integer, parttype text, comments text)''')
 
         cursor = conn.cursor()
         return conn, cursor
@@ -204,27 +206,62 @@ def get_parts(scaffold, start, end, genome):
             newend = part.newend - start_offset
         newpart = Part(part.newname, newstart, newend, part.oldname, part.oldstart, part.oldend, part.strand, part.parttype,
                        Comment(part.oldname, part.oldstart, part.oldend, start, end, slice_start, slice_end, part.strand))
-        if part.parttype == 'haplotype':
+        if part.parttype in ['haplotype', 'gap']:
             haps.append(newpart)
         else:
             parts.append(newpart)
     return parts, haps
 
-def write_new_map(linkage_map, genome, output):
+def transfer_chromosome_map(ci, co):
+    
+    table = ci.execute('select * from sqlite_master where name="chromosome_map" and type="table"')
+    if len(table.fetchall()) != 1:
+        return
+    try:
+        co.execute('drop table if exists chromosome_map')
+        co.execute('''create table chromosome_map
+                     (chromosome integer, print text, cm real, original text, clean text, length integer)''')
+        
+        chrommap = ci.execute('select * from chromosome_map')
+        for (chromosome, chromprint, cm, original, clean, length) in chrommap.fetchall():
+            co.execute('insert into chromosome_map values (?,?,?,?,?,?)', [chromosome, chromprint, cm, original, clean, length])
+    except sql.Error as sqle:
+        print(sqle)
+        sys.exit(1)
+
+def write_new_map(linkage_map, genome, output, ci):
     conn_out, co = open_output_database(output + "_map.db")
+
+    transfer_chromosome_map(ci, co)
+
     new_map = []
 
+    genomelength = 0
     for scaffold in linkage_map:
-
+        print(scaffold)
         for part in linkage_map[scaffold].mapparts:
+            print(part)
             new_parts, haps = get_parts(scaffold, part.start, part.end, genome)
-        
+            for np in new_parts:
+                print("NP", np)
+            for h in haps:
+                print("Hap", h)
             for np in new_parts:
                 np.chromosome = part.chromosome
                 np.cm = part.cm
                 new_map.append(np)
 
     new_map.sort(key=lambda x: (x.oldname, x.oldstart))
+
+    for mp in new_map:
+        print(mp)
+#    for i, mp in enumerate(new_map):
+#        if i < len(new_map)-1:
+#            if mp.oldname == new_map[i+1].oldname and mp.oldend+1 != new_map[i+1].oldstart:
+#                print(mp)
+#                print(new_map[i+1])
+#                print()
+
     collapse_map(new_map)
 
     for mp in new_map:
@@ -240,13 +277,15 @@ def collapse_map(mapparts):
         if mpi.chromosome == 0 or mpi.cm == -1:
             i += 1
             continue
-        
+
+
         parts = []
         j = i + 1
         merge = False
 
         while j < len(mapparts):
             mpj = mapparts[j]
+
             parts.append(j)
 
             if mpi.chromosome == mpj.chromosome and mpj.cm == -1:
@@ -292,13 +331,15 @@ def collapse_map(mapparts):
 
 def recollapse(mapparts):
     i = 0
+    
     while i < len(mapparts) - 1:
         mpi = mapparts[i]
         j = i + 1
         if j == len(mapparts):
             break
         while (mpi.chromosome == mapparts[j].chromosome and mpi.cm == mapparts[j].cm and
-               mpi.oldname == mapparts[j].oldname and mpi.comment.name == mapparts[j].comment.name):
+               mpi.oldname == mapparts[j].oldname and mpi.comment.name == mapparts[j].comment.name and
+               mpi.oldend == mapparts[j].oldstart-1):
             blockmerge(mpi, mapparts[j])
             del mapparts[j]
         i += 1
@@ -344,8 +385,15 @@ def blockmerge(a,b):
         a.comment.start = b.comment.start
         a.comment.slice_start = b.comment.slice_start
 
-def get_gene_status(feature, stats, new_parts, haps):
-    stats['total'] += 1                
+def get_gene_name(feature):
+    genename = None
+    if feature.featuretype == 'gene':
+        genename = re.search(r"ID=(.+?);", feature.attributes).group(1)
+    else:
+        genename = re.search(r"Parent=(.+?)[;-]", feature.attributes).group(1)
+    return genename
+    
+def set_feature_status(feature, genename, stats, new_parts, haps):
     if len(new_parts) == 1 and not haps:
         if new_parts[0].parttype == 'removed':
             status = 'removed'
@@ -359,8 +407,22 @@ def get_gene_status(feature, stats, new_parts, haps):
         status = 'missing'
     else:
         status = 'broken'
-    stats[status] += 1
+    stats[genename][status] += 1
+    return genename
+
+def get_gene_status(stats):
+    if len(stats) == 1 and 'missing' in stats:
+        status = 'missing'
+    elif 'broken' in stats or 'overlapped' in stats or 'missing' in stats:
+        status = 'broken'
+    elif ('haplotype' in stats or 'removed' in stats) and 'active' in stats:
+        status = 'hap_broken'
+    elif 'haplotype' in stats or 'removed' in stats:
+        status = 'removed'
+    else:
+        status = 'ok'
     return status
+
 
 def transfer_gff_feature(feature, new_parts, haps):
     part = new_parts[0] if new_parts else haps[0]
@@ -375,39 +437,66 @@ def transfer_gff_feature(feature, new_parts, haps):
 
 def write_new_gff(genes, genome, output):
 
-    stats = defaultdict(int)
-    
+    stats = defaultdict(lambda: defaultdict(int))
+    genefeatures = defaultdict(list)
     genestatus = {}
+    
     gfffile = open(output + ".gff", 'w')
-    brokenfile = open(output + '_broken.gff', 'w')
     removefile = open(output + '_removed.gff', 'w')
+    brokenfile = open(output + '_broken.gff', 'w')
+    
     genename = None
     for feature in genes:
         new_parts, haps = get_parts(feature.scaffold, feature.start, feature.end, genome)
-        if feature.featuretype == 'gene':
-            genename = feature.attributes[feature.attributes.find("ID=")+3:feature.attributes.find(";")]
-            status = get_gene_status(feature, stats, new_parts, haps)
-            genestatus[genename] = status
-        if genename in feature.attributes and genestatus[genename] not in ['broken','overlapped', 'missing']:
-            output_feature = transfer_gff_feature(feature, new_parts, haps)
-            if genestatus[genename] is 'active':
-                gfffile.write(output_feature)
-            else:
-                removefile.write(output_feature) # Haplotypes and removed genes
-        else:
-            brokenfile.write(repr(feature))
+        genename = get_gene_name(feature)
+        genefeatures[genename].append((feature, new_parts, haps))
+        if feature.featuretype != 'gene' and 'RNA' not in feature.featuretype:
+            set_feature_status(feature, genename, stats, new_parts, haps)
 
-    print_stat('Active', stats['active'], stats['total'])
-    print_stat('Haplo', stats['haplotype'], stats['total'])
-    print_stat('Remove', stats['removed'], stats['total'])
-    print_stat('Ovlp', stats['overlapped'], stats['total'])
-    print_stat('Broken', stats['broken'], stats['total'])
-    print_stat('Missing', stats['missing'], stats['total'])
+    genestats = defaultdict(int)
+    genetypes = {}
+    for gene in stats:
+
+        statuses = sorted(stats[gene].keys())
+        genetype = '_'.join(statuses)
+        genetypecounts = '_'.join([str(stats[gene][x]) for x in statuses])
+        
+        if genetype not in genetypes:
+            genetypes[genetype] = 0
+        genetypes[genetype] += 1
+        status = get_gene_status(stats[gene])
+        genestats[status] += 1
+        
+        for feature in genefeatures[gene]:
+            if feature[0].featuretype == 'gene':
+                feature[0].attributes += 'Note={}:{}'.format(genetype, genetypecounts)
+            if status == 'ok':
+                output_feature = transfer_gff_feature(feature[0], feature[1], feature[2])
+                gfffile.write(output_feature)
+            elif status in ['removed', 'missing']:
+                removefile.write(repr(feature[0])) # Haplotypes and removed genes
+            elif status in ['broken', 'hap_broken']:
+                brokenfile.write(repr(feature[0]))
+            else:
+                print("No status for {}".format(gene))
+
+    gfffile.close()
+    removefile.close()
+    brokenfile.close()
     
-    print('Total  genes:\t{:>5}'.format(stats['total']))
-    
+    total = sum(genestats.values())
+    print_stat("OK", genestats['ok'], total)
+    print_stat("Removed", genestats['removed'], total)
+    print_stat("Brokehap", genestats['hap_broken'], total)
+    print_stat("Broken", genestats['broken'], total)
+    print_stat("Missing", genestats['missing'], total)
+    print("Total   genes:\t{}".format(total))
+
+    for genetype in sorted(genetypes, key=genetypes.get, reverse=True):
+        print("{}\t{}".format(genetypes[genetype],genetype))
+
 def print_stat(text, stat, total):
-    print ('{:<7} genes:\t{:>5}\t{:5.2f} %'.format(text, stat, stat/total*100))
+    print ('{:<8} genes:\t{:>5}\t{:5.2f} %'.format(text, stat, stat/total*100))
 
 def get_args():
     parser = argparse.ArgumentParser(description='''Output new database containing old linkage information on new HaploMerger output
@@ -420,8 +509,8 @@ def get_args():
         ''')
 
     parser.add_argument('-m', '--mergedgenome', type=str, required=True)
-    parser.add_argument('-g', '--gff', type=str, required=True)
-    parser.add_argument('-d', '--database', type=str, required=True)
+    parser.add_argument('-g', '--gff', type=str, required=False)
+    parser.add_argument('-d', '--database', type=str, required=False)
     parser.add_argument('-e', '--errors', type=str, required=False)
     parser.add_argument('-o', '--output', type=str, required=True)
     return parser.parse_args()
@@ -432,8 +521,10 @@ if __name__ == '__main__':
 
     genome = load_genome(args.mergedgenome)
     
-    linkage_map = load_linkage_map(args.database, args.errors, genome)
-    write_new_map(linkage_map, genome, args.output)
+    if args.database:
+        linkage_map, ci = load_linkage_map(args.database, args.errors, genome)
+        write_new_map(linkage_map, genome, args.output, ci)
 
-    genes = load_gff(args.gff)
-    write_new_gff(genes, genome, args.output)
+    if args.gff:
+        genes = load_gff(args.gff)
+        write_new_gff(genes, genome, args.output)
