@@ -27,9 +27,9 @@ draw.header<-function(chr) {
     popViewport() #headervp    
 }
 
-draw.linkage.map<-function(chrmap) {
+draw.linkage.map<-function(chrmap, scale) {
     maxcm <- max(chrmap$cM)
-    geneticvp<-viewport(0.05, 0, width=0.9, height=0.2, xscale=c(0, maxcm), just=c("left","bottom"))
+    geneticvp<-viewport(0.05, 0, width=0.89*scale, height=0.2, xscale=c(0, maxcm), just=c("left","bottom"))
     pushViewport(geneticvp)
     
     grid.lines(unit(c(0,maxcm),"native"),c(0.6,0.6),gp=gpar(col=rgb(141,160,203,max=255),lwd=3,lineend="round"))
@@ -117,11 +117,8 @@ plotchrom<-function(chr,chrmap, revisedmap, draftmap) {
     
     draw.header(chr)
 
-    geneticvp<-draw.linkage.map(chrmap)
-
-    draft_size <- sum(draftmap[draftmap$Chromosome==chr,]$Length)
-    revised_size <- sum(revisedmap[revisedmap$Chromosome==chr,]$Length)
-    
+    draft_size <- sum(draftmap[draftmap$Chromosome==chr,]$Length)+1000000
+    revised_size <- sum(revisedmap[revisedmap$Chromosome==chr,]$Length)+1000000
     if (draft_size > revised_size) {
         draft_scale <- 1
         revised_scale <- revised_size / draft_size
@@ -130,6 +127,9 @@ plotchrom<-function(chr,chrmap, revisedmap, draftmap) {
         draft_scale <- draft_size / revised_size
         revised_scale <- 1
     }
+    
+    geneticvp<-draw.linkage.map(chrmap, revised_scale)
+
     draft<-draw.physical.map(draftmap, chr, 0.55, draft_scale)
 
     revisedvp<-draw.physical.map(revisedmap, chr, 0.2, revised_scale)

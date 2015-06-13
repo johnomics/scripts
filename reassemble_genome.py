@@ -286,8 +286,8 @@ if __name__ == '__main__':
 
     genome = gd.GenomeData(args)
 
-#    chromosomes = load_map(genome)
+    chromosomes = load_map(genome)
 
-#    assembly = reassemble(chromosomes, genome, args)
+    assembly = reassemble(chromosomes, genome, args)
 
     output(assembly, chromosomes, args.revised)

@@ -238,29 +238,14 @@ def write_new_map(linkage_map, genome, output, ci):
 
     genomelength = 0
     for scaffold in linkage_map:
-        print(scaffold)
         for part in linkage_map[scaffold].mapparts:
-            print(part)
             new_parts, haps = get_parts(scaffold, part.start, part.end, genome)
-            for np in new_parts:
-                print("NP", np)
-            for h in haps:
-                print("Hap", h)
             for np in new_parts:
                 np.chromosome = part.chromosome
                 np.cm = part.cm
                 new_map.append(np)
 
     new_map.sort(key=lambda x: (x.oldname, x.oldstart))
-
-    for mp in new_map:
-        print(mp)
-#    for i, mp in enumerate(new_map):
-#        if i < len(new_map)-1:
-#            if mp.oldname == new_map[i+1].oldname and mp.oldend+1 != new_map[i+1].oldstart:
-#                print(mp)
-#                print(new_map[i+1])
-#                print()
 
     collapse_map(new_map)
 

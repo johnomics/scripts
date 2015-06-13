@@ -549,11 +549,12 @@ sub make_output_blocks {
 sub output_blocks {
     my ( $output_blocks, $parts, $dbh, $outfile ) = @_;
 
+    return if not defined $output_blocks;
     for my $part ( @{$parts} ) {
         print "$part->{oldname}\t$part->{oldstart}\t$part->{oldend}\t$part->{oldstrand}\n";
         my @partoutblocks;
         my $newchrfound = 0;
-        for my $outblock ( @{$output_blocks} ) {
+        for my $outblock ( sort {$a->{name} cmp $b->{name} or $a->{start} <=> $b->{start}} @{$output_blocks} ) {
             next
               if $outblock->{name} ne $part->{oldname}
               or $outblock->{start} > $part->{oldend}

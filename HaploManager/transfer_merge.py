@@ -124,17 +124,35 @@ def transfer_genome(new, draft, output, prefix):
                 continue
 
             start = part.oldstart if part.strand == 1 else part.oldend
+            done = {}
             for p in parts:
-                offset = p[3] - 1
-                if p[5] in ['haplotype', 'gap']:
-                    origname, origstart, origend, scfstart, scfend, slicestart, sliceend = p[6].split('\t')
-                    offset = int(sliceend) - int(slicestart)
-                
+                if (p[0],p[1]) in done:
+                    continue
+
+                origname, origstart, origend, scfstart, scfend, slicestart, sliceend = p[6].split('\t')
+                slicestart, sliceend = int(slicestart), int(sliceend)
+                offset = sliceend - slicestart
                 end = start + offset if part.strand == 1 else start - offset
                 outstart, outend = order(start, end)
                 transfer.append(Part(part.oldname, outstart, outend, p[0], p[1], p[2], part.strand * p[4], p[5], p[7]))
 
+                # Deal with gaps that appear within haplotypes
+                inner_parts = []
+                for ip in parts:
+                    if ip == p:
+                        continue
+                    if p[0] == ip[0] and p[1] <= ip[1] and ip[2] <= p[2]:
+                        i_origname, i_origstart, i_origend, i_scfstart, i_scfend, i_slicestart, i_sliceend = ip[6].split('\t')
+                        i_slicestart, i_sliceend = int(i_slicestart), int(i_sliceend)
+                        i_offset = i_sliceend - i_slicestart
+                        i_start = start + (i_slicestart - slicestart)
+                        i_end   = i_start + i_offset if part.strand == 1 else i_start - i_offset
+                        i_outstart, i_outend = order(i_start, i_end)
+                        transfer.append(Part(part.oldname, i_outstart, i_outend, ip[0], ip[1], ip[2], part.strand * ip[4], ip[5], ip[7]))
+                        done[(ip[0],ip[1])] = True
+                        
                 start = end + part.strand
+                done[(p[0],p[1])] = True
 
     for scaffold in new:
         if prefix and scaffold.startswith(prefix):

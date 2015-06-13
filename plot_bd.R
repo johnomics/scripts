@@ -5,7 +5,7 @@ library(grid)
 
 genetic.colours<-c(rgb(244,165,130,max=255),rgb(5,113,176,max=255)) # from plot_genome_scaffolds.R
 
-geneticcolour<-function(x) ifelse(x == "blue", genetic.colours[2], ifelse(x=="red", genetic.colours[1], ifelse(x=="magenta", "red", "black")))
+geneticcolour<-function(x) ifelse(x == "blue", genetic.colours[2], ifelse(x=="red", genetic.colours[1], ifelse(x=="magenta", "grey", "black")))
 
 
 bd.length<-602276
