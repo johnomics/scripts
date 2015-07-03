@@ -1,16 +1,20 @@
 #!/usr/bin/env python3
 
 from itertools import chain
+from collections import defaultdict
 
 class Pool:
     def __init__(self, chromosome):
         self.chromosome = chromosome
         self.genome = chromosome.genome
         self.rafts = set()
+        self.anchored = False # Used by NodeMerge to fix orient pool still at one marker only
 
     def __repr__(self):
         output = 'Chromosome {}\nType: {}\n'.format(self.chromosome.name, self.pooltype)
         for raft in self:
+            if len(raft) == 0:
+                continue
             output += repr(raft)
             output += '-----\n'
         output += '====='
@@ -41,7 +45,9 @@ class Pool:
     
     @property
     def pooltype(self):
-        if len(self.marker_chain) == 1:
+        if self.anchored:
+            return 'ok'
+        elif len(self.marker_chain) == 1:
             if len(self.rafts) > 1:
                 return 'order'
             else:
@@ -63,15 +69,16 @@ class Pool:
                 continue
 
             repeat = True
-            seen = {}
+            seen = defaultdict(lambda:defaultdict(int))
             while repeat:
                 repeat = False
                 for b in other.rafts:
-                    if not b or repr(a) == repr(b) or (a,b) in seen:
+                    if not b or repr(a) == repr(b) or a in seen and b in seen[a]:
                         continue
 
-                    seen[(a,b)] = 1
+                    seen[a][b] = 1
                     if merger.bridge(a, b):
+                        del seen[a]
                         repeat = True
                         break
         merger.merge()

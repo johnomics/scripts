@@ -46,7 +46,7 @@ draw.linkage.map<-function(chrmap, scale) {
     return(geneticvp)
 }
 
-draw.physical.map<-function(scfmap, chr, baseline, scale=1) {
+draw.physical.map<-function(scfmap, chr, baseline, scale=1, plotnames=FALSE) {
     chrscf <- scfmap[scfmap$Chromosome==chr,]
     poollengths <- tapply(chrscf$Length, chrscf$Pool, sum)
     parts <- tapply(chrscf$ID, chrscf$Pool, max)
@@ -82,6 +82,14 @@ draw.physical.map<-function(scfmap, chr, baseline, scale=1) {
         unit(c(scfxpos+offset,scfxpos+offset),"native"),
         id=rep(1:nrow(scfmap),2),
         gp=gpar(col=scfcol,lwd=2,lineend="butt")
+    )
+    
+    grid.text(
+        scfmapbylength$Scaffold,
+        unit(c(starts[scfmapbylength$Pool]),"native"),
+        unit(c(scfxpos+offset+0.005),"native"),
+        just=c("left","bottom"),
+        gp=gpar(fontsize=2)
     )
 
     popViewport() #physicalvp
@@ -132,7 +140,7 @@ plotchrom<-function(chr,chrmap, revisedmap, draftmap) {
 
     draft<-draw.physical.map(draftmap, chr, 0.55, draft_scale)
 
-    revisedvp<-draw.physical.map(revisedmap, chr, 0.2, revised_scale)
+    revisedvp<-draw.physical.map(revisedmap, chr, 0.2, revised_scale, plotnames=TRUE)
         
     connect.maps(chrmap, geneticvp, revisedvp)
     
@@ -142,7 +150,6 @@ plotchrom<-function(chr,chrmap, revisedmap, draftmap) {
 read.delim(args[2])->scfmap
 read.delim(args[3])->chrmap
 read.delim(args[4])->draftmap
-
 
 pdf(args[1], width=11.69, height=8.27)
 

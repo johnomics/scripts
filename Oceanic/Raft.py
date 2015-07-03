@@ -19,6 +19,7 @@ class Raft:
 
     def __repr__(self):
         output = ''
+        output += self.scaffold + "\n"
         if self.marker_chain.chain is None:
             output += 'To fix:\n'
         if self.scaffold in self.genome.offcuts:
@@ -62,11 +63,15 @@ class Raft:
 
     @property
     def scaffolds(self):
-        return list({m.scaffold:0 for m in self.manifest}.keys())
+        scaffolds = []
+        for m in self.manifest:
+            if m.scaffold not in scaffolds:
+                scaffolds.append(m.scaffold)
+        return scaffolds
 
     @property
     def scaffold(self):
-        return '_'.join(sorted(self.scaffolds))
+        return '_'.join(self.scaffolds)
         
     @property
     def name(self):
@@ -113,8 +118,14 @@ class Raft:
     @property
     def sequence(self):
         sequence = sum([h.sequence for h in self.hooks], Seq("", generic_dna))
-        sequence.id = self.name
+
+        if self.name not in self.genome.revised_names:
+            self.genome.revised_names[self.name] = self.genome.revised + "{:04d}".format(self.genome.revised_count)
+            self.genome.revised_count += 1
+
+        sequence.id = self.genome.revised_names[self.name]
         sequence.description = self.name
+
         return sequence
 
     @property
@@ -128,8 +139,7 @@ class Raft:
 
     @property
     def hooks(self):
-        if not self._hooks:
-            self._hooks = self.forge_hooks()
+        self._hooks = self.forge_hooks()
         return self._hooks
 
     def empty(self):
@@ -170,9 +180,13 @@ class Raft:
         else:
             return None
 
-    def merge(self, other):
-        for scaffold, start, direction in other.logs:
-            self.append(scaffold, start, direction)
+    def merge(self, other, before=False):
+        if before:
+            for scaffold, start, direction in reversed(other.logs):
+                self.prepend(scaffold, start, direction)
+        else:
+            for scaffold, start, direction in other.logs:
+                self.append(scaffold, start, direction)
 
     def trim(self, hook, overhang):
         pass

@@ -88,10 +88,11 @@ def order(start, end):
 def get_trailhap(name, start, end, new):
     happarts = get_parts(name, start, end, new)
     trail = []
-    if not happarts:
-        print(name, start, end)
     for p in happarts:
-        trail.append('{}:{}:{}'.format(p[0],p[1],p[2]))
+        if 'removed' in p[5] and p[7] is not None:
+            trail.append('{}:{}:{}'.format(p[7].name, p[7].start, p[7].end))
+        else:
+            trail.append('{}:{}:{}'.format(p[0],p[1],p[2]))
     return ','.join(trail)
 
 def transfer_genome(new, draft, output, prefix):
@@ -112,8 +113,6 @@ def transfer_genome(new, draft, output, prefix):
                         if trailhap:
                             trailhaps.append(trailhap)
                     trailhap = ','.join(trailhaps)
-                if not trailhap:
-                    print(part)
                 part.haplotype = Haplotype(part.haplotype.name, part.haplotype.start, part.haplotype.end, part.haplotype.strand, trailhap)
                 transfer.append(part)
                 continue

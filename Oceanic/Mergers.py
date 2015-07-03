@@ -16,6 +16,15 @@ class Merger():
         else:
             return end, start
     
+    def get_pool_positions(self, this, other):
+        i = j = None
+        for n, p in enumerate(this.chromosome.pools):
+            if this is p:
+                i = n
+            elif other is p:
+                j = n
+        return i,j
+    
     def do_join(self, a, b, bridge):
         a.replace(bridge)
         b.empty()
@@ -281,6 +290,82 @@ class RopeMerge(Merger):
                 print(b)
                 print(self.springlines[a][b])
 
+class NodeMerge(Merger):
+    def __init__(self, this, other, options=None):
+        self.this = this
+        self.other = other
+        self.genome = this.genome
+        
+    def bridge(self, a, b):
+        i, j = self.get_pool_positions(self.this, self.other)
+
+        if self.this.pooltype == 'ok' and self.other.pooltype == 'ok':
+            return False
+
+        if j not in [i, i+1]:
+            return False
+
+        if self.this.pooltype == 'ok':
+            anchor_pool, floating_pool = self.this, self.other
+            anchor_raft, floating_raft = a, b
+            float_after = True
+        elif self.other.pooltype == 'ok':
+            anchor_pool, floating_pool = self.other, self.this
+            anchor_raft, floating_raft = b, a
+            float_after = False
+        else:
+            return False
+
+        anchor_scaffold = anchor_raft.scaffolds[0]
+        if float_after:
+            anchor_scaffold = anchor_raft.scaffolds[-1]
+        
+        for floating_scaffold in floating_raft.scaffolds:
+            directions = {}
+            connect_nodes = []
+            
+            for node in sorted(self.genome.nodes[anchor_scaffold][floating_scaffold], key = lambda x:x.tlen, reverse=True):
+                if len(anchor_raft.scaffolds) == 1:
+                    node.set_status(anchor_raft.start, anchor_raft.end, floating_raft.start, floating_raft.end)
+                else:
+                    node.set_status(1, len(self.genome.sequences[anchor_scaffold]), floating_raft.start, floating_raft.end)
+                if 'connect' in node.status:
+                    connect_nodes.append(node)
+                directions[node.direction] = 1
+            if len(directions) != 1:
+                continue
+            direction = list(directions)[0]
+            reverse_float = direction == -1 and anchor_raft.start < anchor_raft.end or direction == 1 and anchor_raft.start > anchor_raft.end
+            
+            if floating_pool.pooltype == 'orient':
+                if reverse_float:
+                    floating_raft.reverse()
+                floating_pool.anchored = True
+            else:
+                if connect_nodes:
+                    node = connect_nodes[0]
+                    anchor_tip = anchor_raft.end if float_after else anchor_raft.start
+                    if 'connect_a' in node.status and ('af' in node.status and anchor_tip < node.tend or 'ar' in node.status and anchor_tip > node.tstart):
+                        return False
+                    if 'connect_b' in node.status and ('af' in node.status and anchor_tip > node.tstart or 'ar' in node.status and anchor_tip < node.tend):
+                        return False
+                    if reverse_float:
+                        floating_raft.reverse()
+                    newgap = self.genome.add_gap()
+                    if float_after:
+                        anchor_raft.append(newgap.scaffold, newgap.start, 1)
+                        anchor_raft.merge(floating_raft)
+                    else:
+                        anchor_raft.prepend(newgap.scaffold, newgap.start, 1)
+                        anchor_raft.merge(floating_raft, before=True)
+                    floating_raft.empty()
+                    
+                    return True
+                
+        return False
+    
+    def merge(self):
+        pass
 
 class OKMerge(Merger):
     def __init__(self, this, other, options=None):
@@ -292,18 +377,13 @@ class OKMerge(Merger):
         if self.this.pooltype != 'ok' or self.other.pooltype != 'ok':
             return False
 
-        i = j = None
-        for n, p in enumerate(self.this.chromosome.pools):
-            if self.this is p:
-                i = n
-            elif self.other is p:
-                j = n
+        i, j = self.get_pool_positions(self.this, self.other)
 
         for n in range(i+1, j):
             if len(self.this.chromosome.pools[n]) != 0 or self.this.chromosome.pools[n].pooltype in ['other', 'orient']:
                 return False
         
-        newgap = self.this.genome.add_gap()
+        newgap = self.genome.add_gap()
         a.append(newgap.scaffold, newgap.start, 1)
         
         a.merge(b)

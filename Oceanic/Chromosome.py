@@ -106,16 +106,6 @@ class Chromosome:
             if cm != -1:
                 self.pools.append(cm_blocks)
 
-#        chromosome_only_scaffolds = []
-#        for scaffold in scaffold_cms:
-#             if len(scaffold_cms[scaffold]) == 1 and -1 in scaffold_cms[scaffold]:
-#                 chromosome_only_scaffolds.append(scaffold)
-        
-#        for scaffold in chromosome_only_scaffolds:
-#            statement = "select * from scaffold_map where scaffold='{}'".format(scaffold)
-#            for args in self.genome.db.execute(statement):
-#                print("\t".join([str(x) for x in args]))
-
         return mapped_blocks, mapped_blocks_length, placed_blocks, placed_blocks_length
 
 
@@ -146,16 +136,15 @@ class Chromosome:
     def update_tsv(self):
         parts = {}
         for pool in self.pools:
-            edges = []
             for raft in pool.rafts:
-                edges += sorted([raft.start, raft.end])
-                for edge in sorted([raft.start, raft.end]):
+                edges = sorted([raft.start, raft.end])
+                for edge in edges:
                     i = 0
                     while i < len(self.genome.newparts[raft.scaffold]):
                         part = self.genome.newparts[raft.scaffold][i]
                         oldname = part.oldname # the Part referenced by part changes later, so copy name here
-                        if part.parttype != 'haplotype' and part.newstart < edge < part.newend:
-                            if edge == raft.start:
+                        if part.parttype not in  ['haplotype'] and part.newstart < edge < part.newend:
+                            if edge == edges[0]:
                                 edge = edge - 1
                             offset = edge - part.newstart
                             if part.strand == '1':
@@ -181,27 +170,7 @@ class Chromosome:
                             break
                         i += 1
 
-        
-    def run_merger(self, mergeclass):
-        if type(mergeclass) is not list:
-            mergeclass = [mergeclass]
-        for pool in self.pools:
-            for mc in mergeclass:
-                pool.assemble(pool, mc)
-        
-        self.connect(mergeclass)
-
-    def assemble(self, args):
-
-        self.threadstart(args)
-
-        self.run_merger(merge.MarkerMerge)
-
-        for pool in self.pools:
-            pool.extend()
-
-        self.update_tsv()
-
+    def discard_within(self):
         within_markers = []
         for pool in self.pools:
             for raft in pool:
@@ -210,7 +179,7 @@ class Chromosome:
                     within = markers[1:(len(markers)-1)]
                     within_markers += within
         within_markers = set(within_markers)
-
+        
         for pool in self.pools:
             for raft in pool:
                 markers = raft.marker_chain
@@ -226,9 +195,9 @@ class Chromosome:
                             if match_markers and markers[0] in match_markers and raft.scaffold != raft_match.scaffold:
                                 raft.discard("within_removed")
             pool.cleanup()
-        
         self.remove_empty_pools()
 
+    def remove_mapped_offcuts(self):
         for i, pool in enumerate(self.pools):
             for raft in pool:
                 remove = False
@@ -239,11 +208,55 @@ class Chromosome:
                 if remove:
                     raft.discard("offcut_mapped_removed")
             pool.cleanup()
-
         self.remove_empty_pools()
-            
-        self.connect(merge.OKMerge)
 
+    def remove_contained_nodes(self):
+        for i, pool in enumerate(self.pools):
+            for raft in pool:
+                remove = False
+                for scaffold in raft.scaffolds:
+                    if scaffold in self.genome.nodes:
+                        for qscaffold in self.genome.nodes[scaffold]:
+                            if qscaffold in pool.scaffolds or (i > 0 and qscaffold in self.pools[i-1].scaffolds) or (i < len(self.pools)-1 and qscaffold in self.pools[i+1].scaffolds):
+                                for node in self.genome.nodes[scaffold][qscaffold]:
+                                    node.set_status(raft.start, raft.end)
+                                    if node.tlenpc > 50 and node.status == 'within':
+                                        remove = True
+                if remove:
+                    raft.discard("within_node_removed")
+            pool.cleanup()
+        self.remove_empty_pools()
+
+    def run_merger(self, mergeclass):
+        if type(mergeclass) is not list:
+            mergeclass = [mergeclass]
+        for pool in self.pools:
+            for mc in mergeclass:
+                pool.assemble(pool, mc)
+
+        self.connect(mergeclass)
+
+    def assemble(self, args):
+
+        self.threadstart(args)
+
+        self.run_merger(merge.MarkerMerge)
+
+        for pool in self.pools:
+            pool.extend()
+
+        self.update_tsv()
+
+        self.discard_within()
+
+        self.remove_mapped_offcuts()
+
+        self.remove_contained_nodes()
+        
+        self.run_merger(merge.NodeMerge)
+        self.remove_empty_pools()
+
+        self.connect(merge.OKMerge)
         self.remove_empty_pools()
 
         print(self)
@@ -256,7 +269,7 @@ class Chromosome:
         for i, pool in enumerate(self.pools):
             k = 1
             for raft in sorted(pool, key=lambda r:r.length, reverse=True):
-                self.scaffold_map.append("{}\t{}\t{}\t{}\t{}\n".format(self.name, i+1, pool.pooltype, k, raft.mappedlength))
+                self.scaffold_map.append("{}\t{}\t{}\t{}\t{}\t{}\n".format(self.name, i+1, pool.pooltype, k, raft.name, raft.mappedlength))
                 k += 1
         
         chrommap = {}
@@ -277,6 +290,7 @@ class Chromosome:
         
     def remove_empty_pools(self):
         for i in reversed(range(len(self.pools))):
+            self.pools[i].cleanup()
             if not self.pools[i].rafts:
                 del self.pools[i]
 

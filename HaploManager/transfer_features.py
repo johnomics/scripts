@@ -9,14 +9,16 @@ import re
 import sqlite3 as sql
 from pprint import pprint
 from Bio import SeqIO
+from Bio.Seq import Seq
+from BCBio import GFF
 from collections import defaultdict
 from operator import itemgetter
 
 class Part():
     def __init__(self, oldname, oldstart, oldend, newname, newstart, newend, strand, parttype, comment="", chromosome="", cm=""):
         self.oldname = oldname
-        self.oldstart = int(oldstart)
-        self.oldend = int(oldend)
+        self.oldstart = None if oldstart is None else int(oldstart)
+        self.oldend = None if oldend is None else int(oldend)
         self.newname = newname
         self.newstart = int(newstart)
         self.newend = int(newend)
@@ -71,7 +73,7 @@ class MapScaffold:
         self.mapparts.append(MapPart(scaffold, start, end, length, chromosome, cm))
 
 
-def load_genome(mergedgenome):
+def load_transfers(mergedgenome):
     genome = defaultdict(list)
     try:
         with open(mergedgenome, 'r') as g:
@@ -147,27 +149,129 @@ def load_errors(errorarg):
         print("Can't open error file {}".format(errorarg))
         sys.exit(1)
 
+
+def load_genome(fasta):
+    try:
+        with open(fasta, 'r') as f:
+            sequences = SeqIO.to_dict(SeqIO.parse(f, "fasta"))
+            for scaffold in sequences:
+                sequences[scaffold].seq = sequences[scaffold].seq.upper()
+
+    except IOError:
+        print("Can't load genome from file {}!".format(fasta))
+        sys.exit()
+
+    return sequences
+    
+
 class GFF:
-    def __init__(self, line):
-        self.scaffold, self.source, self.featuretype, self.start, self.end, self.score, self.strand, self.phase, self.attributes = line.rstrip().split('\t')
+    def __init__(self, *args):
+        if len(args) == 1:
+            self.scaffold, self.source, self.featuretype, self.start, self.end, self.score, self.strand, self.phase, self.attributes = args[0].rstrip().split('\t')
+        else:
+            self.scaffold    = args[0]
+            self.source      = args[1]
+            self.featuretype = args[2]
+            self.start       = args[3]
+            self.end         = args[4]
+            self.score       = args[5]
+            self.strand      = args[6]
+            self.phase       = args[7]
+            self.attributes  = args[8]
         self.start = int(self.start)
         self.end = int(self.end)
+        self.genename = get_gene_name(self)
+        if self.attributes.endswith(';'):
+            self.attributes = self.attributes[:-1]
     
     def __repr__(self):
         return '{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n'.format(self.scaffold, self.source, self.featuretype, self.start, self.end, self.score, self.strand, self.phase, self.attributes)
 
+def load_crossmap(crossmapout):
+    genes = defaultdict(list)
+    gene_exon_positions = defaultdict(lambda: defaultdict(tuple))
+    try:
+        with open(crossmapout) as c:
+            for line in c:
+                cm = None
+                if 'fail' in line:
+                    featureline = line.split('\tfail')[0]
+                if '->' in line:
+                    featureline, cmline = line.split('\t->\t')
+                    cm = GFF(cmline)
+                    cm.attributes += ';Note=CrossMap'
+                feature=GFF(featureline)
+                feature.crossmap = cm
+                gene_id = get_gene_attribute(feature, "ID")
+                if feature.featuretype == 'exon':
+                    gene_exon_positions[feature.genename][gene_id] = (feature.start, feature.end)
+                if feature.featuretype == 'CDS':
+                    for exon in gene_exon_positions[feature.genename]:
+                        e = gene_exon_positions[feature.genename][exon]
+                        if e[0] <= feature.start <= e[1] and e[0] <= feature.end <= e[1]:
+                            gene_id = exon + "_CDS"
+                    
+                    if feature.crossmap:    # Lose CrossMap features where the CDSs aren't the same length
+                        cds_len = feature.end - feature.start + 1
+                        cm_len  = feature.crossmap.end - feature.crossmap.start + 1
+                        if cds_len != cm_len:
+                            feature.crossmap = None
+                if gene_id is None:
+                    print("No gene id for CDS found", feature, end="")
+                feature.id = gene_id
+
+                genes[feature.genename].append(feature)
+                
+    except IOError:
+        print("Failed to load CrossMap output {}".format(crossmapout))
+        sys.exit()
+
+    return genes
+    
 def load_gff(gff):
-    genes = []
+    genes = defaultdict(list)
+    gene_exon_positions = defaultdict(lambda: defaultdict(tuple))
     try:
         with open(gff) as g:
             for line in g:
                 if line.startswith('#') or 'contig' in line:
                     continue
-                genes.append(GFF(line))
+                feature = GFF(line)
+                gene_id = get_gene_attribute(feature, "ID")
+                if feature.featuretype == 'exon':
+                    gene_exon_positions[feature.genename][gene_id] = (feature.start, feature.end)
+                if feature.featuretype == 'CDS':
+                    for exon in gene_exon_positions[feature.genename]:
+                        e = gene_exon_positions[feature.genename][exon]
+                        if e[0] <= feature.start <= e[1] and e[0] <= feature.end <= e[1]:
+                            gene_id = exon + "_CDS"
+                if gene_id is None:
+                    print("No gene id for CDS found", feature, end="")
+                feature.id = gene_id
+                genes[feature.genename].append(feature)
+                
     except IOError:
         print("Failed to load GFF file {}".format(gff))
+        sys.exit()
     
     return genes
+
+def get_gene_name(feature):
+    genename = None
+    if feature.featuretype in ['gene', 'pseudogenic_region']:
+        genename = re.search(r"ID=(.+?)(;|$)", feature.attributes).group(1)
+    else:
+        genename = re.search(r"Parent=(.+?)([;-]|$)", feature.attributes).group(1)
+    return genename
+
+def get_gene_attribute(feature, attribute="ID"):
+    gene_ids = re.search(r'{}=(.+?)(;|$)'.format(attribute), feature.attributes)
+    if gene_ids:
+        gene_id = gene_ids.group(1)
+    else:
+        gene_id = None
+    return gene_id
+
 
 def open_output_database(output):
     try:
@@ -195,15 +299,17 @@ def get_parts(scaffold, start, end, genome):
         slice_end = min(part.oldend, end)
         slice_length = slice_end - slice_start + 1
         
-        comment = '{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}'.format(part.oldname, part.oldstart, part.oldend, start, end, slice_start, slice_end, part.strand)
         start_offset = slice_start - part.oldstart
         end_offset = part.oldend - slice_end
-        if part.strand == 1 or part.strand == 0:
+        if part.newstart is None:
+            newstart = newend = None
+        elif part.strand == 1 or part.strand == 0:
             newstart = part.newstart + start_offset
             newend = part.newend - end_offset
         elif part.strand == -1:
             newstart = part.newstart + end_offset
             newend = part.newend - start_offset
+
         newpart = Part(part.newname, newstart, newend, part.oldname, part.oldstart, part.oldend, part.strand, part.parttype,
                        Comment(part.oldname, part.oldstart, part.oldend, start, end, slice_start, slice_end, part.strand))
         if part.parttype in ['haplotype', 'gap']:
@@ -370,105 +476,379 @@ def blockmerge(a,b):
         a.comment.start = b.comment.start
         a.comment.slice_start = b.comment.slice_start
 
-def get_gene_name(feature):
-    genename = None
-    if feature.featuretype == 'gene':
-        genename = re.search(r"ID=(.+?);", feature.attributes).group(1)
+def collapse_removed(genome):
+    for scaffold in sorted(genome):
+        rejecttypes = ['haplotype', 'removed']
+        i = 0
+        while i < len(genome[scaffold])-1:
+            parts = sorted(genome[scaffold], key = lambda x: x.oldstart)
+            parti = parts[i]
+            partj = parts[i+1]
+            if parti.oldname == partj.oldname and parti.oldend+1 == partj.oldstart:
+                if parti.parttype in rejecttypes and partj.parttype in rejecttypes:
+                    parti.oldend = partj.oldend
+                    parti.newname = parti.newstart = parti.newend = None
+                    parti.parttype = 'removed'
+                    for k, part in enumerate(genome[scaffold]):
+                        if part == partj:
+                            del genome[scaffold][k]
+                    continue
+            i += 1
+
+def make_output_feature(outstart, outend, feature, new_parts):
+    if outstart is not None and outend is not None:
+        if outstart > outend:
+            outstart, outend = outend, outstart
+        strand = feature.strand
+        if new_parts[0].strand == -1:
+            if feature.strand == '+':
+                strand = '-'
+            elif feature.strand == '-':
+                strand = '+'
+        return GFF(new_parts[0].oldname, feature.source, feature.featuretype, outstart, outend, feature.score, strand, feature.phase, feature.attributes)
     else:
-        genename = re.search(r"Parent=(.+?)[;-]", feature.attributes).group(1)
-    return genename
-    
-def set_feature_status(feature, genename, stats, new_parts, haps):
-    if len(new_parts) == 1 and not haps:
-        if new_parts[0].parttype == 'removed':
-            status = 'removed'
+        return None
+
+def transfer_gff_feature(feature, genome, crossmap=False):
+    output_feature = outstart = outend = status = None
+
+    if crossmap and feature.crossmap:
+        output_feature = GFF(feature.crossmap.scaffold, feature.crossmap.source, feature.crossmap.featuretype, feature.crossmap.start, feature.crossmap.end, feature.crossmap.score, feature.crossmap.strand, feature.crossmap.phase, feature.crossmap.attributes)
+        status = 'crossmap'
+        return output_feature, status
+
+    new_parts, haps = get_parts(feature.scaffold, feature.start, feature.end, genome)
+
+    if not new_parts:
+        if not haps:
+            status = 'missing'
         else:
-            status = 'active'
-    elif not new_parts and len(haps) == 1:
-        status = 'haplotype'
-    elif len(new_parts) == 1 and len(haps) == 1 and new_parts[0].oldname == haps[0].oldname:
-        status = 'overlapped'
-    elif not new_parts and not haps:
-        status = 'missing'
+            status = haps[0].parttype
+    elif len(new_parts) == 1 and not haps:
+        np = new_parts[0]
+        if 'removed' not in np.parttype:
+            outstart, outend = new_parts[0].oldstart, new_parts[0].oldend
+            status = 'ok'
+        else:
+            status = 'removed'
     else:
-        status = 'broken'
-    stats[genename][status] += 1
-    return genename
+        scaffolds = {}
+        for part in new_parts:
+            if 'removed' in part.parttype:
+                continue
+            if part.newstart <= feature.start <= part.newend:
+                outstart = part.oldstart if part.strand == 1 else part.oldend
+                scaffolds[part.oldname] = 1
+            if part.newstart <= feature.end <= part.newend:
+                outend = part.oldend if part.strand == 1 else part.oldstart
+                scaffolds[part.oldname] = 1
+        if outstart is not None and outend is not None:
+            status = 'ok'
+        if len(scaffolds) > 1:
+            outstart = outend = None
+            status =  'multiscaffold'
+        if feature.featuretype == 'CDS':    # Do not allow CDSs to span multiple parts, but try to find a CrossMap hit
+            outstart = outend = None
+            status = 'broken'
+        
+    output_feature = make_output_feature(outstart, outend, feature, new_parts)
+    
+    if output_feature is None and feature.crossmap:
+        output_feature = GFF(feature.crossmap.scaffold, feature.crossmap.source, feature.crossmap.featuretype, feature.crossmap.start, feature.crossmap.end, feature.crossmap.score, feature.crossmap.strand, feature.crossmap.phase, feature.crossmap.attributes)
+        status = 'crossmap'
 
-def get_gene_status(stats):
-    if len(stats) == 1 and 'missing' in stats:
-        status = 'missing'
-    elif 'broken' in stats or 'overlapped' in stats or 'missing' in stats:
-        status = 'broken'
-    elif ('haplotype' in stats or 'removed' in stats) and 'active' in stats:
-        status = 'hap_broken'
-    elif 'haplotype' in stats or 'removed' in stats:
-        status = 'removed'
+    if output_feature is None:
+        if status is None:
+            status = 'broken'
+        return feature, status
     else:
-        status = 'ok'
-    return status
+        return output_feature, status
 
+def validate_gene(genefeatures):
+    gene = None
+    RNAs = []
+    exons = defaultdict(list)
+    cdses = defaultdict(list)
+    for feature in genefeatures:
+        if feature.featuretype == 'gene':
+            gene = feature
+        if 'RNA' in feature.featuretype:
+            RNAs.append(feature)
+            RNA_name = get_gene_attribute(feature, "ID")
+        if feature.featuretype == 'exon':
+            exons[RNA_name].append(feature)
+        if feature.featuretype == 'CDS':
+            cdses[RNA_name].append(feature)
+            cds_has_exon = 0
+            cds_parent = get_gene_attribute(feature, "Parent")
+            for exon in exons[RNA_name]:
+                if cds_parent == RNA_name and exon.start <= feature.start <= exon.end and exon.start <= feature.end <= exon.end:
+                    cds_has_exon += 1
+            if cds_has_exon == 0:
+                return 'cds_not_in_exon'
 
-def transfer_gff_feature(feature, new_parts, haps):
-    part = new_parts[0] if new_parts else haps[0]
-    strand = feature.strand
-    if part.strand == -1:
-        if feature.strand == '+':
-            strand = '-'
-        elif feature.strand == '-':
-            strand = '+'
-    output_feature = "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n".format(part.oldname, feature.source, feature.featuretype, part.oldstart, part.oldend, feature.score, strand, feature.phase, feature.attributes)
-    return output_feature        
+    for RNA in cdses:
+        mcds = cdses[RNA]
+        orient = mcds[0].strand
+        for i in range(len(mcds)-1):
+            if orient == '+' and mcds[i].start > mcds[i+1].start or orient == '-' and mcds[i].start < mcds[i+1].start:
+                return 'disordered_cds'
 
-def write_new_gff(genes, genome, output):
+        for cds in cdses[RNA]:
+            for cds2 in cdses[RNA]:
+                if cds is cds2:
+                    continue
+                if cds.start <= cds2.start <= cds.end or cds.start <= cds2.end <= cds.end:
+                    return 'cds_overlap'        
 
-    stats = defaultdict(lambda: defaultdict(int))
-    genefeatures = defaultdict(list)
-    genestatus = {}
+    gene_start = 1000000000000000
+    gene_end   = -1
+    for exon_parent in exons:
+        scaffold = exons[exon_parent][0].scaffold
+        RNA_start = min(exon.start for exon in exons[exon_parent])
+        RNA_end   = max(exon.end   for exon in exons[exon_parent])
+        gene_start = min(RNA_start, gene_start)
+        gene_end   = max(RNA_end, gene_end)
     
-    gfffile = open(output + ".gff", 'w')
-    removefile = open(output + '_removed.gff', 'w')
-    brokenfile = open(output + '_broken.gff', 'w')
+        for RNA in RNAs:
+            RNA_id = get_gene_attribute(RNA, "ID")
+            if RNA_id != exon_parent:
+                continue
+            if RNA.scaffold != scaffold:
+                RNA.scaffold = scaffold
+            if RNA_start != RNA.start:
+                RNA.start = RNA_start
+            if RNA_end != RNA.end:
+                RNA.end = RNA_end
+    if gene:
+        if gene.scaffold != scaffold:
+            gene.scaffold = scaffold
+        if gene_start != gene.start:
+            gene.start = gene_start
+        if gene_end != gene.end:
+            gene.end = gene_end
+
+    return 'ok'
+
+class ValidRNA:
+    def __init__(self, name, cdses, cds_lengths, start_ok, stop_ok, extra_stops, sequence):
+        self.name = name
+        self.cdses = cdses
+        self.cds_lengths = cds_lengths
+        self.start_ok = start_ok
+        self.stop_ok = stop_ok
+        self.extra_stops = extra_stops
+        self.sequence = sequence
     
-    genename = None
-    for feature in genes:
-        new_parts, haps = get_parts(feature.scaffold, feature.start, feature.end, genome)
-        genename = get_gene_name(feature)
-        genefeatures[genename].append((feature, new_parts, haps))
-        if feature.featuretype != 'gene' and 'RNA' not in feature.featuretype:
-            set_feature_status(feature, genename, stats, new_parts, haps)
+    def __repr__(self):
+        return '{}\t{}\t{}\t{}\t{}\t{}'.format(self.name, self.cdses, self.cds_lengths, self.start_ok, self.stop_ok, self.extra_stops)
 
-    genestats = defaultdict(int)
-    genetypes = {}
-    for gene in stats:
+def validate_protein(features, genome):
+    stop_codons = ['TAA','TAG','TGA']
+    
+    valid_mRNAs = []
+    mrnas = defaultdict(list)
+    for feature in features:
+        if feature.featuretype == 'mRNA':
+            mrna_name = get_gene_attribute(feature, "ID")
+        if feature.featuretype == 'CDS':
+            mrnas[mrna_name].append(feature)
 
-        statuses = sorted(stats[gene].keys())
-        genetype = '_'.join(statuses)
-        genetypecounts = '_'.join([str(stats[gene][x]) for x in statuses])
-        
-        if genetype not in genetypes:
-            genetypes[genetype] = 0
-        genetypes[genetype] += 1
-        status = get_gene_status(stats[gene])
-        genestats[status] += 1
-        
-        for feature in genefeatures[gene]:
-            if feature[0].featuretype == 'gene':
-                feature[0].attributes += 'Note={}:{}'.format(genetype, genetypecounts)
-            if status == 'ok':
-                output_feature = transfer_gff_feature(feature[0], feature[1], feature[2])
-                gfffile.write(output_feature)
-            elif status in ['removed', 'missing']:
-                removefile.write(repr(feature[0])) # Haplotypes and removed genes
-            elif status in ['broken', 'hap_broken']:
-                brokenfile.write(repr(feature[0]))
+    for mrna in sorted(mrnas):
+        seqrecord = None
+        cds_lengths = []
+        for cds in mrnas[mrna]:
+            orientation = cds.strand
+            cds_lengths.append(cds.end-cds.start+1)
+            cds_seq = genome[cds.scaffold][(cds.start-1):cds.end]
+            if cds.strand == '-':
+                cds_seq = cds_seq.reverse_complement(id=True, name=True, description=True)
+            if not seqrecord:
+                seqrecord = cds_seq
             else:
-                print("No status for {}".format(gene))
+                seqrecord += cds_seq
+        
+        start_ok = stop_ok = False
+        extra_stops = 0
+        if seqrecord[:3].seq == 'ATG':
+            start_ok = True
+        if seqrecord[-3:].seq in stop_codons:
+            stop_ok = True
+        extra_stops = 0
+        for i in range(0, len(seqrecord)-3, 3):
+            if seqrecord[i:i+3].seq in stop_codons:
+                extra_stops += 1
+        
+        valid_mRNAs.append(ValidRNA(mrna, len(mrnas[mrna]),cds_lengths, start_ok, stop_ok, extra_stops, seqrecord.seq))
+        
+    return valid_mRNAs
+
+def compare_proteins(genename, genes, output_features, oldseqs, newseqs):
+    if oldseqs is None or newseqs is None:
+        return 'ok'
+    old_RNAs = validate_protein(genes[genename], oldseqs)
+    new_RNAs = validate_protein(output_features, newseqs)
+    if len(old_RNAs) != len(new_RNAs):
+        return 'different_RNA_number'
+    for i in range(len(old_RNAs)):
+        o = old_RNAs[i]
+        n = new_RNAs[i]
+        if o.cdses != n.cdses:
+            return 'different_CDS_number'
+        for l in range(len(o.cds_lengths)):
+            if o.cds_lengths[l] != n.cds_lengths[l]:
+                return 'CDS_length_mismatch'
+        if o.start_ok != n.start_ok:
+            return 'bad_start_codon'
+        if o.stop_ok != n.stop_ok:
+            return 'bad_stop_codon'
+        if o.extra_stops < n.extra_stops:
+            return 'extra_stop_codons'    
+    return 'ok'
+
+def get_output_features(gene, genetypes, genome, crossmap=False):
+    output_features = []
+    status = defaultdict(int)
+    for feature in gene:
+        output_feature, outstatus = transfer_gff_feature(feature, genome, crossmap)
+        output_features.append(output_feature)
+        if isinstance(output_feature, GFF) and output_feature.featuretype not in ['gene', 'mRNA']:
+            status[outstatus] += 1
+
+    statuses = sorted(status.keys())
+    genetype = '_'.join(statuses)
+    genetypes[genetype] += 1
+    return output_features, genetype
+
+def get_gene_status(genetype, genestats=None):
+    if genetype == 'missing':
+        gene_status = 'missing'
+    elif 'crossmap-removed' in genetype:
+        gene_status = 'removed'
+    elif genetype in ['disordered_cds', 'cds_overlap', 'extra_stop_codons', 'bad_start_codon', 'bad_stop_codon', 'cds_not_in_exon']:
+        gene_status = 'broken'
+    elif 'broken' in genetype or 'multiscaffold' in genetype or 'missing' in genetype:
+        gene_status = 'broken'
+    elif 'ok' in genetype and ('haplotype' in genetype or 'gap' in genetype or 'removed' in genetype):
+        gene_status = 'hap_broken'
+    elif 'haplotype' in genetype or 'gap' in genetype or 'removed' in genetype:
+        gene_status = 'removed'
+    else:
+        gene_status = 'ok'
+
+    if genestats is not None:
+        genestats[gene_status] += 1
+
+    return gene_status
+
+def try_validation(output_features, genename, genes, oldseqs, newseqs):
+        
+    scaffolds = defaultdict(int)
+    for of in output_features:
+        if isinstance(of, GFF) and of.featuretype not in ['gene', 'mRNA']:
+            scaffolds[of.scaffold] = 1
+
+    if len(scaffolds) > 1:
+        return 'multiscaffold'
+
+    validgene = validate_gene(output_features)
+    if validgene != 'ok':
+        return validgene
+
+    validprotein = compare_proteins(genename, genes, output_features, oldseqs, newseqs)    
+    return validprotein
+    return 'ok'
+
+def transfer_gene(genename, genes, genetypes, genestats, genes_by_scaffold, gene_starts, genome, oldseqs, newseqs, brokenfile, removefile):
+    
+    output_features, genetype = get_output_features(genes[genename], genetypes, genome)    
+    genestatus = get_gene_status(genetype, genestats)
+
+    if genestatus is not 'ok':
+        write_rejected_gene(genename, genestatus, genes, brokenfile, removefile)
+        return
+
+    validstatus = try_validation(output_features, genename, genes, oldseqs, newseqs)
+
+    if validstatus != 'ok':
+        genetypes[genetype] -= 1
+        output_features, genetype = get_output_features(genes[genename], genetypes, genome, True)
+        validstatus = try_validation(output_features, genename, genes, oldseqs, newseqs)
+        if validstatus != 'ok':
+            reject_gene(validstatus, genename, genetype, genestatus, genetypes, genestats, genes, brokenfile, removefile)
+            return
+    
+    for of in output_features:
+        if 'gene' in of.featuretype or 'pseudogenic_region' in of.featuretype:
+            gene_starts[genename] = of.start
+        genes_by_scaffold[of.scaffold][genename].append(of)
+
+    return
+
+
+def reject_gene(reason, genename, genetype, genestatus, genetypes, genestats, genes, brokenfile, removefile):
+    
+    genestats[genestatus] -= 1
+    
+    newstatus = 'broken'
+    if genetype == 'crossmap':
+        newstatus = 'removed'
+        reason = reason+'-crossmap-removed'
+
+    genestats[newstatus] += 1
+    genetypes[genetype] -= 1
+    genetypes[reason] += 1
+
+    write_rejected_gene(genename, newstatus, genes, brokenfile, removefile)
+
+def write_rejected_gene(genename, genestatus, genes, brokenfile, removefile):    
+    for feature in genes[genename]:
+        if genestatus in ['broken', 'hap_broken']:
+            brokenfile.write(repr(feature))
+        elif genestatus in ['missing', 'removed']:
+            removefile.write(repr(feature))
+
+
+def write_ok_gff(output, genes_by_scaffold, gene_starts, newseqs):
+    gfffile = open(output + ".gff", 'w')
+    gfffile.write("##gff-version 3\n")
+
+    if newseqs:
+        for scaffold in newseqs:
+            gfffile.write("##sequence-region {} 1 {}\n".format(scaffold, len(newseqs[scaffold].seq)))
+        
+    for scaffold in sorted(genes_by_scaffold):
+        for genename in sorted(genes_by_scaffold[scaffold], key = lambda x: gene_starts[x]):
+            for feature in genes_by_scaffold[scaffold][genename]:
+                gfffile.write(repr(feature))
 
     gfffile.close()
+
+def write_new_gff(genes, genome, oldseqs, newseqs, output):
+
+    genestats = defaultdict(int)
+    genetypes = defaultdict(int)
+    genes_by_scaffold = defaultdict(lambda: defaultdict(list))
+    gene_starts = defaultdict(int)
+
+    removefile = open(output + '_removed.gff', 'w')
+    removefile.write("##gff-version 3\n")
+    
+    brokenfile = open(output + '_broken.gff', 'w')
+    brokenfile.write("##gff-version 3\n")
+
+    for genename in genes:
+        transfer_gene(genename, genes, genetypes, genestats, genes_by_scaffold, gene_starts, genome, oldseqs, newseqs, brokenfile, removefile)
+
     removefile.close()
     brokenfile.close()
+
+    write_ok_gff(output, genes_by_scaffold, gene_starts, newseqs)
+
+    print_gene_stats(genestats, genetypes)
     
+
+def print_gene_stats(genestats, genetypes):
     total = sum(genestats.values())
     print_stat("OK", genestats['ok'], total)
     print_stat("Removed", genestats['removed'], total)
@@ -477,11 +857,20 @@ def write_new_gff(genes, genome, output):
     print_stat("Missing", genestats['missing'], total)
     print("Total   genes:\t{}".format(total))
 
+    type_genestats = defaultdict(int)
     for genetype in sorted(genetypes, key=genetypes.get, reverse=True):
         print("{}\t{}".format(genetypes[genetype],genetype))
+        type_genestats[get_gene_status(genetype)] += genetypes[genetype]
+    for stat in sorted(type_genestats, key=type_genestats.get, reverse=True):
+        print("{}\t{}".format(type_genestats[stat], stat))
 
 def print_stat(text, stat, total):
-    print ('{:<8} genes:\t{:>5}\t{:5.2f} %'.format(text, stat, stat/total*100))
+    if total > 0:
+        summary = stat/total*100
+    else:
+        summary = 0
+    print ('{:<8} genes:\t{:>5}\t{:5.2f} %'.format(text, stat, summary))
+
 
 def get_args():
     parser = argparse.ArgumentParser(description='''Output new database containing old linkage information on new HaploMerger output
@@ -491,6 +880,9 @@ def get_args():
         -d database
         -e errors
         -o output
+        -c crossmap
+        -f fasta
+        -n newgenomefasta
         ''')
 
     parser.add_argument('-m', '--mergedgenome', type=str, required=True)
@@ -498,18 +890,36 @@ def get_args():
     parser.add_argument('-d', '--database', type=str, required=False)
     parser.add_argument('-e', '--errors', type=str, required=False)
     parser.add_argument('-o', '--output', type=str, required=True)
+    parser.add_argument('-c', '--crossmap', type=str, required=False)
+    parser.add_argument('-f', '--fasta', type=str, required=False)
+    parser.add_argument('-n', '--newgenomefasta', type=str, required=False)
     return parser.parse_args()
 
 if __name__ == '__main__':
     
     args = get_args()
 
-    genome = load_genome(args.mergedgenome)
+    genome = load_transfers(args.mergedgenome)
     
     if args.database:
         linkage_map, ci = load_linkage_map(args.database, args.errors, genome)
         write_new_map(linkage_map, genome, args.output, ci)
 
+    collapse_removed(genome)
+
+    genes = None
     if args.gff:
         genes = load_gff(args.gff)
-        write_new_gff(genes, genome, args.output)
+
+    crossmap = defaultdict(list)
+    if args.crossmap:
+        genes = load_crossmap(args.crossmap)
+
+    if genes:
+        oldseqs = newseqs = None
+        if args.fasta:
+            oldseqs = load_genome(args.fasta)
+        if args.newgenomefasta:
+            newseqs = load_genome(args.newgenomefasta)
+
+        write_new_gff(genes, genome, oldseqs, newseqs, args.output)

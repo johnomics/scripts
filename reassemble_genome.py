@@ -94,12 +94,26 @@ def write_unmapped_scaffold(outblocks, scaffold, stats, unmapped_output, genome)
             for block in dbblocks:
                 genome.revised_db.execute("insert into scaffold_map values (?,?,?,?,?,?)", block)
         if genome.revised_fasta:
-            seq.id = "{}_{}_{}".format(scaffold, scaffold_start, scaffold_end)
-            seq.description = seq.id
+            seq.description = "{}_{}_{}".format(scaffold, scaffold_start, scaffold_end)
+            seq.id = genome.revised + "{:04d}".format(genome.revised_count)
+            genome.revised_count += 1
+            genome.revised_names[seq.description] = seq.id
             SeqIO.write(seq, genome.revised_fasta, "fasta")
     else:
         stats['discard_scaffolds'] += 1
         stats['discard_length'] += scaffold_length
+        for dbblock in dbblocks:
+            dblength = dbblock[5]
+            partslength = 0
+            for newpart in genome.newparts[scaffold]:
+                for origpart in genome.origparts[newpart.oldname]:
+                    if dbblock[2] == origpart.newname and (dbblock[3] <= origpart.newstart <= dbblock[4] or dbblock[3] <= origpart.newend <= dbblock[4]):
+                        if origpart.parttype in ['active', 'retained']:
+                            partslength += origpart.newend - origpart.newstart + 1
+                            origpart.parttype = 'removed'
+            if dblength != partslength:
+                print(scaffold, dblength, partslength, dbblock)
+
 
 def process_unmapped_scaffold(unmapped, scaffold, stats, genome):
 
@@ -141,6 +155,7 @@ def reassemble(chromosomes, genome, args):
     assembly = []
     for chromosome in chromosomes:
         assembly += chromosomes[chromosome].write()
+
 
     assembled_blocks = assembled_length = 0
     for blocklist in assembly:
@@ -205,11 +220,34 @@ def reassemble(chromosomes, genome, args):
 
     if genome.revised_db:
         genome.revised_conn.commit()
-    
-    if genome.revised_tsv:
+
+    if genome.revised_orig_tsv:
         for origscaffold in sorted(genome.origparts):
             for part in genome.origparts[origscaffold]:
-                genome.revised_tsv.write('{}\n'.format(repr(part)))
+                genome.revised_orig_tsv.write('{}\n'.format(repr(part)))
+
+    if genome.revised_names and genome.revised_tsv:
+        for name in sorted(genome.revised_names):
+            parts = name.split('-')
+            newstart = 1
+            for p in parts:
+                pscaffold, pstart, pend = p.split('_')
+                pstart, pend = int(pstart), int(pend)
+                if "Gap" in p:
+                    newstart += pend - pstart + 1
+                    continue
+                if pstart < pend:
+                    strand = 1
+                    outstart, outend = pstart, pend
+                else:
+                    strand = -1
+                    outstart, outend = pend, pstart
+                length = outend - outstart + 1
+                newend = newstart + length - 1
+                output = "{}\t{}\t{}\t{}\t{}\t{}\t{}\tactive\n".format(pscaffold, outstart, outend, genome.revised_names[name], newstart, newend, strand)
+                genome.revised_tsv.write(output)
+                newstart = newend + 1
+
 
     print("Removed {} unmapped offcuts, length {}".format(offcut_blocks, offcut_length))
     if unmapped_stats['scaffold_length'] != unmapped_stats['length']:
@@ -240,19 +278,20 @@ def output(assembly, chromosomes, revised):
     print("Blocks:{}\t".format(blocks), stats.genome(scaffold_lengths))
     
     sm = open(revised+'_scaffold_map.tsv', 'w')
-    sm.write("Chromosome\tPool\tType\tID\tLength\n")
+    sm.write("Chromosome\tPool\tType\tID\tScaffold\tLength\n")
 
     cm = open(revised+'_chromosome_map.tsv', 'w')
     cm.write("Chromosome\tcM\tStart\tEnd\tLength\n")
     for c in chromosomes:
         for mapline in chromosomes[c].scaffold_map:
-            sm.write(mapline)
+            chromosome, pool, pooltype, poolid, scaffold, length = mapline.split('\t')
+            scaffold = genome.revised_names[scaffold]
+            sm.write('\t'.join([chromosome, pool, pooltype, poolid, scaffold, length]))
         for mapline in chromosomes[c].chromosome_map:
             cm.write(mapline)
     sm.close()
     cm.close()
-    
-    
+
 
 def get_args():
     parser = argparse.ArgumentParser(description='''Output new FASTA file based on linkage map.
@@ -265,7 +304,8 @@ def get_args():
         -r revised
         -a haplomerger
         -o original TSV
-        -p prefix''')
+        -p prefix
+        -n nodes''')
 
     parser.add_argument('-d', '--database', type=str, required=True)
     parser.add_argument('-f', '--fasta', type=str, required=True)
@@ -276,9 +316,9 @@ def get_args():
     parser.add_argument('-a', '--haplomerger', type=str)
     parser.add_argument('-o', '--original', type=str)
     parser.add_argument('-p', '--prefix', type=str)
+    parser.add_argument('-n', '--nodes', type=str)
 
     return parser.parse_args()
-
 
 if __name__ == '__main__':
     

@@ -19,26 +19,26 @@ class GenomeData:
         self.haplotypes = {}
         self.refuse = []
 
-        print("Loading genome...")
         
         self.sequences = self.load_genome(args.fasta)
         
-        print("Loading annotation...")
         self.load_annotation(args.gff)
         
         conn = self.open_database(args.database)
         self.db = conn.cursor()
         
-        print("Loading blocks...")
         self.blocks = self.load_blocks()
         
-        print("Loading errors...")
         self.errors = self.load_errors(args.errors)
-        
-        print("Cleaning assembly...")
-        self.origparts, self.newparts, self.offcuts = self.clean_assembly(self.sequences, self.blocks, args.original, args.prefix)
 
-        self.revised, self.revised_fasta, self.revised_tsv, self.revised_db, self.revised_conn = self.open_revised(args.revised)
+        self.nodes = self.load_nodes(args.nodes)
+        
+        self.revised, self.revised_fasta, self.revised_tsv, self.revised_orig_tsv, self.revised_db, self.revised_conn = self.open_revised(args.revised)
+        
+        self.revised_names = {}
+        self.revised_count = 1
+        
+        self.origparts, self.newparts, self.offcuts = self.clean_assembly(args.original, args.prefix)
 
         self.gapnum = 1
         
@@ -51,18 +51,20 @@ class GenomeData:
     def open_revised(self, revised):
         fasta = None
         tsv = None
+        orig_tsv = None
         db = None
         rconn = None
         if revised:
             fasta = open(revised+".fa", 'w')
             tsv = open(revised+".tsv", 'w')
+            orig_tsv = open(revised+"_orig.tsv", 'w')
             rconn = sql.connect(revised+".db")
             db = rconn.cursor()
             db.execute('drop table if exists scaffold_map')
             db.execute('''create table scaffold_map
                          (chromosome integer, cm real, scaffold text, start integer, end integer, length integer)''')
 
-        return revised, fasta, tsv, db, rconn
+        return revised, fasta, tsv, orig_tsv, db, rconn
 
     def open_database(self, dbfile):
         try:
@@ -77,6 +79,7 @@ class GenomeData:
         return conn
 
     def load_genome(self, fasta):
+        print("Loading genome...")
         try:
             with open(fasta, 'r') as f:
                 sequences = SeqIO.to_dict(SeqIO.parse(f, "fasta"))
@@ -93,6 +96,7 @@ class GenomeData:
 
 
     def load_annotation(self, gff):
+        print("Loading annotation...")
         try:
             with open(gff, 'r') as g:
                 for feature in g:
@@ -113,6 +117,8 @@ class GenomeData:
             sys.exit()
 
     def load_blocks(self):
+        print("Loading blocks...")
+        
         blocks = defaultdict(lambda:defaultdict(Block))
         block_num = 0
         genome_length = 0
@@ -149,6 +155,7 @@ class GenomeData:
         return blocks
 
     def load_errors(self, errorfile):
+        print("Loading errors...")
         errors = {}
         if not errorfile:
             return errors
@@ -167,7 +174,57 @@ class GenomeData:
     
         return errors
 
-    def clean_assembly(self, sequences, blocks, tsv, prefix):
+    def load_nodes(self, nodesfile):
+        print("Loading nodes...")
+                
+        nodes = defaultdict(lambda:defaultdict(list))
+        if not nodesfile:
+            return nodes
+        
+        try:
+            if isfile(nodesfile):
+                with open(nodesfile) as n:
+                    for line in n:
+                        if line.startswith("#"):
+                            continue
+                        f = line.rstrip().split('\t')
+                        if len(f) == 1 or f[0] == f[1]:
+                            continue
+                        nodes[f[0]][f[1]].append(Node(f[0], f[1], int(f[5])+1, int(f[6]), int(f[7]), int(f[10])+1, int(f[11]), int(f[12]), int(f[9]), self.sequences))
+            else:
+                raise IOError
+        except IOError:
+            print("Can't open nodes file", nodesfile)
+            sys.exit()
+
+
+        for tscaffold in list(nodes):
+            if tscaffold.endswith("F"):
+                continue
+            for qscaffold in list(nodes[tscaffold]):
+                if qscaffold.endswith("F") and qscaffold in nodes:
+                    pbqscaffolds = [x for x in nodes[qscaffold].keys() if not x.endswith("F") and x != tscaffold]
+                    if not pbqscaffolds:
+                        continue
+                    for node in nodes[tscaffold][qscaffold]:
+                        for pbqscaffold in pbqscaffolds:
+                            if pbqscaffold == tscaffold:
+                                continue
+                            for pbnode in nodes[qscaffold][pbqscaffold]:
+                                nodes[tscaffold][pbqscaffold].append(Node(tscaffold, pbqscaffold, node.tstart, node.tlen, node.tend, pbnode.qstart, pbnode.qlen, pbnode.qend, '0', self.sequences,
+                                                                          qscaffold, node.qstart, node.qlen, node.qend, node.direction, pbnode.tstart, pbnode.tlen, pbnode.tend, pbnode.direction))
+
+        for tscaffold in list(nodes):
+            if tscaffold.endswith("F"):
+                del nodes[tscaffold]
+            for qscaffold in list(nodes[tscaffold]):
+                if qscaffold.endswith("F"):
+                    del nodes[tscaffold][qscaffold]
+
+        return nodes
+        
+    def clean_assembly(self, tsv, prefix):
+        print("Cleaning assembly...")
 
         origparts = defaultdict(list)
         newparts = defaultdict(list)
@@ -187,12 +244,12 @@ class GenomeData:
             print("Can't open original TSV file!")
             sys.exit()
 
-        self.delete_scaffolding_only(newparts, origparts, prefix, sequences, blocks)
+        self.delete_scaffolding_only(newparts, origparts, prefix)
         offcuts = self.mark_offcuts(newparts, origparts, prefix)
                 
         return origparts, newparts, offcuts
     
-    def delete_scaffolding_only(self, newparts, origparts, prefix, sequences, blocks):
+    def delete_scaffolding_only(self, newparts, origparts, prefix):
         deleted = 0
         deleted_length = 0
         for new in newparts:
@@ -200,23 +257,19 @@ class GenomeData:
             for part in newparts[new]:
                 if prefix not in part.oldname:
                     scaffolding_only = False
-            if scaffolding_only and new in sequences:
+            if scaffolding_only and new in self.sequences:
                 deleted += 1
-                deleted_length += len(sequences[new])
-                del sequences[new]
-                del blocks[new]
+                deleted_length += len(self.sequences[new])
+                del self.sequences[new]
+                del self.blocks[new]
                 for part in newparts[new]:
-                    if part.parttype == 'haplotype':
-                        continue
-                    for oldpart in origparts[part.oldname]:
-                        if part == oldpart:
-                            oldpart.parttype = 'removed'
+                    if part.parttype not in ['haplotype', 'gap']:
+                        part.parttype = 'removed'
         
         print("Cleaned up {} scaffolds, length {}".format(deleted, deleted_length))
-
+        
     def mark_offcuts(self, newparts, origparts, prefix):
         offcuts = defaultdict(lambda: defaultdict(list))
-        retained_scaffolds = []
         for new in newparts:
             newpart = newparts[new][0]
             if len(newparts[new]) == 1 and prefix not in newpart.oldname and newpart.parttype == 'retained':
@@ -312,6 +365,126 @@ class Block:
     def add_marker(self, chromosome, cm):
         self.chromosome = str(chromosome)
         self.cm = cm
+
+class Node:
+    def __init__(self, tscaffold, qscaffold, tstart, tlen, tend, qstart, qlen, qend, direction, sequences, *args):
+        self.tscaffold = tscaffold
+        self.qscaffold = qscaffold
+        self.tstart = tstart
+        self.tlen = tlen
+        self.tend = tend
+        self.qstart = qstart
+        self.qlen = qlen
+        self.qend = qend
+        self.direction = int(direction)
+        self.status = ''
+        
+        self.tstartpc = self.tlenpc = self.tendpc = self.qstartpc = self.qlenpc = self.qendpc = self.tscflen = self.qscflen = None
+        if self.tscaffold in sequences:
+            self.tscflen = len(sequences[self.tscaffold])
+        if self.qscaffold in sequences:
+            self.qscflen = len(sequences[self.qscaffold])
+
+        if self.tscflen and self.qscflen:
+            self.set_pc(1, self.tscflen, 1, self.qscflen)
+
+        self.pbscaffold = None
+        if args:
+            self.pbscaffold = args[0]
+            self.pbtstart, self.pbtlen, self.pbtend, self.pbtdir   = args[1], args[2], args[3], args[4]
+            self.pbqstart, self.pbqlen, self.pbqend, self.pbqdir   = args[5], args[6], args[7], args[8]
+            self.direction = self.pbtdir * self.pbqdir
+
+    def set_pc(self, t_raftstart, t_raftend, q_raftstart, q_raftend):
+        tlen = t_raftend - t_raftstart + 1
+        qlen = q_raftend - q_raftstart + 1
+        self.tstartpc = (self.tstart - t_raftstart + 1) / tlen * 100
+        self.tlenpc   =  self.tlen                      / tlen * 100
+        self.tendpc   = (self.tend   - t_raftstart)     / tlen * 100
+        self.qstartpc = (self.qstart - q_raftstart + 1) / qlen * 100
+        self.qlenpc   =  self.qlen   / qlen * 100
+        self.qendpc   = (self.qend   - q_raftstart + 1) / qlen * 100
+        
+    def set_status(self, t_start=None, t_end=None, q_start=None, q_end=None):
+        if self.tscflen and not (t_start and t_end):
+            t_start = 1
+            t_end = self.tscflen
+        if self.qscflen and not (q_start and q_end):
+            q_start = 1
+            q_end = self.qscflen
+
+        if t_start and q_start:
+            t_start, t_end = order(t_start, t_end)
+            q_start, q_end = order(q_start, q_end)
+            
+            self.set_pc(t_start, t_end, q_start, q_end)
+            
+            t_before = self.tstart - t_start
+            t_after  = t_end - self.tend
+            q_before = self.qstart - q_start
+            q_after  = q_end - self.qend
+            
+            if self.pbscaffold is None:
+                if self.direction == -1:
+                    q_before, q_after = q_after, q_before
+                
+                if t_before < q_before and t_after < q_after:
+                    self.status = 'within'
+                    return
+                
+                if self.direction == 1:
+                    if self.tstartpc < 10 and self.qendpc > 90:
+                        self.status = 'connect_bf_af'
+                    elif self.tendpc > 90 and self.qstartpc < 10:
+                        self.status = 'connect_af_bf'
+                elif self.direction == -1:
+                    if self.tstartpc < 10 and self.qstartpc < 10:
+                        self.status = 'connect_br_af'
+                    elif self.tendpc > 90 and self.qendpc > 90:
+                        self.status = 'connect_af_br'
+                        return
+                return
+            else:
+                if self.pbtdir == -1:
+                    t_before, t_after = t_after, t_before
+                if self.pbqdir == -1:
+                    q_before, q_after = q_after, q_before
+                if self.pbtstart < self.pbtend < self.pbqstart < self.pbqend:
+                    if self.pbtdir == 1 and self.pbqdir == 1:
+                        self.status = 'connect_af_bf'
+                    elif self.pbtdir == -1 and self.pbqdir == 1:
+                        self.status = 'connect_ar_bf'
+                    elif self.pbtdir == 1 and self.pbqdir == -1:
+                        self.status = 'connect_af_br'
+                    else:
+                        self.status = 'connect_ar_br'
+                    return
+                elif self.pbqstart < self.pbqend < self.pbtstart < self.pbtend:
+                    if self.pbtdir == 1 and self.pbqdir == 1:
+                        self.status = 'connect_bf_af'
+                    elif self.pbtdir == -1 and self.pbqdir == 1:
+                        self.status = 'connect_bf_ar'
+                    elif self.pbtdir == 1 and self.pbqdir == -1:
+                        self.status = 'connect_br_af'
+                    else:
+                        self.status = 'connect_br_ar'
+                    return
+                
+        self.status = ''
+
+    def __repr__(self):
+        output = "{}\t{}\t{}\t{}\t{:.1f}\t{:.1f}\t{:.1f}\t{}\t{}\t{}\t{}\t{:.1f}\t{:.1f}\t{:.1f}\t{}\t{}".format(
+                self.tscaffold, self.tstart, self.tlen, self.tend, self.tstartpc, self.tlenpc, self.tendpc,
+                self.qscaffold, self.qstart, self.qlen, self.qend, self.qstartpc, self.qlenpc, self.qendpc, self.direction, self.status)
+        if self.pbscaffold:
+            output += "\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}".format(self.pbscaffold, self.pbtstart, self.pbtlen, self.pbtend, self.pbtdir, self.pbqstart, self.pbqlen, self.pbqend, self.pbqdir)
+        return output
+
+def order(start, end):
+    if start < end:
+        return start, end
+    else:
+        return end, start
 
 if __name__ == '__main__':
     pass
