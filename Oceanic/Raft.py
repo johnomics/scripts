@@ -72,7 +72,11 @@ class Raft:
     @property
     def scaffold(self):
         return '_'.join(self.scaffolds)
-        
+    
+    def scaffold_range(self, scaffold):
+        scaffold_sbs = [m for m in self.manifest if m.scaffold == scaffold]
+        return scaffold_sbs[0].start, scaffold_sbs[-1].end
+
     @property
     def name(self):
         summarylist = []

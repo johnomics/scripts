@@ -406,6 +406,7 @@ class Node:
         self.qendpc   = (self.qend   - q_raftstart + 1) / qlen * 100
         
     def set_status(self, t_start=None, t_end=None, q_start=None, q_end=None):
+        self.status = ''
         if self.tscflen and not (t_start and t_end):
             t_start = 1
             t_end = self.tscflen
@@ -431,7 +432,7 @@ class Node:
                 if t_before < q_before and t_after < q_after:
                     self.status = 'within'
                     return
-                
+
                 if self.direction == 1:
                     if self.tstartpc < 10 and self.qendpc > 90:
                         self.status = 'connect_bf_af'
@@ -442,13 +443,8 @@ class Node:
                         self.status = 'connect_br_af'
                     elif self.tendpc > 90 and self.qendpc > 90:
                         self.status = 'connect_af_br'
-                        return
                 return
             else:
-                if self.pbtdir == -1:
-                    t_before, t_after = t_after, t_before
-                if self.pbqdir == -1:
-                    q_before, q_after = q_after, q_before
                 if self.pbtstart < self.pbtend < self.pbqstart < self.pbqend:
                     if self.pbtdir == 1 and self.pbqdir == 1:
                         self.status = 'connect_af_bf'

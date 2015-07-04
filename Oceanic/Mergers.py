@@ -299,10 +299,10 @@ class NodeMerge(Merger):
     def bridge(self, a, b):
         i, j = self.get_pool_positions(self.this, self.other)
 
-        if self.this.pooltype == 'ok' and self.other.pooltype == 'ok':
+        if self.this.pooltype == 'ok' and self.other.pooltype == 'ok': # Will be handled by OKMerge
             return False
 
-        if j not in [i, i+1]:
+        if j not in [i, i+1]:   # Only consider same pool or neighbouring pools
             return False
 
         if self.this.pooltype == 'ok':
@@ -314,41 +314,44 @@ class NodeMerge(Merger):
             anchor_raft, floating_raft = b, a
             float_after = False
         else:
-            return False
+            return False    # Only process pairs with one OK pool
 
         anchor_scaffold = anchor_raft.scaffolds[0]
         if float_after:
             anchor_scaffold = anchor_raft.scaffolds[-1]
-        
+
+        connect_scaffolds = defaultdict(int)
         for floating_scaffold in floating_raft.scaffolds:
+            print(anchor_scaffold, floating_scaffold)
+            print(anchor_pool)
+            print(floating_pool)
+            cnode = None
             directions = {}
-            connect_nodes = []
-            
-            for node in sorted(self.genome.nodes[anchor_scaffold][floating_scaffold], key = lambda x:x.tlen, reverse=True):
-                if len(anchor_raft.scaffolds) == 1:
-                    node.set_status(anchor_raft.start, anchor_raft.end, floating_raft.start, floating_raft.end)
-                else:
-                    node.set_status(1, len(self.genome.sequences[anchor_scaffold]), floating_raft.start, floating_raft.end)
+            for node in sorted(self.genome.nodes[anchor_scaffold][floating_scaffold], key = lambda x:x.tlen, reverse=True): # Longest hit first
+                scaffold_start, scaffold_end = anchor_raft.scaffold_range(anchor_scaffold)
+                node.set_status(scaffold_start, scaffold_end, floating_raft.start, floating_raft.end)
+                print(node)
                 if 'connect' in node.status:
-                    connect_nodes.append(node)
-                directions[node.direction] = 1
-            if len(directions) != 1:
+                    cnode = node
+                    connect_scaffolds[floating_scaffold] = 1
+                    break
+            if not cnode:
                 continue
-            direction = list(directions)[0]
-            reverse_float = direction == -1 and anchor_raft.start < anchor_raft.end or direction == 1 and anchor_raft.start > anchor_raft.end
-            
-            if floating_pool.pooltype == 'orient':
+            reverse_float = anchor_raft.start < anchor_raft.end and cnode.direction == -1 or anchor_raft.start > anchor_raft.end and cnode.direction == 1
+            if floating_pool.pooltype == 'orient': # Reverse if necessary and anchor; OKMerge will take care of the merging
+                print("Oriented!")
                 if reverse_float:
                     floating_raft.reverse()
                 floating_pool.anchored = True
-            else:
-                if connect_nodes:
-                    node = connect_nodes[0]
+                return False
+            elif floating_pool.pooltype == 'order':
+                if cnode:
                     anchor_tip = anchor_raft.end if float_after else anchor_raft.start
-                    if 'connect_a' in node.status and ('af' in node.status and anchor_tip < node.tend or 'ar' in node.status and anchor_tip > node.tstart):
+                    if 'connect_a' in cnode.status and ('af' in cnode.status and anchor_tip < cnode.tend or 'ar' in cnode.status and anchor_tip > cnode.tstart):
                         return False
-                    if 'connect_b' in node.status and ('af' in node.status and anchor_tip > node.tstart or 'ar' in node.status and anchor_tip < node.tend):
+                    if 'connect_b' in cnode.status and ('af' in cnode.status and anchor_tip > cnode.tstart or 'ar' in cnode.status and anchor_tip < cnode.tend):
                         return False
+                        
                     if reverse_float:
                         floating_raft.reverse()
                     newgap = self.genome.add_gap()
@@ -361,6 +364,10 @@ class NodeMerge(Merger):
                     floating_raft.empty()
                     
                     return True
+                else:
+                    return False
+            else:
+                return False
                 
         return False
     

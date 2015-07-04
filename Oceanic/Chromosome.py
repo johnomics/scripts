@@ -220,7 +220,7 @@ class Chromosome:
                             if qscaffold in pool.scaffolds or (i > 0 and qscaffold in self.pools[i-1].scaffolds) or (i < len(self.pools)-1 and qscaffold in self.pools[i+1].scaffolds):
                                 for node in self.genome.nodes[scaffold][qscaffold]:
                                     node.set_status(raft.start, raft.end)
-                                    if node.tlenpc > 50 and node.status == 'within':
+                                    if node.status == 'within' and not self.genome.sequences[scaffold].features and (len(raft) >= 10000 and node.tlenpc > 50 or len(raft) < 10000 and node.tlenpc > 25):
                                         remove = True
                 if remove:
                     raft.discard("within_node_removed")
