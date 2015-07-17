@@ -45,15 +45,16 @@ class Pool:
     
     @property
     def pooltype(self):
+        nonempty_rafts = [r for r in self.rafts if len(r) > 0]
         if self.anchored:
             return 'ok'
         elif len(self.marker_chain) == 1:
-            if len(self.rafts) > 1:
+            if len(nonempty_rafts) > 1:
                 return 'order'
             else:
                 return 'orient'
         else:
-            if len(self.rafts) > 1:
+            if len(nonempty_rafts) > 1:
                 return 'overlap'
             else:
                 return 'ok'
@@ -81,7 +82,9 @@ class Pool:
                         del seen[a]
                         repeat = True
                         break
-        merger.merge()
+                if merger.merge():
+                    del seen[a]
+                    repeat = True
         other.cleanup()
 
 

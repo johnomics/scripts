@@ -560,7 +560,7 @@ def transfer_gff_feature(feature, genome, crossmap=False):
     if output_feature is None:
         if status is None:
             status = 'broken'
-        return feature, status
+        return GFF(feature.scaffold, feature.source, feature.featuretype, feature.start, feature.end, feature.score, feature.strand, feature.phase, feature.attributes), status
     else:
         return output_feature, status
 
@@ -569,6 +569,7 @@ def validate_gene(genefeatures):
     RNAs = []
     exons = defaultdict(list)
     cdses = defaultdict(list)
+    
     for feature in genefeatures:
         if feature.featuretype == 'gene':
             gene = feature
@@ -599,16 +600,19 @@ def validate_gene(genefeatures):
                 if cds is cds2:
                     continue
                 if cds.start <= cds2.start <= cds.end or cds.start <= cds2.end <= cds.end:
-                    return 'cds_overlap'        
+                    return 'cds_overlap'
 
     gene_start = 1000000000000000
     gene_end   = -1
+    exon_strands = defaultdict(int)
     for exon_parent in exons:
         scaffold = exons[exon_parent][0].scaffold
         RNA_start = min(exon.start for exon in exons[exon_parent])
         RNA_end   = max(exon.end   for exon in exons[exon_parent])
         gene_start = min(RNA_start, gene_start)
         gene_end   = max(RNA_end, gene_end)
+        for exon in exons[exon_parent]:
+            exon_strands[exon.strand] += 1
     
         for RNA in RNAs:
             RNA_id = get_gene_attribute(RNA, "ID")
@@ -627,6 +631,14 @@ def validate_gene(genefeatures):
             gene.start = gene_start
         if gene_end != gene.end:
             gene.end = gene_end
+        if len(exon_strands) == 1:
+            strand = list(exon_strands)[0]
+            gene.strand = strand
+            for RNA in RNAs:
+                RNA.strand = strand
+        else:
+            print("Too many strands for exons!")
+            print(genefeatures)
 
     return 'ok'
 
@@ -703,7 +715,7 @@ def compare_proteins(genename, genes, output_features, oldseqs, newseqs):
         if o.stop_ok != n.stop_ok:
             return 'bad_stop_codon'
         if o.extra_stops < n.extra_stops:
-            return 'extra_stop_codons'    
+            return 'extra_stop_codons'
     return 'ok'
 
 def get_output_features(gene, genetypes, genome, crossmap=False):
@@ -755,13 +767,13 @@ def try_validation(output_features, genename, genes, oldseqs, newseqs):
     if validgene != 'ok':
         return validgene
 
-    validprotein = compare_proteins(genename, genes, output_features, oldseqs, newseqs)    
+    validprotein = compare_proteins(genename, genes, output_features, oldseqs, newseqs)
     return validprotein
-    return 'ok'
+
 
 def transfer_gene(genename, genes, genetypes, genestats, genes_by_scaffold, gene_starts, genome, oldseqs, newseqs, brokenfile, removefile):
     
-    output_features, genetype = get_output_features(genes[genename], genetypes, genome)    
+    output_features, genetype = get_output_features(genes[genename], genetypes, genome)
     genestatus = get_gene_status(genetype, genestats)
 
     if genestatus is not 'ok':
@@ -801,7 +813,7 @@ def reject_gene(reason, genename, genetype, genestatus, genetypes, genestats, ge
 
     write_rejected_gene(genename, newstatus, genes, brokenfile, removefile)
 
-def write_rejected_gene(genename, genestatus, genes, brokenfile, removefile):    
+def write_rejected_gene(genename, genestatus, genes, brokenfile, removefile):
     for feature in genes[genename]:
         if genestatus in ['broken', 'hap_broken']:
             brokenfile.write(repr(feature))

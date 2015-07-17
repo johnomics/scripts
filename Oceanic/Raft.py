@@ -20,7 +20,7 @@ class Raft:
     def __repr__(self):
         output = ''
         output += self.scaffold + "\n"
-        if self.marker_chain.chain is None:
+        if not self.marker_chain.ok:
             output += 'To fix:\n'
         if self.scaffold in self.genome.offcuts:
             output += 'Offcut to {}\n'.format(','.join(self.genome.offcuts[self.scaffold]))
@@ -120,15 +120,17 @@ class Raft:
         return length
 
     @property
+    def revised_name(self):
+        if self.name not in self.genome.revised_names:
+            self.genome.revised_names[self.name] = self.genome.revised + "{:02d}".format(int(self.chromosome.name)) + "{:03d}".format(self.chromosome.scaffold_count)
+            self.chromosome.scaffold_count += 1
+        return self.genome.revised_names[self.name]
+
+    @property
     def sequence(self):
         sequence = sum([h.sequence for h in self.hooks], Seq("", generic_dna))
-
-        if self.name not in self.genome.revised_names:
-            self.genome.revised_names[self.name] = self.genome.revised + "{:04d}".format(self.genome.revised_count)
-            self.genome.revised_count += 1
-
-        sequence.id = self.genome.revised_names[self.name]
-        sequence.description = self.name
+        sequence.id = self.revised_name
+        sequence.description = "length={}".format(len(sequence))
 
         return sequence
 
@@ -308,7 +310,7 @@ class Raft:
             SeqIO.write(self.sequence, self.genome.revised_fasta, "fasta")
             for sb in self.manifest:
                 self.chromosome.revised_db.execute("insert into scaffold_map values (?,?,?,?,?,?)",
-                      [self.chromosome.name, sb.cm, sb.scaffold, min(sb.start, sb.end), max(sb.start, sb.end), sb.length])
+                      [self.chromosome.name, '{:.3f}'.format(sb.cm), sb.scaffold, min(sb.start, sb.end), max(sb.start, sb.end), sb.length])
         
         return self.summary()
     
@@ -430,6 +432,7 @@ class Raft:
 class MarkerChain:
     def __init__(self, manifest=None, chain=None):
         self.chain = []
+        self.ok = True
         if manifest:
             for m in manifest:
                 if m.cm != -1:
@@ -440,7 +443,7 @@ class MarkerChain:
             self.chain = chain
 
         if not self.check():
-            self.chain = None
+            self.ok = False
 
     def __getitem__(self, i):
         return self.chain[i]
@@ -456,10 +459,10 @@ class MarkerChain:
         return repr(self.chain)
 
     def __len__(self):
-        if self.chain == None:
-            return 0
-        else:
+        if self.ok:
             return len(self.chain)
+        else:
+            return 0
 
     def __add__(self, other):
         new = self.chain + other.chain

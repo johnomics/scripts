@@ -9,6 +9,7 @@ from . import Mergers as merge
 import multiprocessing
 import sys
 from os.path import isfile
+from math import log
 import sqlite3 as sql
 from collections import defaultdict
 
@@ -16,12 +17,17 @@ class Chromosome:
     def __init__(self, name, genome):
         self.name = str(name)
         self.markers = {}
+        self.new_cms, self.old_cms = self.calculate_real_cms(self.name, genome.db)
         self.set_markers(genome.db)
         self.pools = []
         self.scaffold_map = []
         self.chromosome_map = []
+        self.agp = []
+        self.unmapped_start = 1
+        self.unmapped_part  = 1
         self.genome = genome
         self.mapped_blocks, self.mapped_blocks_length, self.placed_blocks, self.placed_blocks_length = self.set_blocks()
+        self.scaffold_count = 1
         
     def __repr__(self):
         return('\n'.join([self.name, repr(self.pools)]))
@@ -63,6 +69,7 @@ class Chromosome:
         return stats
 
     def set_markers(self, db):
+
         prev_cm = -1
         next_cm = -1
         for cm, in db.execute("select distinct cm from scaffold_map where chromosome={} order by cm".format(self.name)):
@@ -70,21 +77,49 @@ class Chromosome:
             if cm == -1:
                 self.add_marker(-1, -1, -1)
                 continue
-
-            self.add_marker(cm, prev_cm=prev_cm)
+            
+            newcm = self.new_cms[cm]
+            self.add_marker(newcm, prev_cm=prev_cm)
             if prev_cm != -1:
-                self.update_marker(prev_cm, next_cm = cm)
+                self.update_marker(prev_cm, next_cm = newcm)
         
-            prev_cm = cm
+            prev_cm = newcm
+
+
+    def calculate_real_cms(self, chromosome, db):
+        cm_marker = {}
+        for cm, pattern in db.execute("select cm, clean from chromosome_map where chromosome={} group by cm order by cm".format(chromosome)):
+            marker = ''.join([x for x in pattern if x in ['A','B','H']])
+            cm_marker[cm] = marker
+        
+        new_cms = {}
+        new_cms[0.0] = 0.0
+        new_cms[-1]  = -1
+        old_cms = {}
+        old_cms[0.0] = 0.0
+        old_cms[-1]  = -1
+        cmlist = list(sorted(cm_marker))
+        cumul_cm = 0
+        for i in range(1,len(cmlist)):
+            a = cm_marker[cmlist[i-1]]
+            b = cm_marker[cmlist[i]]
+            diff = sum (a[j] != b[j] for j in range(len(a)))
+            ind = len(a)
+            newcm = 25 * log((1+2*diff/ind)/(1-2*diff/ind)) # Kosambi mapping function
+            cumul_cm += newcm
+            outcm = float('{:.3f}'.format(cumul_cm))
+            new_cms[cmlist[i]] = outcm
+            old_cms[outcm] = cmlist[i]
+        return new_cms, old_cms
 
     def set_blocks(self):
         mapped_blocks = mapped_blocks_length = placed_blocks = placed_blocks_length = 0
 
         scaffold_cms = defaultdict(lambda: defaultdict(int))
-        for cm in sorted(self.markers):
+        for newcm in sorted(self.markers):
             cm_blocks = pl.Pool(self)
             cm_block_id = 1
-            statement = "select scaffold, start, end, length from scaffold_map where chromosome={} and cm={} order by scaffold, start, end".format(self.name, cm)
+            statement = "select scaffold, start, end, length from scaffold_map where chromosome={} and cm={} order by scaffold, start, end".format(self.name, self.old_cms[newcm])
             for scaffold, start, end, length in self.genome.db.execute(statement):
                 if scaffold not in self.genome.sequences:
                     continue
@@ -92,18 +127,18 @@ class Chromosome:
                     continue
                 mapped_blocks += 1
                 mapped_blocks_length += length
-                self.genome.blocks[scaffold][start].add_marker(self.name,cm)
+                self.genome.blocks[scaffold][start].add_marker(self.name,newcm)
 
-                scaffold_cms[scaffold][cm] = 1
+                scaffold_cms[scaffold][newcm] = 1
 
-                if cm != -1:
+                if newcm != -1:
                     placed_blocks += 1
                     placed_blocks_length += length
                 
                 cm_blocks.add(r.Raft(cm_block_id, scaffold, start, self))
                 cm_block_id += 1
 
-            if cm != -1:
+            if newcm != -1:
                 self.pools.append(cm_blocks)
 
         return mapped_blocks, mapped_blocks_length, placed_blocks, placed_blocks_length
@@ -130,6 +165,8 @@ class Chromosome:
             scaffolds += pool.write()
         
         self.revised_conn.commit()
+        
+        self.make_summaries()
         
         return scaffolds
 
@@ -262,32 +299,75 @@ class Chromosome:
         print(self)
         print(self.stats)
 
-        self.make_plot()
 
-    def make_plot(self):
+    def make_summaries(self):
         # Data frame for graphical output
+        chrom_sbs = []
+        chrstart = 1
+        chrpart = 1
         for i, pool in enumerate(self.pools):
             k = 1
             for raft in sorted(pool, key=lambda r:r.length, reverse=True):
-                self.scaffold_map.append("{}\t{}\t{}\t{}\t{}\t{}\n".format(self.name, i+1, pool.pooltype, k, raft.name, raft.mappedlength))
+                self.scaffold_map.append("{}\t{}\t{}\t{}\t{}\t{}\n".format(self.name, i+1, pool.pooltype, k, raft.name, raft.length))
+                chrom_sbs += raft.manifest
                 k += 1
-        
-        chrommap = {}
-        for i, pool in enumerate(self.pools):
-            for raft in pool:
-                for sb in raft.manifest:
-                    if sb.cm == -1:
-                        continue
-                    if sb.cm not in chrommap:
-                        chrommap[sb.cm] = 0
-                    chrommap[sb.cm] += sb.length
 
-        cmstart = 1
+                chrend = chrstart + raft.length - 1
+                raft_orientation = '+'
+                if raft.start > raft.end:
+                    raft_orientation = '-'
+                comment = 'anchored'
+                if pool.pooltype == 'orient':
+                    comment = 'unoriented'
+                elif pool.pooltype == 'order':
+                    comment = 'unordered'
+                markers = ' '.join(['{:.3f}'.format(x) for x in sorted(set(raft.marker_chain))]) + ' cM'
+                self.agp.append("{}\t{}\t{}\t{}\tD\t{}\t1\t{}\t{}\t# {}\t{}\n".format("chr" + self.name, chrstart, chrend, chrpart, raft.revised_name, raft.length, raft_orientation, comment, markers))
+                chrpart += 1
+                self.agp.append("{}\t{}\t{}\t{}\tN\t100\tfragment\tno\n".format("chr" + self.name, chrend+1, chrend+100, chrpart))
+                chrom_sbs += [r.SummaryBlock(raft.revised_name + "_Gap", chrend+1, gd.Block(raft.revised_name + "_Gap", chrend+1, chrend+100, self.name, -1), 1)]
+                chrpart += 1
+                chrstart = chrend + 101
+        
+        # Delete final gap
+        del self.agp[-1]
+        del chrom_sbs[-1]
+        
+        chrommap = defaultdict(int)
+        gaps = defaultdict(int)
+        firstgap = 0
+        curgap = 0
+        curcm = -1
+        for sb in chrom_sbs:
+            if sb.cm == -1:
+                if curcm == -1:
+                    firstgap = sb.length
+                else:
+                    curgap += sb.length
+            else:
+                if curcm == sb.cm:
+                    chrommap[curcm] += curgap
+                elif curcm != -1:
+                    gaps[curcm] = curgap
+
+                chrommap[sb.cm] += sb.length
+                curgap = 0
+                curcm = sb.cm
+
+        gaps[curcm] = curgap
+
+        self.chromosome_map.append("{}\t{}\t{}\t{}\t{}\n".format(self.name, -1, 1, firstgap, firstgap))
+        cmstart = firstgap + 1
         for cm in sorted(chrommap):
             cmend = cmstart + chrommap[cm] - 1
-            self.chromosome_map.append("{}\t{}\t{}\t{}\t{}\n".format(self.name, cm, cmstart, cmend, chrommap[cm]))
-            cmstart = cmend + 1
-        
+            self.chromosome_map.append("{}\t{:.3f}\t{}\t{}\t{}\n".format(self.name, cm, cmstart, cmend, chrommap[cm]))
+            if gaps[cm] > 0:
+                gapend = cmend+gaps[cm]
+                self.chromosome_map.append("{}\t{}\t{}\t{}\t{}\n".format(self.name, -1, cmend+1, gapend, gaps[cm]))
+                cmstart = gapend + 1
+            else:
+                cmstart = cmend + 1
+
     def remove_empty_pools(self):
         for i in reversed(range(len(self.pools))):
             self.pools[i].cleanup()

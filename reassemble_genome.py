@@ -65,28 +65,34 @@ def collapse_unmapped_blocks(unmapped, stats):
         i += 1
 
 
-def write_unmapped_scaffold(outblocks, scaffold, stats, unmapped_output, genome):
+def write_unmapped_scaffold(outblocks, scaffold, stats, unmapped_output, genome, chromosomes):
 
     seq = Seq('')
     dbblocks = []
     mapped = False
+    scaffold_chromosomes = []
     for block in outblocks:
         if genome.revised_db:
-            dbblocks.append([block.chromosome, block.cm, scaffold, block.start, block.end, block.length])
-            if block.chromosome != '0':
-                mapped = True
+            dbblocks.append([block.chromosome, block.cm, scaffold, block.start, block.end, block.length])                
         if genome.revised_fasta:
             seq += genome.sequences[scaffold][block.start-1:block.end]
+        if block.chromosome != '0':
+            scaffold_chromosomes.append(int(block.chromosome))
 
 
     stats['scaffolds'] += 1
 
+    scaffold_chromosomes = set(scaffold_chromosomes)
     scaffold_start, scaffold_end = outblocks[0].start, outblocks[-1].end
     scaffold_length = scaffold_end - scaffold_start + 1
     stats['scaffold_length'] += scaffold_length
 
-    if seq.features or mapped and len(dbblocks) > 1:
+    if seq.features or len(scaffold_chromosomes) > 0 and len(dbblocks) > 1:
         unmapped_output.append([gd.Block(scaffold, scaffold_start, scaffold_end)])
+
+        scaffold_name = genome.revised + "{:05d}".format(genome.revised_count)
+        genome.revised_count += 1
+        genome.revised_names["{}_{}_{}".format(scaffold, scaffold_start, scaffold_end)] = scaffold_name
 
         stats['written_scaffolds'] += 1
         stats['written_length'] += scaffold_length
@@ -94,11 +100,18 @@ def write_unmapped_scaffold(outblocks, scaffold, stats, unmapped_output, genome)
             for block in dbblocks:
                 genome.revised_db.execute("insert into scaffold_map values (?,?,?,?,?,?)", block)
         if genome.revised_fasta:
-            seq.description = "{}_{}_{}".format(scaffold, scaffold_start, scaffold_end)
-            seq.id = genome.revised + "{:04d}".format(genome.revised_count)
-            genome.revised_count += 1
-            genome.revised_names[seq.description] = seq.id
+            seq.description = "length={}".format(len(seq))
+            seq.id = scaffold_name
             SeqIO.write(seq, genome.revised_fasta, "fasta")
+
+        if len(scaffold_chromosomes) > 0:
+            chrom = next(iter(scaffold_chromosomes))
+            chr_unmapped_end = chromosomes[chrom].unmapped_start + scaffold_length - 1 
+            chromosomes[chrom].agp.append("{}\t{}\t{}\t{}\tD\t{}\t1\t{}\t+\n".format("chr{}_unmapped".format(chrom), chromosomes[chrom].unmapped_start, chr_unmapped_end, chromosomes[chrom].unmapped_part, scaffold_name, scaffold_length))
+            chromosomes[chrom].unmapped_part += 1
+            chromosomes[chrom].agp.append("{}\t{}\t{}\t{}\tN\t100\tfragment\tno\n".format("chr{}_unmapped".format(chrom), chr_unmapped_end+1, chr_unmapped_end+100, chromosomes[chrom].unmapped_part))
+            chromosomes[chrom].unmapped_part += 1
+            chromosomes[chrom].unmapped_start = chr_unmapped_end + 101
     else:
         stats['discard_scaffolds'] += 1
         stats['discard_length'] += scaffold_length
@@ -115,7 +128,7 @@ def write_unmapped_scaffold(outblocks, scaffold, stats, unmapped_output, genome)
                 print(scaffold, dblength, partslength, dbblock)
 
 
-def process_unmapped_scaffold(unmapped, scaffold, stats, genome):
+def process_unmapped_scaffold(unmapped, scaffold, stats, genome, chromosomes):
 
     collapse_unmapped_blocks(unmapped, stats)
     
@@ -128,7 +141,7 @@ def process_unmapped_scaffold(unmapped, scaffold, stats, genome):
         outblocks.append(unmapped[start])
 
         if i == len(starts)-1 or end+1 != unmapped[starts[i+1]].start:
-            write_unmapped_scaffold(outblocks, scaffold, stats, unmapped_output, genome)
+            write_unmapped_scaffold(outblocks, scaffold, stats, unmapped_output, genome, chromosomes)
             outblocks = []
 
     return unmapped_output
@@ -214,7 +227,7 @@ def reassemble(chromosomes, genome, args):
                             oldpart.parttype = "offcut_unmapped_removed"
         else:
             length = 0
-            unmapped_output = process_unmapped_scaffold(genome.blocks[scaffold], scaffold, unmapped_stats, genome)
+            unmapped_output = process_unmapped_scaffold(genome.blocks[scaffold], scaffold, unmapped_stats, genome, chromosomes)
             for unmapped_scaffold in unmapped_output:
                 assembly.append(unmapped_scaffold)
 
@@ -282,6 +295,8 @@ def output(assembly, chromosomes, revised):
 
     cm = open(revised+'_chromosome_map.tsv', 'w')
     cm.write("Chromosome\tcM\tStart\tEnd\tLength\n")
+
+    agp = open(revised+'_chromosomes.agp', 'w')
     for c in chromosomes:
         for mapline in chromosomes[c].scaffold_map:
             chromosome, pool, pooltype, poolid, scaffold, length = mapline.split('\t')
@@ -289,8 +304,14 @@ def output(assembly, chromosomes, revised):
             sm.write('\t'.join([chromosome, pool, pooltype, poolid, scaffold, length]))
         for mapline in chromosomes[c].chromosome_map:
             cm.write(mapline)
+
+        if 'unmapped' in chromosomes[c].agp[-1] and '\tN\t' in chromosomes[c].agp[-1]:
+            del chromosomes[c].agp[-1] # Final gap in unmapped scaffolds (Chromosome removes it from mapped scaffolds)
+        for agpline in chromosomes[c].agp:
+            agp.write(agpline)
     sm.close()
     cm.close()
+    agp.close()
 
 
 def get_args():
