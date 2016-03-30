@@ -110,14 +110,25 @@ connect.maps<-function(chrmap, geneticvp, physicalvp) {
             popViewport()
             pushViewport(physicalvp)
             midpoint = (as.numeric(x[3])+as.numeric(x[4]))/2
-            grid.line.to(unit(midpoint,"native"),0.05,gp=gpar(col=x[6],lwd=1,lty="dotted"))
-            grid.lines(unit(c(as.numeric(x[3])+20000,as.numeric(x[4])-20000),"native"),c(0.05,0.05),gp=gpar(col=x[6],lwd=2,lineend="butt"))
+            grid.line.to(unit(midpoint,"native"),0.043,gp=gpar(col=x[6],lwd=1,lty="dotted"))
+            grid.lines(unit(c(as.numeric(x[3]),as.numeric(x[4])),"native"),c(0.05,0.05),gp=gpar(col=x[6],lwd=2,lineend="butt"))
             popViewport()
         }
     )
 }
 
-plotchrom<-function(chr,chrmap, revisedmap, draftmap) {
+draw.breakpoints<-function(chr, physicalvp, breakpoints, chrsize) {
+    if (is.null(breakpoints)) return()
+    if (!(any(breakpoints$Chromosome==chr))) return()
+    
+    chrbreak<-breakpoints[breakpoints$Chromosome==chr,]
+    pushViewport(physicalvp)
+    grid.lines(unit(c(1,chrbreak$Start),"native"),c(0.07,0.07),gp=gpar(col='darkmagenta',lwd=2))
+    grid.lines(unit(c(chrbreak$End,chrsize),"native"),c(0.07,0.07),gp=gpar(col='sienna',lwd=2))
+    popViewport()
+}
+
+plotchrom<-function(chr,chrmap, revisedmap, draftmap, breakpoints) {
 
     grid.newpage()
 
@@ -144,6 +155,8 @@ plotchrom<-function(chr,chrmap, revisedmap, draftmap) {
         
     connect.maps(chrmap, geneticvp, revisedvp)
     
+    draw.breakpoints(chr, revisedvp, breakpoints, revised_size-1000000)
+    
     popViewport()
 }
 
@@ -151,10 +164,16 @@ read.delim(args[2])->scfmap
 read.delim(args[3])->chrmap
 read.delim(args[4])->draftmap
 
+breakpoints<-NULL
+if (length(args) > 4) {
+    read.delim(args[5])->breakpoints
+}
+chrmap<-chrmap[chrmap$cM != -1,]
+
 pdf(args[1], width=11.69, height=8.27)
 
 for (chr in 1:max(chrmap$Chromosome)) {
-    plotchrom(chr, chrmap[chrmap$Chromosome==chr,], scfmap[scfmap$Chromosome==chr,], draftmap[draftmap$Chromosome==chr,])
+    plotchrom(chr, chrmap[chrmap$Chromosome==chr,], scfmap[scfmap$Chromosome==chr,], draftmap[draftmap$Chromosome==chr,], breakpoints)
 }
 
 dev.off()

@@ -335,7 +335,7 @@ def transfer_chromosome_map(ci, co):
         print(sqle)
         sys.exit(1)
 
-def write_new_map(linkage_map, genome, output, ci):
+def write_new_map(linkage_map, genome, output, ci, collapse):
     conn_out, co = open_output_database(output + "_map.db")
 
     transfer_chromosome_map(ci, co)
@@ -353,7 +353,8 @@ def write_new_map(linkage_map, genome, output, ci):
 
     new_map.sort(key=lambda x: (x.oldname, x.oldstart))
 
-    collapse_map(new_map)
+    if collapse:
+        collapse_map(new_map)
 
     for mp in new_map:
         co.execute('insert into scaffold_map values (?,?,?,?,?,?,?,?)', [mp.chromosome, mp.cm, mp.oldname, mp.oldstart, mp.oldend, mp.oldend-mp.oldstart+1, mp.parttype, repr(mp.comment)])
@@ -895,6 +896,7 @@ def get_args():
         -c crossmap
         -f fasta
         -n newgenomefasta
+        -x collapseoff
         ''')
 
     parser.add_argument('-m', '--mergedgenome', type=str, required=True)
@@ -905,6 +907,7 @@ def get_args():
     parser.add_argument('-c', '--crossmap', type=str, required=False)
     parser.add_argument('-f', '--fasta', type=str, required=False)
     parser.add_argument('-n', '--newgenomefasta', type=str, required=False)
+    parser.add_argument('-x', '--collapse', action='store_false', default=True)
     return parser.parse_args()
 
 if __name__ == '__main__':
@@ -915,7 +918,7 @@ if __name__ == '__main__':
     
     if args.database:
         linkage_map, ci = load_linkage_map(args.database, args.errors, genome)
-        write_new_map(linkage_map, genome, args.output, ci)
+        write_new_map(linkage_map, genome, args.output, ci, args.collapse)
 
     collapse_removed(genome)
 

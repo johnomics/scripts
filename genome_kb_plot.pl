@@ -19,6 +19,7 @@ use English;
 use Getopt::Long;
 use File::Basename 'fileparse';
 use Data::Dumper;
+use POSIX qw /ceil/;
 
 my $output = "output";
 my $width  = 10;
@@ -26,14 +27,18 @@ my $height = 10;
 my $ysize  = 0;
 my $xsize  = 0;
 my $config = "";
+my $facet = '';
+my $eps = '';
 
 my $options_okay = GetOptions(
     'output=s' => \$output,
-    'width=i'  => \$width,
-    'height=i' => \$height,
+    'width=f'  => \$width,
+    'height=f' => \$height,
     'ysize=i'  => \$ysize,
     'xsize=i'  => \$xsize,
     'config=s' => \$config,
+    'facet'    => \$facet,
+    'eps'      => \$eps,
 );
 
 sub get_genome_files {
@@ -46,9 +51,9 @@ sub get_genome_files {
         chomp $configln;
         my ($name, $file, $colour) = split "\t", $configln;
         push @genomenames, $name;
-        push @genomecolours, $colour;
+        push @genomecolours, $colour if $colour;
         $genomefiles{$file}{name} = $name;
-        $genomefiles{$file}{colour} = $colour;
+        $genomefiles{$file}{colour} = $colour if $colour;
     }
     close $configfh;
     return \@genomenames, \@genomecolours, \%genomefiles;
@@ -73,6 +78,7 @@ else {
 }
 
 my %gls;
+my %gsizes;
 for my $genomefile (sort keys %genomefiles) {
 
     print "$genomefile\n";
@@ -100,6 +106,8 @@ for my $genomefile (sort keys %genomefiles) {
     $ysize = $genomesize if $genomesize > $ysize;
     $xsize = $scaffolds  if $scaffolds > $xsize;
     close $genome;
+    
+    $gsizes{$genomefile} = $genomesize;
 
     @{ $gls{$genomefile} } = sort { $b <=> $a } @{ $gls{$genomefile} };
 }
@@ -109,8 +117,14 @@ open my $tsv, '>', "$output.tsv" or croak "Can't open output TSV file $output.ts
 print $tsv "Genome\tScaffold\tGenomeLength\n";
 for my $gf (sort keys %genomefiles) {
     my $cumsum = 0;
+    my @milestones = (50, 90, 95);
     for my $i ( 0 .. $#{ $gls{$gf} } ) {
         $cumsum += $gls{$gf}[$i];
+        
+        if (@milestones and $cumsum > $gsizes{$gf} * ($milestones[0]/100)) {
+            print "$gf\tN$milestones[0]=". ($i+1) . "\tL$milestones[0]=$gls{$gf}[$i]\n";
+            shift @milestones
+        }
         print $tsv $genomefiles{$gf}{name} . "\t$i\t$cumsum\n";
     }
 }
@@ -123,10 +137,23 @@ print $rscript "library(scales)\n";
 print $rscript "genomecols<-c(" . join(",", @genomecolours) . ")\n" if @genomecolours;
 print $rscript "kb.df<-read.delim(\"$output.tsv\")\n";
 print $rscript "kb.df\$Genome<-factor(kb.df\$Genome, levels=c(\"". join("\",\"", @genomenames). "\"))\n";
-print $rscript "pdf(\"$output.pdf\", width=$width, height=$height)\n";
+if ($eps) {
+    print $rscript "postscript(\"$output.eps\", paper=\"special\", width=$width, heigh=$height, horizontal=FALSE)\n";
+}
+else {
+    print $rscript "pdf(\"$output.pdf\", width=$width, height=$height)\n";
+}
 
-print $rscript "ggplot(kb.df, aes(Scaffold, GenomeLength, colour=Genome)) + geom_line() + scale_x_continuous(limits=c(0, $xsize)) + scale_y_continuous(limits=c(0, $ysize),labels=comma)";
-print $rscript "+theme_bw(base_size = 22)+xlab(\"Number of scaffolds, ranked in order of size\")+ylab(\"Cumulative genome length in basepairs\")";
+my $ymultiple = 1 . 0 x (length($ysize) - 1);
+my $ymax = ceil($ysize/$ymultiple) * $ymultiple;
+if ($facet) {
+    print $rscript "ggplot(kb.df, aes(Scaffold, GenomeLength)) + geom_line() + facet_wrap(~Genome)";
+}
+else {
+    print $rscript "ggplot(kb.df, aes(Scaffold, GenomeLength, colour=Genome)) + geom_line()";
+}
+print $rscript " + scale_x_continuous(limits=c(0, $xsize)) + scale_y_continuous(limits=c(0, $ymax),breaks=seq(0,$ymax,$ymultiple),labels=seq(0,$ymax,$ymultiple)/1000000)";
+print $rscript "+theme_bw(base_size = 10)+xlab(\"Number of scaffolds, ranked in order of size\")+ylab(\"Cumulative genome length (Mb)\")";
 print $rscript "+scale_colour_manual(values=genomecols)" if @genomecolours;
 print $rscript "\n";
 print $rscript "dev.off()\n";
