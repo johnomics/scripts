@@ -47,6 +47,8 @@ for my $chr ( 1 .. $chromosomes ) {
     my %summary = get_markers( \%maternals, $crossprefix, $chr, \@snps, \@markers, \@markersnps, \%errors );
 
     my %patterns = get_patterns( \%summary, \%paternals, $chr );
+    
+    add_new_patterns(\%patterns, \%{$errors{$chr}});
 
     %patterns = reorder_map( \%patterns, defined $reverses{$chr}, $verbose );
 
@@ -173,7 +175,7 @@ sub get_markers {
         next if $marker_number !~ /^\d+$/;
 
         my $paternal_cm = $f[1];
-        if ( defined $errors->{$chr}{$paternal_cm} ) {
+        if ( defined $errors->{$chr}{$paternal_cm} and $errors->{$chr}{$paternal_cm} !~ /^[01]+$/) {
             next if $errors->{$chr}{$paternal_cm} eq '-';
             $paternal_cm = $errors->{$chr}{$paternal_cm};
         }
@@ -229,6 +231,16 @@ sub get_patterns {
         $patterns{$cM}{pos}   = $marker->{pos};
     }
     %patterns;
+}
+sub add_new_patterns {
+    my ($patterns, $errors) = @_;
+    for my $cM (keys %{$errors}) {
+        if ($errors->{$cM} =~ /^[01]+$/) {
+            $patterns->{$cM}{pattern} = $errors->{$cM};
+            $patterns->{$cM}{count} = 0;
+            $patterns->{$cM}{pos} = [];
+        }
+    }
 }
 
 sub reorder_map {
