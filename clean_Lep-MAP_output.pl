@@ -9,6 +9,10 @@ use Data::Dumper;
 use Getopt::Long;
 use Term::ExtendedColor qw/:all/;
 use List::Util qw/min max/;
+use Memoize;
+use Storable qw(dclone);
+
+memoize 'get_paternal_from_intercross';
 
 my $crossprefix = "";
 my $chromosomes = 0;
@@ -26,7 +30,7 @@ croak
   "Please specify a cross prefix with -p (to match existing files PREFIX_posteriors.gz, PREFIX_id.err, PREFIX_id.txt)"
   if $crossprefix eq "";
 croak "Please specify number of chromosomes with -c" if $chromosomes <= 0;
-croak "Please specify a species label with -l" if $species eq '';
+croak "Please specify a species label with -s" if $species eq '';
 
 croak "$crossprefix\_id.err does not exist" if !-e "$crossprefix\_id.err";
 croak "$crossprefix\_id.txt does not exist" if !-e "$crossprefix\_id.txt";
@@ -46,9 +50,9 @@ my %maternals;
 for my $chr ( 1 .. $chromosomes ) {
     my %summary = get_markers( \%maternals, $crossprefix, $chr, \@snps, \@markers, \@markersnps, \%errors );
 
-    my %patterns = get_patterns( \%summary, \%paternals, $chr );
-    
-    add_new_patterns(\%patterns, \%{$errors{$chr}});
+    my %patterns = get_patterns( \%summary, \%paternals, \%maternals, $chr );
+
+    add_new_patterns( \%patterns, \%{ $errors{$chr} } );
 
     %patterns = reorder_map( \%patterns, defined $reverses{$chr}, $verbose );
 
@@ -56,6 +60,7 @@ for my $chr ( 1 .. $chromosomes ) {
         $paternals{$chr}{$cM} = $patterns{$cM}{pattern};
     }
 }
+
 
 open my $markeroutput, ">", "$crossprefix.markers.tsv"
   or croak "Can't open $crossprefix.markers.tsv for writing\n";
@@ -65,6 +70,18 @@ write_maternals( \%maternals, $markeroutput );
 write_paternals( \%paternals, $markeroutput, 1 + keys %maternals );
 
 close $markeroutput;
+
+my $seenall = 1;
+for my $chr (sort {$a<=>$b} keys %errors) {
+    for my $cM (sort {$a<=>$b} keys %{$errors{$chr}}) {
+        if (not defined $errors{$chr}{$cM}{seen}) {
+            $seenall = 0;
+            print "Didn't see error $chr $cM $errors{$chr}{$cM}{fix}\n";
+        }
+    }
+}
+print "Processed all errors\n" if $seenall;
+
 
 my $end = time;
 print STDERR "End time: " . localtime($end) . "\n";
@@ -135,7 +152,7 @@ sub load_errors {
         while ( my $line = <$errorfile> ) {
             chomp $line;
             my ( $chromosome, $cM, $destination ) = split /\t/, $line;
-            $errors{$chromosome}{$cM} = $destination;
+            $errors{$chromosome}{$cM}{fix} = $destination;
         }
     }
     else {
@@ -175,9 +192,10 @@ sub get_markers {
         next if $marker_number !~ /^\d+$/;
 
         my $paternal_cm = $f[1];
-        if ( defined $errors->{$chr}{$paternal_cm} and $errors->{$chr}{$paternal_cm} !~ /^[01]+$/) {
-            next if $errors->{$chr}{$paternal_cm} eq '-';
-            $paternal_cm = $errors->{$chr}{$paternal_cm};
+        if ( defined $errors->{$chr}{$paternal_cm} and $errors->{$chr}{$paternal_cm}{fix} !~ /^[01]+$/ ) {
+            $errors->{$chr}{$paternal_cm}{seen}++;
+            next if $errors->{$chr}{$paternal_cm}{fix} eq '-';
+            $paternal_cm = $errors->{$chr}{$paternal_cm}{fix};
         }
 
         my $error = "-";
@@ -208,37 +226,57 @@ sub get_markers {
           if $marker->{type} != 2;
     }
     close $orderfile;
+
+    my $maternal =
+      ( sort { $maternals{$chr}{$b}{count} <=> $maternals{$chr}{$a}{count} } keys %{ $maternals{$chr} } )[0];
+    $maternals{$chr} = $maternal;
+
     %summary;
 }
 
-sub get_patterns {
-    my ( $summary, $paternals, $chr ) = @_;
-    my %patterns;
-    for my $cM ( sort { $a <=> $b } keys %{$summary} ) {
-        next if not defined $summary->{$cM}{1};
-        my $id = (
-            sort {
-                     $summary->{$cM}{1}{$a}{error} <=> $summary->{$cM}{1}{$b}{error}
-                  or $summary->{$cM}{1}{$b}{count} <=> $summary->{$cM}{1}{$a}{count}
-            } keys %{ $summary->{$cM}{1} }
-        )[0];
-        my $marker = $summary->{$cM}{1}{$id};
-        next if $marker->{error} != 0 or $marker->{paternal} =~ /\?/;
+sub get_id {
+    my $markertype = shift;
+    return (
+        sort {
+                 $markertype->{$a}{error} <=> $markertype->{$b}{error}
+              or $markertype->{$b}{count} <=> $markertype->{$a}{count}
+        } keys %{$markertype}
+    )[0];
+}
 
+sub get_patterns {
+    my ( $summary, $paternals, $maternals, $chr ) = @_;
+    my %patterns;
+
+    for my $cM ( sort { $a <=> $b } keys %{$summary} ) {
+        if ( not defined $summary->{$cM}{1} and defined $summary->{$cM}{3} ) {
+            my $id = get_id( $summary->{$cM}{3} );
+            $summary->{$cM}{1}{$id} = dclone $summary->{$cM}{3}{$id};
+            $summary->{$cM}{1}{$id}{maternal} = '?' x length( $summary->{$cM}{1}{$id}{maternal} );
+            $summary->{$cM}{1}{$id}{paternal} =
+              get_paternal_from_intercross( $summary->{$cM}{1}{$id}{paternal}, $maternals->{$chr} );
+        }
+        next if not defined $summary->{$cM}{1};
+        my $id     = get_id( $summary->{$cM}{1} );
+        my $marker = $summary->{$cM}{1}{$id};
+
+        next if $marker->{error} != 0 or $marker->{paternal} =~ /\?/;
         $patterns{$cM}{pattern} =
-          ( $marker->{phase} eq '0-' ) ? $marker->{paternal} : phase( $marker->{paternal} );
+          ( substr($marker->{phase}, 0, 1) eq '0' ) ? $marker->{paternal} : phase( $marker->{paternal} );
         $patterns{$cM}{count} = $marker->{count};
         $patterns{$cM}{pos}   = $marker->{pos};
     }
     %patterns;
 }
+
 sub add_new_patterns {
-    my ($patterns, $errors) = @_;
-    for my $cM (keys %{$errors}) {
-        if ($errors->{$cM} =~ /^[01]+$/) {
-            $patterns->{$cM}{pattern} = $errors->{$cM};
-            $patterns->{$cM}{count} = 0;
-            $patterns->{$cM}{pos} = [];
+    my ( $patterns, $errors ) = @_;
+    for my $cM ( keys %{$errors} ) {
+        if ( $errors->{$cM}{fix} =~ /^[01]+$/ ) {
+            $patterns->{$cM}{pattern} = $errors->{$cM}{fix};
+            $patterns->{$cM}{count}   = 0;
+            $patterns->{$cM}{pos}     = [];
+            $errors->{$cM}{seen}++;
         }
     }
 }
@@ -248,9 +286,10 @@ sub reorder_map {
 
     my @cMs = sort { $a <=> $b } keys %{$patterns};
 
-    my ( $numdiffs, $length ) = get_diffs( \@cMs, $patterns, $verbose );
+    my ( $diffs, $length ) = get_diffs( \@cMs, $patterns, $verbose );
     my @newcMs = ("0.000");
-    for my $numdiff ( @{$numdiffs} ) {
+    for my $diff ( @{$diffs} ) {
+        my $numdiff = $diff =~ tr/X//;
         my $r         = $numdiff / $length;
         my $kosambi   = log( ( 1 + 2 * $r ) / ( 1 - 2 * $r ) ) / 4;
         my $newcMdist = $kosambi * 100;
@@ -261,8 +300,13 @@ sub reorder_map {
         @newcMs = map { sprintf "%.3f", $maxcm - $_ } @newcMs;
     }
     my %newpatterns;
-    for my $i ( 0 .. $#cMs ) {
+    my @order = 0..$#newcMs;
+    for my $i ( $reverse ? reverse(@order) : @order ) {
         $newpatterns{ $newcMs[$i] } = $patterns->{ $cMs[$i] };
+        my $diffout = ($verbose and defined $diffs->[$i]) ? "\t\t$diffs->[$i]\n" : '';
+        print $diffout if $reverse;
+        print "$newcMs[$i]\t$cMs[$i]\t$patterns->{$cMs[$i]}{pattern}\t$patterns->{$cMs[$i]}{count}\t" . get_range( $patterns->{$cMs[$i]}{pos} ) . "\n" if $verbose;
+        print $diffout if not $reverse;
     }
     %newpatterns;
 }
@@ -270,7 +314,7 @@ sub reorder_map {
 sub get_diffs {
     my ( $cMs, $patterns, $verbose ) = @_;
     my @diffs;
-    my @numdiffs;
+    my @output;
     my $length = 0;
     for my $i ( 1 .. $#{$cMs} - 1 ) {
         $length = length $patterns->{ $cMs->[$i] }{pattern};
@@ -280,13 +324,10 @@ sub get_diffs {
         my $last_to_this = @diffs ? $diffs[-1] : join '', map { $last[$_] eq $this[$_] ? ' ' : 'X' } 0 .. $#this;
         if ( not @diffs ) {
             push @diffs,    $last_to_this;
-            push @numdiffs, $last_to_this =~ tr/X//;
-            print_marker( $cMs->[ $i - 1 ], $patterns ) if $verbose;
         }
 
         my $this_to_next = join '', map { $this[$_] eq $next[$_] ? ' ' : 'X' } 0 .. $#this;
         push @diffs,    $this_to_next;
-        push @numdiffs, $this_to_next =~ tr/X//;
 
         my @last_diffs = split //, $diffs[-2];
         my @this_diffs = split //, $diffs[-1];
@@ -299,17 +340,8 @@ sub get_diffs {
         $diffs[-2] = join '', @last_diffs;
         $diffs[-1] = join '', @this_diffs;
 
-        print "\t$diffs[-2]\t$numdiffs[-2]\n" if $verbose;
-        print_marker( $cMs->[$i], $patterns ) if $verbose;
     }
-    print "\t$diffs[-1]\t$numdiffs[-1]\n" if $verbose;
-    print_marker( $cMs->[-1], $patterns ) if $verbose;
-    \@numdiffs, $length;
-}
-
-sub print_marker {
-    my ( $cM, $patterns ) = @_;
-    print "$cM\t$patterns->{$cM}{pattern}\t$patterns->{$cM}{count}\t" . get_range( $patterns->{$cM}{pos} ) . "\n";
+    \@diffs, $length;
 }
 
 sub get_range {
@@ -330,10 +362,7 @@ sub get_range {
 sub write_maternals {
     my ( $maternals, $markeroutput ) = @_;
     for my $chr ( sort { $a <=> $b } keys %{$maternals} ) {
-        my $maternal =
-          ( sort { $maternals->{$chr}{$b}{count} <=> $maternals->{$chr}{$a}{count} } keys %{ $maternals->{$chr} } )[0];
-        $maternal = $maternal;
-        print $markeroutput "$chr\t$chr\t-1\t2\t$maternal\n";
+        print $markeroutput "$chr\t$chr\t-1\t2\t$maternals->{$chr}\n";
     }
 }
 
@@ -357,4 +386,32 @@ sub phase {
     $marker = $marker;
     $marker =~ tr/01/10/;
     return $marker;
+}
+
+sub get_paternal_from_intercross {
+    my $print    = shift;
+    my $maternal = shift;
+
+    my @intgts = split //, $print;
+
+    my $mirror = $maternal;
+    $mirror =~ tr/01/10/;
+
+    my $matpat = make_paternal( \@intgts, $maternal );
+    my $mirpat = make_paternal( \@intgts, $mirror );
+
+    $matpat =~ tr/?// < $mirpat =~ tr/?// ? $matpat : $mirpat;
+}
+
+sub make_paternal {
+    my ( $intgts, $maternal ) = @_;
+    my @matgts = split //, $maternal;
+    my $paternal;
+    my @patgts;
+    for my $i ( 0 .. $#{$intgts} ) {
+        my $pgt = ( $intgts->[$i] eq '?' ) ? '?' : $intgts->[$i] - $matgts[$i];
+        $pgt = ( $pgt eq '?' or $pgt != 0 and $pgt != 1 ) ? '?' : $pgt;
+        push @patgts, $pgt;
+    }
+    join '', @patgts;
 }

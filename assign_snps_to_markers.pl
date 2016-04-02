@@ -271,7 +271,7 @@ sub write_new_markers {
 
     for my $nmi (@newmarker_ids) {
         my $m = $markers->{$nmi};
-        print $newmarkersout "$nmi\t$m->{chromosome}\t$m->{cM}\t$m->{type}\t$m->{pattern}\t0\n";
+        print $newmarkersout "$nmi\t$m->{chromosome}\t$m->{cM}\t$m->{type}\t$m->{pattern}\n";
     }
     close $newmarkersout;
 }
