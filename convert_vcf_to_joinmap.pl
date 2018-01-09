@@ -200,22 +200,34 @@ while ( my $vcf_line = <$vcf_file> ) {
         }
     }
     next if ($skip_line);
+
+    $average_depth /= @offspring;
+    $average_qual  /= @offspring;
   
     my $male_depth = 0;
     my $male_qual  = 0;
 
-    foreach my $male (@males) {
-        $male_depth += $base{$male}{dp};
-        $male_qual  += $base{$male}{gq};
+    if (@males) {
+        foreach my $male (@males) {
+            $male_depth += $base{$male}{dp};
+            $male_qual  += $base{$male}{gq};
+        }
+        $male_depth    /= @males;
+        $male_qual     /= @males;
     }
-
+    
     my $female_depth = 0;
     my $female_qual  = 0;
-    foreach my $female (@females) {
-        $female_depth += $base{$female}{dp};
-        $female_qual  += $base{$female}{gq};
+    
+    if (@females) {
+        foreach my $female (@females) {
+            $female_depth += $base{$female}{dp};
+            $female_qual  += $base{$female}{gq};
+        }
+        $female_depth  /= @females;
+        $female_qual   /= @females;
     }
-
+    
     my $pos_dp = 0;
     my $pos_mq = 0;
     if ( $fields[7] =~ /DP=(\d+?);/ ) {
@@ -225,12 +237,6 @@ while ( my $vcf_line = <$vcf_file> ) {
         $pos_mq = $1;
     }
     chop $joinmap_marker;
-    $average_depth /= @offspring;
-    $average_qual  /= @offspring;
-    $female_depth  /= @females;
-    $female_qual   /= @females;
-    $male_depth    /= @males;
-    $male_qual     /= @males;
     $joinmap{$marker_type}{$joinmap_marker}{"$scaffold:$fields[1]"}{dp} =
       int $average_depth;
     $joinmap{$marker_type}{$joinmap_marker}{"$scaffold:$fields[1]"}{gq} =
