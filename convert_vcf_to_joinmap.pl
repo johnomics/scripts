@@ -32,16 +32,18 @@ my $father_name        = "";
 my $prefix             = "";
 my $offspring_filename = "";
 my $uncalled_genotypes = 0;
+my $reject_singletons  = 0;
 
 my $options_okay = GetOptions(
-    'help|h'        => \$help,
-    'vcf=s'         => \$vcf_filename,
-    'quality=i'     => \$qthreshold,
-    'mother_name=s' => \$mother_name,
-    'father_name=s' => \$father_name,
-    'prefix=s'      => \$prefix,
-    'offspring=s'   => \$offspring_filename,
-    'uncalled=i'    => \$uncalled_genotypes,
+    'help|h'            => \$help,
+    'vcf=s'             => \$vcf_filename,
+    'quality=i'         => \$qthreshold,
+    'mother_name=s'     => \$mother_name,
+    'father_name=s'     => \$father_name,
+    'prefix=s'          => \$prefix,
+    'offspring=s'       => \$offspring_filename,
+    'uncalled=i'        => \$uncalled_genotypes,
+    'reject_singletons' => \$reject_singletons
 ) or pod2usage( -exitval => 3, -verbose => 0 );
 
 pod2usage( -exitval => 5, -verbose => 1 ) if $help;
@@ -273,7 +275,7 @@ foreach my $type ( sort keys %joinmap ) {
         # or appearing more than once on one scaffold
         my $check_marker_num = 0;
         my $num_bases        = scalar keys %{ $joinmap{$type}{$marker} };
-        next if ( $num_bases <= 1 );
+        next if $reject_singletons and $num_bases <= 1;
         $marker_num++;
         my $output_type   = $type;
         print $joinmap_file
