@@ -138,7 +138,7 @@ while ( my $vcf_line = <$vcf_file> ) {
             next;
         }
         my @sample_fields = split /:/, $fields[$i];
-        if (($gq_field_num > -1) && ( $sample_fields[$gq_field_num] < $qthreshold )) {
+        if (($gq_field_num > -1) && ( not defined $sample_fields[$gq_field_num] or $sample_fields[$gq_field_num] < $qthreshold )) {
             if (($sample_names[$i-9] ne $mother_name) && ($sample_names[$i-9] ne $father_name)) {$missing++;}
             if ( $missing > $uncalled_genotypes ) { $skip_line++; last; }
 
@@ -193,8 +193,8 @@ while ( my $vcf_line = <$vcf_file> ) {
             && ( defined $f2_genotypes{ $base{$offspring}{gt} } ) )
         {
             $joinmap_marker .= "$f2_genotypes{$base{$offspring}{gt}} ";
-            $average_depth += $base{$offspring}{dp};
-            $average_qual  += $base{$offspring}{gq};
+            $average_depth += $base{$offspring}{dp} // 0;
+            $average_qual  += $base{$offspring}{gq} // 0;
         }
         else {
             $skip_line++;
@@ -211,8 +211,8 @@ while ( my $vcf_line = <$vcf_file> ) {
 
     if (@males) {
         foreach my $male (@males) {
-            $male_depth += $base{$male}{dp};
-            $male_qual  += $base{$male}{gq};
+            $male_depth += $base{$male}{dp} // 0;
+            $male_qual  += $base{$male}{gq} // 0;
         }
         $male_depth    /= @males;
         $male_qual     /= @males;
@@ -223,8 +223,8 @@ while ( my $vcf_line = <$vcf_file> ) {
     
     if (@females) {
         foreach my $female (@females) {
-            $female_depth += $base{$female}{dp};
-            $female_qual  += $base{$female}{gq};
+            $female_depth += $base{$female}{dp} // 0;
+            $female_qual  += $base{$female}{gq} // 0;
         }
         $female_depth  /= @females;
         $female_qual   /= @females;
@@ -269,7 +269,7 @@ print $pattern_file
 my $marker_num = 0;
 foreach my $type ( sort keys %joinmap ) {
     my $scf_marker = 0;
-    foreach my $marker ( keys %{ $joinmap{$type} } ) {
+    foreach my $marker ( sort keys %{ $joinmap{$type} } ) {
 
         # Output markers appearing on more than one scaffold
         # or appearing more than once on one scaffold
