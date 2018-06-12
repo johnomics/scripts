@@ -138,7 +138,11 @@ while ( my $vcf_line = <$vcf_file> ) {
             next;
         }
         my @sample_fields = split /:/, $fields[$i];
-        if (($gq_field_num > -1) && ( not defined $sample_fields[$gq_field_num] or $sample_fields[$gq_field_num] < $qthreshold )) {
+        if (($gq_field_num > -1) and 
+            ( not defined $sample_fields[$gq_field_num] or 
+              $sample_fields[$gq_field_num] eq '.' or 
+              $sample_fields[$gq_field_num] < $qthreshold )
+            ) {
             if (($sample_names[$i-9] ne $mother_name) && ($sample_names[$i-9] ne $father_name)) {$missing++;}
             if ( $missing > $uncalled_genotypes ) { $skip_line++; last; }
 
