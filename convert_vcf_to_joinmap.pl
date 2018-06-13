@@ -153,8 +153,15 @@ while ( my $vcf_line = <$vcf_file> ) {
               $sample_fields[$gt_field_num];
         }
 
-        $base{ $sample_names[ $i - 9 ] }{dp} = $sample_fields[$dp_field_num];
-        $base{ $sample_names[ $i - 9 ] }{gq} = $sample_fields[$gq_field_num] if $gq_field_num > -1;
+        $base{ $sample_names[ $i - 9 ] }{dp} = $sample_fields[$dp_field_num] // 0;
+        $base{ $sample_names[ $i - 9 ] }{dp} = 0 if $base{ $sample_names[ $i - 9 ] }{dp} eq '.';
+
+        if ($gq_field_num > -1) {
+            $base{ $sample_names[ $i - 9 ] }{gq} = $sample_fields[$gq_field_num] // 0;
+            $base{ $sample_names[ $i - 9 ] }{gq} = 0 if $base{ $sample_names[ $i - 9 ] }{gq} eq '.';
+        }
+        
+
     }
     next if ($skip_line);
     $bases_w_complete_calls_above_qthres++;
