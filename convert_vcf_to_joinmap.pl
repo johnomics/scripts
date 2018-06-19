@@ -101,8 +101,10 @@ while ( my $vcf_line = <$vcf_file> ) {
     if ( $vcf_line =~ /^#CHROM/ ) {
         @sample_names = split /\t/, $vcf_line;
         for my $i ( 0 .. 8 ) { shift @sample_names; }
-
-        #        map { s/PstI\.// } @sample_names;
+        if (@sample_names != @offspring+2) {
+            print "Found " . @sample_names . " offspring in VCF file but " . (@offspring+2) . " in sample file, exiting\n";
+            exit;
+        }
     }
     next if ( $vcf_line =~ /^#/ );
 
@@ -131,6 +133,7 @@ while ( my $vcf_line = <$vcf_file> ) {
     }
 
     for my $i ( 9 .. ( @sample_names + 8 ) ) {
+
         if ( $fields[$i] eq "./." ) {
             $base{ $sample_names[ $i - 9 ] }{gt} = "-/-";
             $base{ $sample_names[ $i - 9 ] }{dp} = 0;
@@ -161,8 +164,8 @@ while ( my $vcf_line = <$vcf_file> ) {
             $base{ $sample_names[ $i - 9 ] }{gq} = 0 if $base{ $sample_names[ $i - 9 ] }{gq} eq '.';
         }
         
-
     }
+
     next if ($skip_line);
     $bases_w_complete_calls_above_qthres++;
     my $f1pattern = "$base{$father_name}{gt} $base{$mother_name}{gt}";
@@ -199,6 +202,7 @@ while ( my $vcf_line = <$vcf_file> ) {
     my $joinmap_marker = "";
     my $average_depth  = 0;
     my $average_qual   = 0;
+
     foreach my $offspring (@offspring) {
         if (   ( defined $base{$offspring}{gt} )
             && ( defined $f2_genotypes{ $base{$offspring}{gt} } ) )
@@ -212,6 +216,7 @@ while ( my $vcf_line = <$vcf_file> ) {
             last;
         }
     }
+
     next if ($skip_line);
 
     $average_depth /= @offspring;
